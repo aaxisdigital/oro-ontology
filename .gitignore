@@ -2,3 +2,6 @@
 /composer.lock
 /node_modules/
 .DS_Store
+
+# Compiled TypeScript output — generated from Resources/js-src at asset-build time (not committed).
+/Resources/public/js/

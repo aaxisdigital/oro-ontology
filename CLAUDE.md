@@ -126,10 +126,11 @@ add/change one, touch all of them:
 
 ## JS / TypeScript — NEVER hand-edit the compiled `.js`
 
-`.ts` sources live in `Resources/js-src/`; the committed `.js` in `Resources/public/js/` is
-**generated** by `tsc` (CommonBundle's `TypeScriptCompiler`, wired in `services.yml` and run on
-`oro:assets:build` via `CompileTypeScriptOnAssetsBuildListener`). Edit only the `.ts`. Both `.ts`
-and `.js` are committed.
+`.ts` sources live in `Resources/js-src/`; the `.js` in `Resources/public/js/` is **generated** by
+`tsc` (CommonBundle's `TypeScriptCompiler`, wired in `services.yml` and run on `oro:assets:build` via
+`CompileTypeScriptOnAssetsBuildListener`). Edit only the `.ts`. **Only the `.ts` is committed** — the
+emitted `.js` is git-ignored and rebuilt at asset-build time (the build fails loudly if `tsc` is
+missing, and recompiles even under `vendor/aaxisdigital/oro*`).
 
 **REQUIRED after ANY TypeScript change** — the browser loads from the webpack `public/build/`
 output, NOT from `Resources/public/js`, so regenerating the `.js` alone is not enough:
