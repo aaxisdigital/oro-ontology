@@ -1,0 +1,16 @@
+{
+    "extends": "./tsconfig.base.json",
+    "compilerOptions": {
+        "rootDir": ".",
+        "outDir": "../public/js",
+        "paths": {
+            "aaxiscommon/js/app/widgets/*": ["../../vendor/aaxisdigital/oro-common/Resources/public/js/app/widgets/*"]
+        }
+    },
+    "include": [
+        "**/*.ts"
+    ],
+    "exclude": [
+        "../public/js"
+    ]
+}

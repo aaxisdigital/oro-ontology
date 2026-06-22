@@ -1,0 +1,33 @@
+{% extends '@OroUI/actions/index.html.twig' %}
+
+{% set pageTitle = 'aaxis.ontology.event.entity_plural_label'|trans %}
+
+{% block content %}
+    <div class="layout-content">
+        <div class="content"
+             data-page-component-module="aaxisontology/js/app/components/event-component">
+
+            <div class="container-fluid page-title">
+                <div class="aaxis-ontology-sys__titlebar">
+                    <h1 class="page-title__entity-title aaxis-ontology-sys__title">
+                        {{ 'aaxis.ontology.event.entity_plural_label'|trans }}
+                    </h1>
+                    <button type="button" class="aaxis-ontology-sys__settings" data-role="refresh"
+                            title="{{ 'aaxis.common.grid.refresh'|trans }}"
+                            aria-label="{{ 'aaxis.common.grid.refresh'|trans }}">
+                        <span class="fa fa-refresh" aria-hidden="true"></span>
+                    </button>
+                    <button type="button" class="aaxis-ontology-sys__settings" data-role="columns-settings"
+                            title="{{ 'aaxis.common.grid.columns_title'|trans }}"
+                            aria-label="{{ 'aaxis.common.grid.columns_title'|trans }}">
+                        <span class="fa fa-cog" aria-hidden="true"></span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="aaxis-ontology-sys" data-role="layout">
+                <div class="aaxis-ontology-sys__list" data-role="list" aria-live="polite"></div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

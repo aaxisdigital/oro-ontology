@@ -1,0 +1,371 @@
+/* @theme: admin.oro; */
+
+// --- Page shell (shared by System & Entity pages) ---------------------------
+
+.aaxis-ontology-sys {
+    position: relative;
+    padding: 16px 0;
+
+    &__titlebar {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+    }
+
+    &__title {
+        margin: 0;
+        flex: 1 1 auto;
+    }
+
+    &__add {
+        flex: 0 0 auto;
+    }
+
+    &__settings {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: #5c6b7a;
+        cursor: pointer;
+
+        &:hover {
+            background: #f0f3f6;
+            color: #2b3a4a;
+        }
+
+        .fa {
+            display: block;
+            font-size: 15px;
+            line-height: 1;
+            transform-origin: center center;
+        }
+    }
+
+    &__busy {
+        flex: 0 0 auto;
+        font-size: 16px;
+        color: #8a98a6;
+
+        &[hidden] {
+            display: none;
+        }
+    }
+}
+
+
+.aaxis-attr-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+
+    &__info {
+        color: #2b6cb0;
+        cursor: help;
+        font-size: 13px;
+    }
+}
+
+// Data View payload cell
+.aaxis-data-payload {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+
+    &__text {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: monospace;
+        font-size: 12px;
+        color: #5c6b7a;
+    }
+
+    &__preview {
+        flex: 0 0 auto;
+        border: 0;
+        background: transparent;
+        padding: 0 2px;
+        color: #2b6cb0;
+        cursor: pointer;
+
+        &:hover {
+            color: #1b3a5b;
+        }
+    }
+}
+
+// Pretty-printed JSON in a dialog
+.aaxis-json-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.aaxis-json-search {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+
+    &__input {
+        flex: 1 1 auto;
+        width: auto !important;
+        max-width: none !important;
+        min-width: 0;
+        height: 30px !important;
+        min-height: 30px !important;
+    }
+
+    &__count {
+        font-size: 12px;
+        color: #8a98a6;
+        white-space: nowrap;
+        min-width: 44px;
+        text-align: right;
+    }
+
+    // Borderless navigation icons (previous / next match).
+    &__nav {
+        flex: 0 0 auto;
+        width: 28px;
+        height: 28px;
+        border: 0;
+        background: transparent;
+        color: #5b6b7b;
+        cursor: pointer;
+        border-radius: 4px;
+
+        &:hover {
+            background: #f0f3f6;
+            color: #2b3a4a;
+        }
+    }
+}
+
+.aaxis-json-footer {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+}
+
+.aaxis-json-mark {
+    background: #fff3b0;
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+
+    &.is-current {
+        background: #ffb454;
+    }
+}
+
+.aaxis-json-view {
+    margin: 0;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid #e4e9ee;
+    border-radius: 4px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre;
+    overflow: auto;
+    max-height: 60vh;
+    color: #2b3a4a;
+}
+
+.aaxis-json-key {
+    color: #1f6feb;
+}
+
+.aaxis-json-str {
+    color: #1a7f37;
+}
+
+.aaxis-json-num {
+    color: #b35900;
+}
+
+.aaxis-json-bool {
+    color: #cf222e;
+}
+
+.aaxis-json-null {
+    color: #8a98a6;
+    font-style: italic;
+}
+
+// Version history dialog
+.aaxis-json-version {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+
+    &__label {
+        flex: 0 0 auto;
+        margin: 0;
+        font-size: 12px;
+        color: #5b6b7b;
+    }
+
+    &__select {
+        flex: 1 1 auto;
+        width: auto;
+        height: 30px !important;
+        min-height: 30px !important;
+    }
+}
+
+// A value that differs from the current version.
+.aaxis-json-changed {
+    background: #fff3b0;
+    border-radius: 2px;
+    padding: 0 1px;
+}
+
+// A key that was not present in the selected (older) version.
+.aaxis-json-absent {
+    background: #fff3b0;
+    border-radius: 2px;
+    text-decoration: line-through;
+    opacity: 0.7;
+}
+
+
+// --- Add Data form ----------------------------------------------------------
+
+.aaxis-data-form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+
+    // Inside the form, spacing comes from the flex gap, not per-field margins, so cells in a
+    // row stay the same height and their controls/labels line up.
+    .aaxis-rfm__field {
+        margin-bottom: 0;
+    }
+
+    &__row {
+        display: grid;
+        gap: 16px;
+    }
+
+    // Form controls fill their column; inputs/selects share a fixed height so rows line up.
+    .form-control {
+        width: 100% !important;
+        max-width: none !important;
+        box-sizing: border-box;
+    }
+
+    input.form-control,
+    select.form-control {
+        height: 36px !important;
+        min-height: 36px !important;
+    }
+
+    textarea.form-control {
+        height: auto !important;
+    }
+
+    .aaxis-rfm__label {
+        min-height: 20px;
+        margin: 0;
+    }
+
+    &__row--2 {
+        grid-template-columns: 1fr 1fr;
+        align-items: end;
+    }
+
+    // Row 1: System (30%) + Entity (40%) + Format (20%).
+    &__row--sem {
+        grid-template-columns: 3fr 4fr 2fr;
+        align-items: end;
+    }
+
+    // Footer (Cancel/Submit). No horizontal padding: it sits inside the dialog body's own padding,
+    // so the right edge lines up with the payload textarea.
+    &__footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid #eef1f4;
+    }
+
+    &__inline {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+
+        .select2-container {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+    }
+
+    &__clear {
+        flex: 0 0 auto;
+        width: 36px;
+        height: 36px;
+        border: 1px solid #d6dde4;
+        border-radius: 4px;
+        background: #fff;
+        color: #8a98a6;
+        cursor: pointer;
+
+        &:hover {
+            background: #f0f3f6;
+            color: #c0392b;
+        }
+    }
+
+    // Wand icon beside the Format combobox — just the icon, no button box. Sized to the control
+    // height so it stays vertically centred with the combobox.
+    &__wand {
+        flex: 0 0 auto;
+        height: 36px;
+        padding: 0 4px;
+        border: 0;
+        background: transparent;
+        color: #5b6b7b;
+        font-size: 16px;
+        cursor: pointer;
+
+        &:hover {
+            color: #1b3a5b;
+        }
+    }
+
+    &__payload {
+        width: 100%;
+        min-height: 200px;
+        box-sizing: border-box;
+        font-family: monospace;
+        font-size: 12.5px;
+    }
+
+    &__payload-error {
+        color: #c0392b;
+        font-size: 12px;
+
+        &:empty {
+            display: none;
+        }
+    }
+}

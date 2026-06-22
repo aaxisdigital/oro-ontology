@@ -1,0 +1,39 @@
+features:
+    aaxis_ontology:
+        label: aaxis.ontology.feature.label
+        toggle: aaxis_ontology.enabled
+        navigation_items:
+            - application_menu.aaxis_tab.aaxis_ontology
+            - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_systems
+            - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_entities
+            - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_connectors
+            - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_flows
+            - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_events
+            - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_data_view
+        routes:
+            - aaxis_ontology_systems
+            - aaxis_ontology_system_list
+            - aaxis_ontology_system_api_create
+            - aaxis_ontology_system_api_update
+            - aaxis_ontology_system_delete
+            - aaxis_ontology_entities
+            - aaxis_ontology_entity_list
+            - aaxis_ontology_entity_api_create
+            - aaxis_ontology_entity_api_update
+            - aaxis_ontology_entity_delete
+            - aaxis_ontology_connectors
+            - aaxis_ontology_connector_view
+            - aaxis_ontology_connector_create
+            - aaxis_ontology_connector_update
+            - aaxis_ontology_connector_delete
+            - aaxis_ontology_flows
+            - aaxis_ontology_flow_list
+            - aaxis_ontology_events
+            - aaxis_ontology_event_list
+            - aaxis_ontology_data_view
+            - aaxis_ontology_data_list
+            - aaxis_ontology_data_versions
+            - aaxis_ontology_data_create
+            - aaxis_ontology_api_data_read
+            - aaxis_ontology_api_data_upsert
+            - aaxis_ontology_api_data_query

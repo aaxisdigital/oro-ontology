@@ -1,0 +1,61 @@
+services:
+    _defaults:
+        autowire: false
+        autoconfigure: false
+        public: false
+
+    # Shared TypeScript build pipeline (classes live in AaxisCommonBundle).
+    aaxis_ontology.typescript_compiler:
+        class: Aaxis\Bundle\CommonBundle\Build\TypeScriptCompiler
+        arguments:
+            - '%kernel.project_dir%'
+            - '@logger'
+            - '%aaxis_ontology.bundle_dir%/Resources/js-src/tsconfig.json'
+            - 'AaxisOntologyBundle'
+
+    aaxis_ontology.typescript_compile_command:
+        class: Aaxis\Bundle\CommonBundle\Command\CompileTypeScriptCommand
+        arguments:
+            - '@aaxis_ontology.typescript_compiler'
+            - 'aaxis:ontology:typescript:compile'
+        tags:
+            - { name: console.command, command: 'aaxis:ontology:typescript:compile' }
+
+    aaxis_ontology.compile_typescript_on_assets_build_listener:
+        class: Aaxis\Bundle\CommonBundle\EventListener\CompileTypeScriptOnAssetsBuildListener
+        arguments:
+            - '@aaxis_ontology.typescript_compiler'
+        tags:
+            - { name: kernel.event_subscriber }
+
+    # Syncs entity attribute definitions with written data and enforces the attribute contract.
+    Aaxis\Bundle\OntologyBundle\Manager\OntologyAttributeReconciler:
+        arguments:
+            - '@doctrine'
+
+    # Reusable Data API core (read / upsert / query), shared by the HTTP API controller and any
+    # other PHP code that needs the same operations.
+    Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager:
+        public: true
+        arguments:
+            - '@doctrine'
+            - '@oro_message_queue.client.message_producer'
+            - '@oro_config.global'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyAttributeReconciler'
+
+    # Connector CRUD form type
+    Aaxis\Bundle\OntologyBundle\Form\Type\OntologyConnectorType:
+        tags:
+            - { name: form.type }
+
+    # Message queue: data upsert
+    Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyDataUpsertTopic:
+        tags:
+            - { name: oro_message_queue.topic }
+
+    Aaxis\Bundle\OntologyBundle\Async\OntologyDataUpsertProcessor:
+        arguments:
+            - '@doctrine'
+            - '@logger'
+        tags:
+            - { name: oro_message_queue.client.message_processor }

@@ -1,0 +1,3 @@
+bundles:
+    # Auto-registered by the Oro kernel (OroKernel scans for Resources/config/oro/bundles.yml).
+    - { name: Aaxis\Bundle\OntologyBundle\AaxisOntologyBundle }

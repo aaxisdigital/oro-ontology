@@ -1,0 +1,11 @@
+aaxis_ontology:
+    resource: "@AaxisOntologyBundle/Controller"
+    type: attribute
+    prefix: /aaxis/ontology
+
+# OAuth Data API. No prefix here — the controller's #[Route] paths already start with /api/...,
+# and Oro's RouteCollectionListener prepends the back-office prefix, so they resolve under
+# /admin/api/aaxis/ontology/... (inside the stateless OAuth "api_secured" firewall).
+aaxis_ontology_api:
+    resource: "@AaxisOntologyBundle/Api/OntologyDataApiController.php"
+    type: attribute

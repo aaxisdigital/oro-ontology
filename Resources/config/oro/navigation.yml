@@ -1,0 +1,80 @@
+navigation:
+    menu_config:
+        items:
+            aaxis_ontology:
+                label: 'aaxis.ontology.menu.aaxis_ontology.label'
+                uri: '#'
+                position: 20
+                extras:
+                    icon: fa-database
+                    description: 'aaxis.ontology.menu.aaxis_ontology.description'
+
+            aaxis_ontology_systems:
+                label: 'aaxis.ontology.menu.aaxis_ontology_systems.label'
+                route: 'aaxis_ontology_systems'
+                position: 10
+                extras:
+                    routes: ['aaxis_ontology_systems']
+                    description: 'aaxis.ontology.menu.aaxis_ontology_systems.description'
+
+            aaxis_ontology_entities:
+                label: 'aaxis.ontology.menu.aaxis_ontology_entities.label'
+                route: 'aaxis_ontology_entities'
+                position: 20
+                extras:
+                    routes: ['aaxis_ontology_entities']
+                    description: 'aaxis.ontology.menu.aaxis_ontology_entities.description'
+
+            aaxis_ontology_connectors:
+                label: 'aaxis.ontology.menu.aaxis_ontology_connectors.label'
+                route: 'aaxis_ontology_connectors'
+                position: 30
+                extras:
+                    routes: ['aaxis_ontology_connectors', 'aaxis_ontology_connector_create', 'aaxis_ontology_connector_update', 'aaxis_ontology_connector_view']
+                    description: 'aaxis.ontology.menu.aaxis_ontology_connectors.description'
+
+            aaxis_ontology_flows:
+                label: 'aaxis.ontology.menu.aaxis_ontology_flows.label'
+                route: 'aaxis_ontology_flows'
+                position: 40
+                extras:
+                    routes: ['aaxis_ontology_flows']
+                    description: 'aaxis.ontology.menu.aaxis_ontology_flows.description'
+
+            aaxis_ontology_events:
+                label: 'aaxis.ontology.menu.aaxis_ontology_events.label'
+                route: 'aaxis_ontology_events'
+                position: 50
+                extras:
+                    routes: ['aaxis_ontology_events']
+                    description: 'aaxis.ontology.menu.aaxis_ontology_events.description'
+
+            aaxis_ontology_data_view:
+                label: 'aaxis.ontology.menu.aaxis_ontology_data_view.label'
+                route: 'aaxis_ontology_data_view'
+                position: 60
+                extras:
+                    routes: ['aaxis_ontology_data_view']
+                    description: 'aaxis.ontology.menu.aaxis_ontology_data_view.description'
+
+        tree:
+            application_menu:
+                children:
+                    aaxis_tab:
+                        children:
+                            aaxis_ontology:
+                                children:
+                                    aaxis_ontology_systems: ~
+                                    aaxis_ontology_entities: ~
+                                    aaxis_ontology_connectors: ~
+                                    aaxis_ontology_flows: ~
+                                    aaxis_ontology_events: ~
+                                    aaxis_ontology_data_view: ~
+
+    titles:
+        aaxis_ontology_systems: 'aaxis.ontology.menu.aaxis_ontology_systems.label'
+        aaxis_ontology_entities: 'aaxis.ontology.menu.aaxis_ontology_entities.label'
+        aaxis_ontology_connectors: 'aaxis.ontology.menu.aaxis_ontology_connectors.label'
+        aaxis_ontology_flows: 'aaxis.ontology.menu.aaxis_ontology_flows.label'
+        aaxis_ontology_events: 'aaxis.ontology.menu.aaxis_ontology_events.label'
+        aaxis_ontology_data_view: 'aaxis.ontology.menu.aaxis_ontology_data_view.label'

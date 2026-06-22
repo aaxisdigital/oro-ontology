@@ -1,0 +1,4 @@
+css:
+    inputs:
+        # Ontology - System/Entity/Data View (TypeScript-driven UI) styles.
+        - 'bundles/aaxisontology/css/scss/ontology.scss'

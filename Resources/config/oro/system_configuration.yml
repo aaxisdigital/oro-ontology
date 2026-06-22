@@ -1,0 +1,84 @@
+system_configuration:
+    groups:
+        aaxis_ontology:
+            title: aaxis.ontology.config.group.title
+            icon: fa-database
+        aaxis_ontology_general:
+            title: aaxis.ontology.config.general.title
+        aaxis_ontology_api:
+            title: aaxis.ontology.config.api.title
+
+    fields:
+        aaxis_ontology.enabled:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.enabled.label
+                required: false
+
+        # --- Data HTTP API ---
+        aaxis_ontology.api_read_enabled:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.api.read_enabled.label
+                tooltip: aaxis.ontology.config.api.read_enabled.tooltip
+                required: false
+        aaxis_ontology.api_upsert_enabled:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.api.upsert_enabled.label
+                tooltip: aaxis.ontology.config.api.upsert_enabled.tooltip
+                required: false
+        aaxis_ontology.api_query_enabled:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.api.query_enabled.label
+                tooltip: aaxis.ontology.config.api.query_enabled.tooltip
+                required: false
+        aaxis_ontology.api_auto_create:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.api.auto_create.label
+                tooltip: aaxis.ontology.config.api.auto_create.tooltip
+                required: false
+        aaxis_ontology.api_auto_create_unique_attribute:
+            data_type: string
+            type: Symfony\Component\Form\Extension\Core\Type\TextType
+            options:
+                label: aaxis.ontology.config.api.auto_create_unique_attribute.label
+                tooltip: aaxis.ontology.config.api.auto_create_unique_attribute.tooltip
+                required: false
+        aaxis_ontology.api_query_max_page_size:
+            data_type: integer
+            type: Symfony\Component\Form\Extension\Core\Type\IntegerType
+            options:
+                label: aaxis.ontology.config.api.query_max_page_size.label
+                tooltip: aaxis.ontology.config.api.query_max_page_size.tooltip
+                required: false
+
+    tree:
+        system_configuration:
+            platform:
+                children:
+                    general_setup:
+                        children:
+                            aaxis_ontology:
+                                priority: 90
+                                children:
+                                    aaxis_ontology_general:
+                                        priority: 100
+                                        children:
+                                            - aaxis_ontology.enabled
+                                    aaxis_ontology_api:
+                                        priority: 80
+                                        children:
+                                            - aaxis_ontology.api_read_enabled
+                                            - aaxis_ontology.api_upsert_enabled
+                                            - aaxis_ontology.api_query_enabled
+                                            - aaxis_ontology.api_auto_create
+                                            - aaxis_ontology.api_auto_create_unique_attribute
+                                            - aaxis_ontology.api_query_max_page_size

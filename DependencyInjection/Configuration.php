@@ -1,0 +1,40 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Aaxis\Bundle\OntologyBundle\DependencyInjection;
+
+use Oro\Bundle\ConfigBundle\DependencyInjection\SettingsBuilder;
+use Symfony\Component\Config\Definition\Builder\TreeBuilder;
+use Symfony\Component\Config\Definition\ConfigurationInterface;
+
+/**
+ * Defines the configuration tree for the bundle ("aaxis_ontology"), including its
+ * System Configuration settings.
+ */
+class Configuration implements ConfigurationInterface
+{
+    #[\Override]
+    public function getConfigTreeBuilder(): TreeBuilder
+    {
+        $treeBuilder = new TreeBuilder('aaxis_ontology');
+        $rootNode = $treeBuilder->getRootNode();
+
+        SettingsBuilder::append($rootNode, [
+            'enabled' => ['type' => 'boolean', 'value' => true],
+
+            // Data HTTP API (read / upsert / query). Disabled by default — opt-in per environment.
+            'api_read_enabled' => ['type' => 'boolean', 'value' => false],
+            'api_upsert_enabled' => ['type' => 'boolean', 'value' => false],
+            'api_query_enabled' => ['type' => 'boolean', 'value' => false],
+            // When enabled, an upsert for an unknown system/entity creates them on the fly.
+            'api_auto_create' => ['type' => 'boolean', 'value' => false],
+            // unique_attribute assigned to entities auto-created by the API.
+            'api_auto_create_unique_attribute' => ['type' => 'string', 'value' => 'id'],
+            // Hard upper bound on the query endpoint's page_size.
+            'api_query_max_page_size' => ['type' => 'integer', 'value' => 200],
+        ]);
+
+        return $treeBuilder;
+    }
+}

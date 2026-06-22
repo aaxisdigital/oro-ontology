@@ -1,0 +1,33 @@
+{% extends '@OroUI/actions/view.html.twig' %}
+{% import '@OroUI/macros.html.twig' as UI %}
+
+{% block pageHeader %}
+    {% set breadcrumbs = {
+        'entity': entity,
+        'indexPath': path('aaxis_ontology_connectors'),
+        'indexLabel': 'aaxis.ontology.connector.entity_plural_label'|trans,
+        'entityTitle': entity.name|default('N/A'|trans)
+    } %}
+    {{ parent() }}
+{% endblock pageHeader %}
+
+{% block content_data %}
+    {% set info %}
+        {{ UI.renderProperty('aaxis.ontology.connector.system.label'|trans, entity.system.name|default('')) }}
+        {{ UI.renderProperty('aaxis.ontology.connector.name.label'|trans, entity.name) }}
+        {{ UI.renderProperty('aaxis.ontology.connector.type.label'|trans, ('aaxis.ontology.connector.type.' ~ entity.type)|trans) }}
+        <div class="control-group">
+            <label class="control-label">{{ 'aaxis.ontology.connector.config.label'|trans }}</label>
+            <div class="controls"><pre>{{ entity.config ? entity.config|json_encode(constant('JSON_PRETTY_PRINT')) : '' }}</pre></div>
+        </div>
+    {% endset %}
+
+    {% set dataBlocks = [{
+        'title': 'aaxis.ontology.section.general'|trans,
+        'subblocks': [{'data': [info]}]
+    }] %}
+
+    {% set id = 'aaxis-ontology-connector-view' %}
+    {% set data = {'dataBlocks': dataBlocks} %}
+    {{ parent() }}
+{% endblock content_data %}

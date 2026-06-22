@@ -1,0 +1,16 @@
+{% extends '@OroUI/actions/index.html.twig' %}
+
+{% set gridName = 'aaxis-ontology-connectors-grid' %}
+{% set pageTitle = 'aaxis.ontology.connector.entity_plural_label'|trans %}
+
+{% block navButtons %}
+    {% import '@OroUI/macros.html.twig' as UI %}
+    {% if is_granted('aaxis_ontology_connector_create') %}
+        <div class="btn-group">
+            {{ UI.addButton({
+                'path': path('aaxis_ontology_connector_create'),
+                'entity_label': 'aaxis.ontology.connector.entity_label'|trans
+            }) }}
+        </div>
+    {% endif %}
+{% endblock %}

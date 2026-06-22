@@ -1,0 +1,5 @@
+acl_categories:
+    aaxis_ontology:
+        label: aaxis.ontology.acl.category.label
+        tab: true
+        priority: 246

@@ -1,0 +1,55 @@
+datagrids:
+    # Systems, Entities and the Data View are rendered by TypeScript components (the reusable
+    # DataGrid widget), not by Oro datagrids. Only the Connector page still uses an Oro datagrid.
+    aaxis-ontology-connectors-grid:
+        extended_entity_name: 'Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector'
+        acl_resource: aaxis_ontology_connector_view
+        source:
+            type: orm
+            query:
+                select:
+                    - c.id
+                    - c.name
+                    - c.type
+                    - s.name as systemName
+                from:
+                    - { table: 'Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector', alias: c }
+                join:
+                    inner:
+                        - { join: c.system, alias: s }
+        columns:
+            name:
+                label: aaxis.ontology.connector.name.label
+            systemName:
+                label: aaxis.ontology.connector.system.label
+            type:
+                label: aaxis.ontology.connector.type.label
+        sorters:
+            columns:
+                name: { data_name: c.name }
+                systemName: { data_name: systemName }
+                type: { data_name: c.type }
+            default:
+                name: ASC
+        filters:
+            columns:
+                name: { type: string, data_name: c.name }
+                systemName: { type: string, data_name: systemName }
+                type:
+                    type: choice
+                    data_name: c.type
+                    options:
+                        field_options:
+                            choices:
+                                aaxis.ontology.connector.type.sftp: sftp
+                                aaxis.ontology.connector.type.rest_api: rest_api
+                                aaxis.ontology.connector.type.file_system: file_system
+        properties:
+            id: ~
+            view_link: { type: url, route: aaxis_ontology_connector_view, params: [id] }
+            update_link: { type: url, route: aaxis_ontology_connector_update, params: [id] }
+            delete_link: { type: url, route: aaxis_ontology_connector_delete, params: [id] }
+        actions:
+            view: { type: navigate, label: oro.grid.action.view, link: view_link, icon: eye, acl_resource: aaxis_ontology_connector_view, rowAction: true }
+            update: { type: navigate, label: oro.grid.action.update, link: update_link, icon: edit, acl_resource: aaxis_ontology_connector_update }
+            delete: { type: delete, label: oro.grid.action.delete, link: delete_link, icon: trash, acl_resource: aaxis_ontology_connector_delete }

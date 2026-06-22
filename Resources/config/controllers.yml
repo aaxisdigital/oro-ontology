@@ -1,0 +1,48 @@
+services:
+    _defaults:
+        public: true
+
+    Aaxis\Bundle\OntologyBundle\Controller\OntologySystemController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+
+    Aaxis\Bundle\OntologyBundle\Controller\OntologyEntityController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+
+    Aaxis\Bundle\OntologyBundle\Controller\OntologyConnectorController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+
+    Aaxis\Bundle\OntologyBundle\Controller\OntologyDataController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager, key: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager }
+
+    Aaxis\Bundle\OntologyBundle\Controller\OntologyEventController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+
+    Aaxis\Bundle\OntologyBundle\Controller\OntologyFlowController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+
+    Aaxis\Bundle\OntologyBundle\Api\OntologyDataApiController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager, key: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager }
+            - { name: container.service_subscriber, id: oro_config.global, key: Oro\Bundle\ConfigBundle\Config\ConfigManager }

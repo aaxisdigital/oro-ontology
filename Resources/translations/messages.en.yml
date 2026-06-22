@@ -1,0 +1,222 @@
+aaxis:
+    ontology:
+        menu:
+            aaxis_ontology:
+                label: Ontology
+                description: Model systems, entities, connectors, flows and events
+            aaxis_ontology_systems:
+                label: Systems
+                description: External and internal systems
+            aaxis_ontology_entities:
+                label: Entities
+                description: Data entities and their attributes
+            aaxis_ontology_connectors:
+                label: Connectors
+                description: Integrations between systems
+            aaxis_ontology_flows:
+                label: Flows
+                description: Data flows across systems
+            aaxis_ontology_events:
+                label: Events
+                description: Events that drive data changes
+            aaxis_ontology_data_view:
+                label: Data View
+                description: Consolidated view of the data model
+        feature:
+            label: 'Ontology'
+        config:
+            group:
+                title: 'Aaxis Ontology'
+            general:
+                title: 'Settings'
+            enabled:
+                label: Enabled
+            api:
+                title: 'Data API'
+                read_enabled:
+                    label: 'Enable Read endpoint'
+                    tooltip: 'Allow GET requests to read a single record by system, entity and unique id.'
+                upsert_enabled:
+                    label: 'Enable Upsert endpoint'
+                    tooltip: 'Allow POST requests to queue an upsert for a record by system, entity and unique id.'
+                query_enabled:
+                    label: 'Enable Query endpoint'
+                    tooltip: 'Allow POST requests to query records of a system/entity by payload attributes.'
+                auto_create:
+                    label: 'Auto-create unknown system/entity on upsert'
+                    tooltip: 'When enabled, an upsert for an unknown system and/or entity creates them automatically. Read and query always require an existing system/entity.'
+                auto_create_unique_attribute:
+                    label: 'Auto-create default unique attribute'
+                    tooltip: 'The unique attribute assigned to entities created automatically by the API.'
+                query_max_page_size:
+                    label: 'Query maximum page size'
+                    tooltip: 'Hard upper bound for the query endpoint page_size parameter.'
+        acl:
+            category:
+                label: 'Aaxis Ontology'
+            api_access_all:
+                label: 'Data API: full access (read, upsert, query)'
+                description: 'Access all Ontology Data API endpoints, including upsert.'
+            api_access_read:
+                label: 'Data API: read access (read, query)'
+                description: 'Access the read and query Ontology Data API endpoints (no upsert).'
+        section:
+            general: General
+        choose_system: 'Choose a system...'
+
+        # Oro entity-config-derived labels (lowercased class names).
+        ontologysystem:
+            entity_label: System
+            entity_plural_label: Systems
+            id:
+                label: Id
+            name:
+                label: Name
+            enabled:
+                label: Enabled
+            logo:
+                label: Logo
+        ontologyentity:
+            entity_label: Entity
+            entity_plural_label: Entities
+            id:
+                label: Id
+            system:
+                label: System
+            name:
+                label: Name
+            unique_attribute:
+                label: Unique Attribute
+            enabled:
+                label: Enabled
+        ontologyconnector:
+            entity_label: Connector
+            entity_plural_label: Connectors
+            id:
+                label: Id
+            system:
+                label: System
+            name:
+                label: Name
+            type:
+                label: Type
+            config:
+                label: Configuration
+        ontologydata:
+            entity_label: Data Record
+            entity_plural_label: Data View
+        ontologydatahistory:
+            entity_label: Data History
+            entity_plural_label: Data History
+        ontologydataevent:
+            entity_label: Event
+            entity_plural_label: Events
+        ontologyflow:
+            entity_label: Flow
+            entity_plural_label: Flows
+
+        # Short keys used by templates, forms and JS components.
+        system:
+            entity_label: System
+            entity_plural_label: Systems
+            saved: 'System saved'
+            name:
+                label: Name
+            enabled:
+                label: Enabled
+            logo:
+                label: Logo
+        system_manager:
+            add_button: 'Add System'
+            create_title: 'New System'
+            edit_title: 'Edit System'
+            name_placeholder: 'e.g. SAP, Salesforce, Magento...'
+            empty: 'No systems defined yet. Use "Add System" to create one.'
+            col_actions: 'Actions'
+            name_required: 'Please enter a name.'
+            name_unique: 'A system with this name already exists.'
+            confirm_delete: 'Delete system "{{ name }}"?'
+            deleted: 'System deleted'
+            load_error: 'Could not load the systems.'
+            save_error: 'Could not save the system.'
+            delete_error: 'Could not delete the system.'
+        entity_manager:
+            add_button: 'Add Entity'
+            name_required: 'Please enter a name.'
+            name_unique: 'An entity with this name already exists for the selected system.'
+            system_required: 'Please choose a system.'
+            unique_attribute_required: 'Please enter the unique attribute.'
+            unique_attribute_placeholder: 'Name of the attribute used as unique id'
+        entity:
+            entity_label: Entity
+            entity_plural_label: Entities
+            saved: 'Entity saved'
+            system:
+                label: System
+            name:
+                label: Name
+            unique_attribute:
+                label: Unique Attribute
+            enabled:
+                label: Enabled
+        entity_attribute:
+            entity_plural_label: Attributes
+            empty: 'No attributes defined.'
+            name:
+                label: Name
+            required:
+                label: Required
+            datatype:
+                label: Data type
+                boolean: Boolean
+                text: Text
+                number: Number
+                date: Date
+                time: Time
+                datetime: Date / Time
+                object: Object
+                undefined: Undefined
+        connector:
+            entity_label: Connector
+            entity_plural_label: Connectors
+            saved: 'Connector saved'
+            system:
+                label: System
+            name:
+                label: Name
+            type:
+                label: Type
+                sftp: SFTP
+                rest_api: 'REST API'
+                file_system: 'File System'
+            config:
+                label: 'Configuration (JSON)'
+                tooltip: 'Per-type configuration as JSON. Detailed per connector type later.'
+        data:
+            entity_label: Data Record
+            entity_plural_label: Data View
+            add_button: 'Add Data'
+        data_view:
+            add_button: 'Add Data'
+            system:
+                label: System
+            entity:
+                label: Entity
+            unique_id:
+                label: Unique Id
+            uuid:
+                label: UUID
+            version:
+                label: Version
+            payload:
+                label: Payload
+            updated_at:
+                label: Updated At
+        event:
+            entity_label: Event
+            entity_plural_label: Events
+        flow:
+            entity_label: Flow
+            entity_plural_label: Flows
+        flow_view:
+            add_button: 'Add Flow'
