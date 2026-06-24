@@ -4,7 +4,7 @@
         "rootDir": ".",
         "outDir": "../public/js",
         "paths": {
-            "aaxiscommon/js/app/widgets/*": ["../../vendor/aaxisdigital/oro-common/Resources/public/js/app/widgets/*"]
+            "aaxiscommon/js/app/widgets/*": ["../../../oro-common/Resources/public/js/app/widgets/*"]
         }
     },
     "include": [
