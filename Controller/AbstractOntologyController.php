@@ -40,6 +40,24 @@ abstract class AbstractOntologyController extends AbstractController
         return new JsonResponse(['successful' => true]);
     }
 
+    /**
+     * Counts rows of an OroCommerce entity by class name; returns 0 if the class is not a managed
+     * entity (used to count records for internal-system ontology entities, whose name is the class).
+     */
+    protected function oroEntityRecordCount(string $entityClass): int
+    {
+        try {
+            $em = $this->container->get(ManagerRegistry::class)->getManagerForClass($entityClass);
+            if ($em === null) {
+                return 0;
+            }
+
+            return (int) $em->createQuery('SELECT COUNT(e) FROM ' . $entityClass . ' e')->getSingleScalarResult();
+        } catch (\Throwable) {
+            return 0;
+        }
+    }
+
     #[\Override]
     public static function getSubscribedServices(): array
     {

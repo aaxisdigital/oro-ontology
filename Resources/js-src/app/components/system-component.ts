@@ -4,6 +4,7 @@ import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction} from 'aaxiscommon/js/app/widgets/data-grid';
+import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal from 'aaxiscommon/js/app/widgets/record-form-modal';
 interface OntologySystemOptions {
     _sourceElement: any;
@@ -16,6 +17,13 @@ interface SystemRecord {
     id: number;
     name: string;
     enabled: boolean;
+    external: boolean;
+    /** Number of entities under this system. */
+    entityCount: number;
+    /** Total records held by all the system's entities (ontology data, or OroCommerce tables if internal). */
+    recordCount: number;
+    /** How many flows depend on this system's entities (not implemented yet — currently 0). */
+    flowCount: number;
 }
 
 /**
@@ -35,13 +43,22 @@ class OntologySystemComponent extends BaseComponent {
             actions.push({key: 'edit', label: __('aaxis.common.grid.edit'), icon: 'fa-pencil'});
         }
         if (options.canDelete) {
-            actions.push({key: 'delete', label: __('aaxis.common.grid.delete'), icon: 'fa-trash-o', variant: 'danger'});
+            actions.push({
+                key: 'delete', label: __('aaxis.common.grid.delete'), icon: 'fa-trash-o', variant: 'danger',
+                // Internal systems (external = false, e.g. "OroCommerce") cannot be deleted.
+                disabled: (row: SystemRecord) => row.external === false,
+                disabledTitle: __('aaxis.ontology.system_manager.delete_internal_forbidden')
+            });
         }
 
         this.grid = new DataGrid({
             columns: [
                 {key: 'name', label: __('aaxis.ontology.system.name.label'), type: 'text'},
-                {key: 'enabled', label: __('aaxis.ontology.system.enabled.label'), type: 'boolean', width: '160px'}
+                {key: 'entityCount', label: __('aaxis.ontology.system.entity_count.label'), type: 'number', width: '120px'},
+                {key: 'recordCount', label: __('aaxis.ontology.system.record_count.label'), type: 'number', width: '120px'},
+                {key: 'flowCount', label: __('aaxis.ontology.system.flow_count.label'), type: 'number', width: '110px'},
+                {key: 'external', label: __('aaxis.ontology.system.external.label'), type: 'boolean', width: '120px'},
+                {key: 'enabled', label: __('aaxis.ontology.system.enabled.label'), type: 'boolean', width: '120px'}
             ],
             actions,
             gridKey: 'ontology-system',
@@ -124,22 +141,60 @@ class OntologySystemComponent extends BaseComponent {
     }
 
     private remove(system: SystemRecord): void {
-        // eslint-disable-next-line no-alert
-        if (!window.confirm(__('aaxis.ontology.system_manager.confirm_delete', {name: system.name}))) {
-            return;
-        }
+        // Only external systems reach here — the delete action is disabled for internal ones.
+        const dialog = new Dialog({title: __('aaxis.ontology.system_manager.delete_title'), width: '520px'});
+        const $content = dialog.open();
+
+        const $body = $('<div/>', {'class': 'aaxis-ontology-confirm'});
+        $body.append($('<p/>', {
+            'class': 'aaxis-ontology-confirm__q',
+            text: __('aaxis.ontology.system_manager.confirm_delete', {name: system.name})
+        }));
+        $body.append($('<p/>', {
+            'class': 'aaxis-ontology-confirm__danger',
+            text: __('aaxis.ontology.system_manager.delete_data_warning', {
+                entities: String(system.entityCount || 0),
+                records: String(system.recordCount || 0)
+            })
+        }));
+        $body.append($('<p/>', {
+            'class': 'aaxis-ontology-confirm__danger',
+            text: __('aaxis.ontology.system_manager.delete_flows_warning')
+        }));
+
+        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('Cancel')});
+        const $confirm = $('<button/>', {type: 'button', 'class': 'btn aaxis-ontology-confirm__delete', text: __('aaxis.common.grid.delete')});
+        $actions.append($cancel, $confirm);
+        $body.append($actions);
+        $content.append($body);
+
+        $cancel.on('click', () => dialog.close());
+        $confirm.on('click', () => {
+            $confirm.prop('disabled', true);
+            this.doDelete(system, () => dialog.close());
+        });
+    }
+
+    private doDelete(system: SystemRecord, done: () => void): void {
         this.setBusy(true);
         this.apiFetch(routing.generate('aaxis_ontology_system_delete', {id: system.id}), 'DELETE')
             .then(res => {
                 if (!res.ok || !res.data || !res.data.successful) {
-                    messenger.notificationFlashMessage('error', __('aaxis.ontology.system_manager.delete_error'));
+                    messenger.notificationFlashMessage(
+                        'error',
+                        (res.data && res.data.message) || __('aaxis.ontology.system_manager.delete_error')
+                    );
                     return;
                 }
                 messenger.notificationFlashMessage('success', __('aaxis.ontology.system_manager.deleted'));
                 this.load();
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.system_manager.delete_error')))
-            .finally(() => this.setBusy(false));
+            .finally(() => {
+                this.setBusy(false);
+                done();
+            });
     }
 
     private csrf(): string {

@@ -5,6 +5,14 @@ aaxis:
                 label: 'Name'
             enabled:
                 label: 'Enabled'
+            external:
+                label: 'External'
+            entity_count:
+                label: 'Entities'
+            record_count:
+                label: 'Records'
+            flow_count:
+                label: 'Flows'
         entity:
             name:
                 label: 'Name'
@@ -14,6 +22,10 @@ aaxis:
                 label: 'Unique Attribute'
             enabled:
                 label: 'Enabled'
+            record_count:
+                label: 'Count'
+            flow_count:
+                label: 'Flows'
         entity_attribute:
             entity_plural_label: 'Attributes'
             name:
@@ -33,8 +45,12 @@ aaxis:
             save_error: 'Could not save the system.'
             load_error: 'Could not load the systems.'
             confirm_delete: 'Delete system "{{ name }}"?'
+            delete_title: 'Delete system'
+            delete_data_warning: 'Its {{ entities }} entity(ies) and {{ records }} data record(s) will be permanently deleted.'
+            delete_flows_warning: 'Any flows referencing this system''s entities will become broken.'
             deleted: 'System deleted'
             delete_error: 'Could not delete the system.'
+            delete_internal_forbidden: 'This is an internal system and cannot be deleted.'
         entity_manager:
             create_title: 'New Entity'
             edit_title: 'Edit Entity'
@@ -42,6 +58,8 @@ aaxis:
             edit_subtitle: 'Update this entity and its attributes.'
             name_placeholder: 'e.g. Customer, Order, Product...'
             unique_attribute_placeholder: 'Name of the attribute used as unique id'
+            entity_select_placeholder: 'Choose an OroCommerce entity...'
+            field_select_placeholder: 'Choose a field...'
             unique_attribute_no_dots: 'The unique attribute must be a single top-level field name and cannot contain "." — nested or array paths are not supported as a unique id.'
             add_attribute: 'Add attribute'
             empty: 'No entities defined yet. Use "Add Entity" to create one.'
@@ -49,6 +67,10 @@ aaxis:
             save_error: 'Could not save the entity.'
             load_error: 'Could not load the entities.'
             confirm_delete: 'Delete entity "{{ name }}"?'
+            delete_title: 'Delete entity'
+            delete_external_data_warning: 'Its {{ count }} existing data record(s) will be permanently deleted.'
+            delete_internal_data_note: 'No data will be removed from OroCommerce.'
+            delete_flows_warning: 'Any flows referencing this entity will become broken.'
             deleted: 'Entity deleted'
             delete_error: 'Could not delete the entity.'
         data_view:

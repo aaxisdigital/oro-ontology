@@ -269,6 +269,49 @@
 }
 
 
+// --- Delete confirmation dialog --------------------------------------------
+
+.aaxis-ontology-confirm {
+    &__q {
+        font-weight: 600;
+        margin-bottom: 10px;
+    }
+
+    // Destructive / breaking warnings (data loss, broken flows).
+    &__danger {
+        color: #c0392b;
+        margin-bottom: 6px;
+    }
+
+    &__actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px solid #eef1f4;
+    }
+
+    // Red confirm button (independent of theme-provided .btn-danger).
+    &__delete {
+        background: #c0392b;
+        border-color: #c0392b;
+        color: #fff;
+
+        &:hover {
+            background: #a93226;
+            border-color: #a93226;
+            color: #fff;
+        }
+
+        &[disabled] {
+            opacity: 0.6;
+            cursor: default;
+        }
+    }
+}
+
+
 // --- Add Data form ----------------------------------------------------------
 
 .aaxis-data-form {

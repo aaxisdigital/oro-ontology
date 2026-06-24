@@ -13,6 +13,8 @@ services:
             - [setContainer, ['@Psr\Container\ContainerInterface']]
         tags:
             - { name: container.service_subscriber }
+            - { name: container.service_subscriber, id: oro_entity.entity_provider, key: Oro\Bundle\EntityBundle\Provider\EntityProvider }
+            - { name: container.service_subscriber, id: oro_entity.entity_field_provider, key: Oro\Bundle\EntityBundle\Provider\EntityFieldProvider }
 
     Aaxis\Bundle\OntologyBundle\Controller\OntologyConnectorController:
         calls:

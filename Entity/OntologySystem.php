@@ -36,6 +36,15 @@ class OntologySystem
     #[ORM\Column(name: 'enabled', type: Types::BOOLEAN, options: ['default' => true])]
     private bool $enabled = true;
 
+    /**
+     * Whether this system is external to OroCommerce. User-created systems are always external;
+     * only the built-in "OroCommerce" system (seeded by a data fixture) is internal
+     * (external = false). Internal systems cannot be deleted and their entities/attributes are
+     * constrained to the real OroCommerce entity model.
+     */
+    #[ORM\Column(name: 'external', type: Types::BOOLEAN, options: ['default' => true])]
+    private bool $external = true;
+
     #[ORM\OneToOne(targetEntity: File::class, cascade: ['persist'], orphanRemoval: true)]
     #[ORM\JoinColumn(name: 'logo_id', referencedColumnName: 'id', nullable: true, onDelete: 'SET NULL')]
     #[ConfigField(defaultValues: ['attachment' => ['acl_protected' => false, 'width' => 128, 'height' => 128, 'maxsize' => 5]])]
@@ -66,6 +75,18 @@ class OntologySystem
     public function setEnabled(bool $enabled): self
     {
         $this->enabled = $enabled;
+
+        return $this;
+    }
+
+    public function isExternal(): bool
+    {
+        return $this->external;
+    }
+
+    public function setExternal(bool $external): self
+    {
+        $this->external = $external;
 
         return $this;
     }

@@ -74,6 +74,8 @@ aaxis:
                 label: Name
             enabled:
                 label: Enabled
+            external:
+                label: External
             logo:
                 label: Logo
         ontologyentity:
@@ -124,6 +126,8 @@ aaxis:
                 label: Name
             enabled:
                 label: Enabled
+            external:
+                label: External
             logo:
                 label: Logo
         system_manager:
@@ -140,6 +144,7 @@ aaxis:
             load_error: 'Could not load the systems.'
             save_error: 'Could not save the system.'
             delete_error: 'Could not delete the system.'
+            delete_internal_forbidden: 'This is an internal system and cannot be deleted.'
         entity_manager:
             add_button: 'Add Entity'
             name_required: 'Please enter a name.'
@@ -148,6 +153,8 @@ aaxis:
             unique_attribute_required: 'Please enter the unique attribute.'
             unique_attribute_no_dots: 'The unique attribute must be a single top-level field name and cannot contain "." — nested or array paths are not supported as a unique id.'
             unique_attribute_placeholder: 'Name of the attribute used as unique id'
+            entity_not_oro: 'The selected entity is not a recognized OroCommerce entity.'
+            attribute_not_oro_field: 'Attribute "{{ name }}" is not a field of the selected OroCommerce entity.'
         entity:
             entity_label: Entity
             entity_plural_label: Entities

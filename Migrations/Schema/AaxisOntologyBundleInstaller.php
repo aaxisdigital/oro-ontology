@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_2';
+        return 'v1_3';
     }
 
     #[\Override]
@@ -53,6 +53,7 @@ class AaxisOntologyBundleInstaller implements Installation
         $table->addColumn('id', 'integer', ['autoincrement' => true]);
         $table->addColumn('name', 'string', ['length' => 64]);
         $table->addColumn('enabled', 'boolean', ['default' => true]);
+        $table->addColumn('external', 'boolean', ['default' => true]);
         $table->addColumn('logo_id', 'integer', ['notnull' => false]);
         $table->setPrimaryKey(['id']);
         $table->addUniqueIndex(['logo_id'], 'aaxis_ontology_system_logo_uidx');

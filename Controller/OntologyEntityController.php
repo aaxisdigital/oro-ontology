@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Controller;
 
+use Aaxis\Bundle\OntologyBundle\Entity\OntologyData;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntityAttribute;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Doctrine\Persistence\ManagerRegistry;
+use Oro\Bundle\EntityBundle\Provider\EntityFieldProvider;
+use Oro\Bundle\EntityBundle\Provider\EntityProvider;
 use Oro\Bundle\SecurityBundle\Attribute\Acl;
 use Oro\Bundle\SecurityBundle\Attribute\AclAncestor;
 use Oro\Bundle\SecurityBundle\Attribute\CsrfProtection;
@@ -40,14 +43,58 @@ class OntologyEntityController extends AbstractOntologyController
         $entities = $this->registry()->getRepository(OntologyEntity::class)->findBy([], ['name' => 'ASC']);
         $systems = $this->registry()->getRepository(OntologySystem::class)->findBy([], ['name' => 'ASC']);
 
+        // One grouped query for all external entities' record counts (internal ones are counted
+        // against their own OroCommerce table, per entity, inside recordCount()).
+        $externalCounts = $this->externalRecordCounts();
+
         return new JsonResponse([
-            'entities' => array_map($this->serialize(...), $entities),
+            'entities' => array_map(
+                fn (OntologyEntity $entity) => $this->serialize($entity, $this->recordCount($entity, $externalCounts)),
+                $entities
+            ),
             'systems' => array_map(
-                static fn (OntologySystem $s) => ['id' => $s->getId(), 'name' => $s->getName()],
+                static fn (OntologySystem $s) => [
+                    'id' => $s->getId(),
+                    'name' => $s->getName(),
+                    'external' => $s->isExternal(),
+                ],
                 $systems
             ),
             'datatypes' => $this->datatypeOptions(),
         ]);
+    }
+
+    /**
+     * Lists the OroCommerce entities (as at /admin/entity/config/) for the internal-system entity
+     * picker. Value = entity class name; label = its human label.
+     */
+    #[Route(path: '/entities/api/oro-entities', name: 'aaxis_ontology_entity_oro_entities', options: ['expose' => true], methods: ['GET'])]
+    #[AclAncestor('aaxis_ontology_entity_view')]
+    public function oroEntitiesAction(): JsonResponse
+    {
+        $options = [];
+        foreach ($this->entityProvider()->getEntities(false) as $entity) {
+            $options[] = ['value' => $entity['name'], 'label' => (string) $entity['label']];
+        }
+
+        return new JsonResponse(['entities' => $options]);
+    }
+
+    /**
+     * Lists the fields of an OroCommerce entity (by class name, `?entity=`), each with a value
+     * (field name), label and the mapped ontology datatype. Used to constrain attribute names (and
+     * pre-fill datatypes) when the selected system is internal.
+     */
+    #[Route(path: '/entities/api/oro-fields', name: 'aaxis_ontology_entity_oro_fields', options: ['expose' => true], methods: ['GET'])]
+    #[AclAncestor('aaxis_ontology_entity_view')]
+    public function oroFieldsAction(Request $request): JsonResponse
+    {
+        $entityClass = trim((string) $request->query->get('entity', ''));
+        if ($entityClass === '') {
+            return new JsonResponse(['fields' => []]);
+        }
+
+        return new JsonResponse(['fields' => $this->oroFieldOptions($entityClass)]);
     }
 
     #[Route(path: '/entities/api', name: 'aaxis_ontology_entity_api_create', options: ['expose' => true], methods: ['POST'])]
@@ -118,12 +165,23 @@ class OntologyEntityController extends AbstractOntologyController
             return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.name_unique')], 422);
         }
 
+        $attributeRows = \is_array($payload['attributes'] ?? null) ? $payload['attributes'] : [];
+
+        // Internal systems mirror the real OroCommerce model: the entity must be a known OroCommerce
+        // entity (name = its class) and every attribute must be one of that entity's fields.
+        if (!$system->isExternal()) {
+            $invalid = $this->validateInternalEntity($name, $attributeRows);
+            if ($invalid !== null) {
+                return new JsonResponse(['success' => false, 'message' => $invalid], 422);
+            }
+        }
+
         $entity->setName($name);
         $entity->setSystem($system);
         $entity->setUniqueAttribute($uniqueAttribute);
         $entity->setEnabled((bool) ($payload['enabled'] ?? true));
 
-        $this->syncAttributes($entity, \is_array($payload['attributes'] ?? null) ? $payload['attributes'] : []);
+        $this->syncAttributes($entity, $attributeRows);
 
         $em = $this->registry()->getManagerForClass(OntologyEntity::class);
         $em->persist($entity);
@@ -168,9 +226,11 @@ class OntologyEntityController extends AbstractOntologyController
     }
 
     /**
+     * @param int|null $recordCount Pre-resolved record count; computed on demand when null.
+     *
      * @return array<string, mixed>
      */
-    private function serialize(OntologyEntity $entity): array
+    private function serialize(OntologyEntity $entity, ?int $recordCount = null): array
     {
         $attributes = [];
         foreach ($entity->getAttributes() as $attribute) {
@@ -181,15 +241,29 @@ class OntologyEntityController extends AbstractOntologyController
             ];
         }
 
+        // For internal-system entities, `name` is the OroCommerce entity class; show its human
+        // label in the grid instead of the raw class.
+        $system = $entity->getSystem();
+        $displayName = (string) $entity->getName();
+        if ($system !== null && !$system->isExternal()) {
+            $displayName = $this->oroEntityLabel((string) $entity->getName()) ?? $displayName;
+        }
+
         return [
             'id' => $entity->getId(),
             'name' => $entity->getName(),
+            'displayName' => $displayName,
             'uniqueAttribute' => $entity->getUniqueAttribute(),
             'enabled' => $entity->isEnabled(),
-            'systemId' => $entity->getSystem()?->getId(),
-            'systemName' => $entity->getSystem()?->getName(),
+            'systemId' => $system?->getId(),
+            'systemName' => $system?->getName(),
             'attributeCount' => \count($attributes),
             'attributes' => $attributes,
+            // Number of stored records (ontology data for external systems, the OroCommerce table
+            // itself for internal systems).
+            'recordCount' => $recordCount ?? $this->recordCount($entity),
+            // How many flows reference this entity. Not implemented yet — hard-coded for now.
+            'flowCount' => 0,
         ];
     }
 
@@ -207,13 +281,159 @@ class OntologyEntityController extends AbstractOntologyController
         );
     }
 
+    /**
+     * Builds the selectable field options of an OroCommerce entity (by class name): value = field
+     * name, label = field label, datatype = the field's Oro type mapped to an ontology datatype.
+     *
+     * @return array<int, array{value: string, label: string, datatype: string}>
+     */
+    private function oroFieldOptions(string $entityClass): array
+    {
+        $options = [];
+        $fields = $this->entityFieldProvider()->getEntityFields(
+            $entityClass,
+            EntityFieldProvider::OPTION_WITH_RELATIONS
+                | EntityFieldProvider::OPTION_APPLY_EXCLUSIONS
+                | EntityFieldProvider::OPTION_TRANSLATE
+        );
+        foreach ($fields as $field) {
+            $options[] = [
+                'value' => (string) $field['name'],
+                'label' => (string) ($field['label'] ?? $field['name']),
+                'datatype' => $this->mapOroTypeToDatatype((string) ($field['type'] ?? '')),
+            ];
+        }
+
+        return $options;
+    }
+
+    /**
+     * Number of stored records for an entity: rows in the OroCommerce table for an internal-system
+     * entity (name = its class), otherwise rows in `aaxis_ontology_data`. When $externalCounts is
+     * supplied (the grouped map built by {@see externalRecordCounts}), the external lookup avoids a
+     * per-entity query.
+     *
+     * @param array<int, int>|null $externalCounts
+     */
+    private function recordCount(OntologyEntity $entity, ?array $externalCounts = null): int
+    {
+        $system = $entity->getSystem();
+        if ($system !== null && !$system->isExternal()) {
+            return $this->oroEntityRecordCount((string) $entity->getName());
+        }
+
+        if ($externalCounts !== null) {
+            return (int) ($externalCounts[(int) $entity->getId()] ?? 0);
+        }
+
+        return (int) $this->registry()->getRepository(OntologyData::class)->count(['entity' => $entity]);
+    }
+
+    /**
+     * Counts ontology-data rows per entity in a single grouped query.
+     *
+     * @return array<int, int> entity id => record count
+     */
+    private function externalRecordCounts(): array
+    {
+        $rows = $this->registry()->getManagerForClass(OntologyData::class)
+            ->createQuery(
+                'SELECT IDENTITY(d.entity) AS entityId, COUNT(d.id) AS cnt'
+                . ' FROM ' . OntologyData::class . ' d GROUP BY d.entity'
+            )
+            ->getArrayResult();
+
+        $counts = [];
+        foreach ($rows as $row) {
+            $counts[(int) $row['entityId']] = (int) $row['cnt'];
+        }
+
+        return $counts;
+    }
+
+    /**
+     * Validates an entity destined for an internal system. Returns an error message, or null when
+     * valid: the name must be a known OroCommerce entity (class) and every attribute must be one of
+     * that entity's fields.
+     *
+     * @param array<int, array<string, mixed>> $attributeRows
+     */
+    private function validateInternalEntity(string $entityClass, array $attributeRows): ?string
+    {
+        $fieldOptions = $this->oroFieldOptions($entityClass);
+        if ($fieldOptions === []) {
+            return $this->trans('aaxis.ontology.entity_manager.entity_not_oro');
+        }
+
+        $validNames = array_column($fieldOptions, 'value');
+        foreach ($attributeRows as $row) {
+            $attrName = trim((string) ($row['name'] ?? ''));
+            if ($attrName === '' || \in_array($attrName, $validNames, true)) {
+                continue;
+            }
+
+            return $this->trans('aaxis.ontology.entity_manager.attribute_not_oro_field', ['{{ name }}' => $attrName]);
+        }
+
+        return null;
+    }
+
+    /** Maps an OroCommerce field type to the closest ontology attribute datatype. */
+    private function mapOroTypeToDatatype(string $type): string
+    {
+        return match ($type) {
+            'boolean' => OntologyEntityAttribute::TYPE_BOOLEAN,
+            'integer', 'smallint', 'bigint', 'float', 'decimal', 'money', 'percent' => OntologyEntityAttribute::TYPE_NUMBER,
+            'string', 'text' => OntologyEntityAttribute::TYPE_TEXT,
+            'date' => OntologyEntityAttribute::TYPE_DATE,
+            'time' => OntologyEntityAttribute::TYPE_TIME,
+            'datetime', 'datetimetz' => OntologyEntityAttribute::TYPE_DATETIME,
+            'array', 'simple_array', 'json', 'json_array', 'object' => OntologyEntityAttribute::TYPE_OBJECT,
+            default => OntologyEntityAttribute::TYPE_UNDEFINED,
+        };
+    }
+
+    private function oroEntityLabel(string $entityClass): ?string
+    {
+        try {
+            $entity = $this->entityProvider()->getEntity($entityClass);
+            $label = $entity['label'] ?? null;
+
+            return $label !== null ? (string) $label : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function entityProvider(): EntityProvider
+    {
+        return $this->container->get(EntityProvider::class);
+    }
+
+    private function entityFieldProvider(): EntityFieldProvider
+    {
+        return $this->container->get(EntityFieldProvider::class);
+    }
+
     private function registry(): ManagerRegistry
     {
         return $this->container->get(ManagerRegistry::class);
     }
 
-    private function trans(string $key): string
+    /**
+     * @param array<string, string> $params
+     */
+    private function trans(string $key, array $params = []): string
     {
-        return $this->container->get(TranslatorInterface::class)->trans($key);
+        return $this->container->get(TranslatorInterface::class)->trans($key, $params);
+    }
+
+    #[\Override]
+    public static function getSubscribedServices(): array
+    {
+        return array_merge(parent::getSubscribedServices(), [
+            EntityProvider::class,
+            EntityFieldProvider::class,
+        ]);
     }
 }
