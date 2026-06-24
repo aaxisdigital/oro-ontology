@@ -106,6 +106,13 @@ class OntologyEntityController extends AbstractOntologyController
             return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.unique_attribute_required')], 422);
         }
 
+        // The unique id is read with a flat top-level lookup ($record[$uniqueAttribute]) when
+        // upserting, so a dotted/nested path (or an array path) can never resolve. Reject it here
+        // rather than letting every upsert fail with "missing unique attribute".
+        if (str_contains($uniqueAttribute, '.')) {
+            return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.unique_attribute_no_dots')], 422);
+        }
+
         $existing = $this->registry()->getRepository(OntologyEntity::class)->findOneBy(['system' => $system, 'name' => $name]);
         if ($existing !== null && $existing->getId() !== $entity->getId()) {
             return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.name_unique')], 422);

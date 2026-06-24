@@ -42,6 +42,7 @@ aaxis:
             edit_subtitle: 'Update this entity and its attributes.'
             name_placeholder: 'e.g. Customer, Order, Product...'
             unique_attribute_placeholder: 'Name of the attribute used as unique id'
+            unique_attribute_no_dots: 'The unique attribute must be a single top-level field name and cannot contain "." — nested or array paths are not supported as a unique id.'
             add_attribute: 'Add attribute'
             empty: 'No entities defined yet. Use "Add Entity" to create one.'
             saved: 'Entity saved'

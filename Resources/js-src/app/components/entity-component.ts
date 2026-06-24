@@ -162,6 +162,12 @@ class OntologyEntityComponent extends BaseComponent {
     }
 
     private save(entity: EntityRecord | null, values: Record<string, any>): Promise<void> {
+        // The unique id is extracted by a flat top-level key lookup on upsert, so a dotted/nested
+        // (or array) path can never resolve — reject it up front instead of at every upsert.
+        if (String(values.uniqueAttribute ?? '').includes('.')) {
+            return Promise.reject(new Error(__('aaxis.ontology.entity_manager.unique_attribute_no_dots')));
+        }
+
         const url = entity === null
             ? routing.generate('aaxis_ontology_entity_api_create')
             : routing.generate('aaxis_ontology_entity_api_update', {id: entity.id});

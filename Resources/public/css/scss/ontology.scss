@@ -208,7 +208,30 @@
     font-style: italic;
 }
 
-// Version history dialog
+// Version history dialog: fixed-height flex body so the version picker, search toolbar and copy
+// button stay pinned and only the JSON view scrolls. Without this the whole dialog body scrolls
+// and the copy button drops below the fold.
+.aaxis-dialog__body.aaxis-json-dialog {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.aaxis-json-dialog {
+    .aaxis-json-version,
+    .aaxis-json-toolbar,
+    .aaxis-json-footer {
+        flex: 0 0 auto;
+    }
+
+    .aaxis-json-view {
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+}
+
 .aaxis-json-version {
     display: flex;
     align-items: center;

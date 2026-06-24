@@ -146,6 +146,7 @@ aaxis:
             name_unique: 'An entity with this name already exists for the selected system.'
             system_required: 'Please choose a system.'
             unique_attribute_required: 'Please enter the unique attribute.'
+            unique_attribute_no_dots: 'The unique attribute must be a single top-level field name and cannot contain "." — nested or array paths are not supported as a unique id.'
             unique_attribute_placeholder: 'Name of the attribute used as unique id'
         entity:
             entity_label: Entity

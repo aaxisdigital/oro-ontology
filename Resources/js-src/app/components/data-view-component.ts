@@ -153,6 +153,10 @@ class OntologyDataViewComponent extends BaseComponent {
             return;
         }
 
+        // Fixed-height flex layout (see ontology.scss .aaxis-json-dialog) so the version picker,
+        // search toolbar and copy button stay visible while only the JSON view scrolls.
+        $content.addClass('aaxis-json-dialog');
+
         // Version combobox (decreasing order, "version - updated at - uuid").
         const $select = $('<select/>', {'class': 'form-control aaxis-json-version__select', 'data-role': 'version'});
         versions.forEach((v, index) => {

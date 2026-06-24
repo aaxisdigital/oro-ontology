@@ -45,6 +45,7 @@ and `src/` — no `AppKernel` edit needed). After install/update:
 
 ```bash
 bin/console oro:migration:load --force                 # creates the ontology tables (+ admin ACL)
+bin/console oro:migration:data:load --no-interaction   # seeds flows (Manual / REST API) + admin API ACL
 bin/console cache:clear --no-interaction
 bin/console oro:assets:build --no-interaction
 bin/console oro:translation:load --no-interaction
@@ -157,4 +158,5 @@ bin/console oro:assets:build --no-interaction
 bin/console oro:translation:load --no-interaction
 bin/console oro:translation:rebuild-cache --no-interaction
 bin/console oro:migration:load --force        # only when entities/migrations changed
+bin/console oro:migration:data:load           # only when data fixtures (flows / ACLs) changed
 ```
