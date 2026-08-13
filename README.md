@@ -31,8 +31,8 @@ automatically (the project already has the Oro Composer registry, so `oro/platfo
 ```jsonc
 // composer.json
 "repositories": {
-    "aaxis-common":   { "type": "vcs", "url": "git@github.com:aaxisdigital/oro-common.git" },
-    "aaxis-ontology": { "type": "vcs", "url": "git@github.com:aaxisdigital/oro-ontology.git" }
+    "aaxis-common":   { "type": "vcs", "url": "https://github.com/aaxisdigital/oro-common.git" },
+    "aaxis-ontology": { "type": "vcs", "url": "https://github.com/aaxisdigital/oro-ontology.git" }
 }
 ```
 
@@ -121,8 +121,8 @@ past snapshot by walking the history diffs in reverse.
 
 ## System Configuration & feature toggle
 
-A dedicated page lives under **System Configuration → General Setup → Ontology** with a single
-**Enabled** toggle (`aaxis_ontology.enabled`). That toggle drives the Oro **feature**
+A dedicated page lives under **System Configuration → Aaxis → General → Aaxis Ontology** with a
+single **Enabled** toggle (`aaxis_ontology.enabled`). That toggle drives the Oro **feature**
 `aaxis_ontology` (`Resources/config/oro/features.yml`): disabling it hides the Ontology menu group
 and returns HTTP 404 for all of its routes.
 

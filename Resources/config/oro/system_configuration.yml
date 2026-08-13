@@ -62,9 +62,9 @@ system_configuration:
 
     tree:
         system_configuration:
-            platform:
+            aaxis:
                 children:
-                    general_setup:
+                    aaxis_general:
                         children:
                             aaxis_ontology:
                                 priority: 90

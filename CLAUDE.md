@@ -100,7 +100,8 @@ Key facts:
   `aaxis_ontology_api_access_read` (read+query). Read/query need either; upsert needs `_all`.
   Administrator gets `_all` via `Migrations/Data/ORM/LoadAaxisOntologyApiAdminPermissions`
   (run `oro:migration:data:load`).
-- **Config** (System Config → Aaxis Ontology → Data API): per-endpoint enables
+- **Config** (System Config → Aaxis → General → Aaxis Ontology → Data API; the tree hangs under
+  CommonBundle's shared `aaxis > aaxis_general` tab): per-endpoint enables
   (`api_read_enabled`/`api_upsert_enabled`/`api_query_enabled`, default off → disabled endpoint = 404),
   `api_auto_create` (upsert auto-creates unknown system/entity; read/query on unknown always error),
   `api_auto_create_unique_attribute` (default `id`), `api_query_max_page_size` (default 200).
