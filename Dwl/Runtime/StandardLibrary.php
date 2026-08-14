@@ -81,7 +81,7 @@ final class StandardLibrary
         )));
 
         // Date/time
-        $env->define('now', Value::func(fn(array $args) => Value::string(date('c'))));
+        $env->define('now', Value::func(fn(array $args) => Value::dateTime(new \DateTimeImmutable('now'), 'datetime')));
 
         // Utility
         $env->define('log', Value::func(function (array $args) {

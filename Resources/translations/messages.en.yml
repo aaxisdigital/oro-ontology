@@ -250,6 +250,7 @@ aaxis:
             close: 'Close'
             save: 'Save'
             debug: 'Debug'
+            run_now: 'Run Now'
             toolbox_toggle: 'Toolbox'
             toolbox:
                 title: 'Toolbox'
@@ -259,7 +260,7 @@ aaxis:
                     actions: 'Actions'
                     operations: 'Operations'
                 item:
-                    cron: 'Cron'
+                    cron: 'Schedule'
                     queue: 'Queue'
                     entity_change: 'Entity change'
                     dwl_transform: 'DWL transform'

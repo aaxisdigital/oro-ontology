@@ -79,6 +79,19 @@ class OntologyFlow
     #[ORM\Column(name: 'design', type: Types::JSON, nullable: true, options: ['jsonb' => true])]
     private ?array $design = null;
 
+    /** When the flow last RAN (debug / Run Now — later the real triggers too); null = never. */
+    #[ORM\Column(name: 'last_executed', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $lastExecuted = null;
+
+    /** Never null: the creation date at first, bumped by every save that rewrites the flow. */
+    #[ORM\Column(name: 'last_modified', type: Types::DATETIME_MUTABLE)]
+    private ?\DateTimeInterface $lastModified = null;
+
+    public function __construct()
+    {
+        $this->lastModified = new \DateTime('now', new \DateTimeZone('UTC'));
+    }
+
     public function getId(): ?int
     {
         return $this->id;
@@ -175,6 +188,30 @@ class OntologyFlow
     public function setDesign(?array $design): self
     {
         $this->design = $design;
+
+        return $this;
+    }
+
+    public function getLastExecuted(): ?\DateTimeInterface
+    {
+        return $this->lastExecuted;
+    }
+
+    public function setLastExecuted(?\DateTimeInterface $lastExecuted): self
+    {
+        $this->lastExecuted = $lastExecuted;
+
+        return $this;
+    }
+
+    public function getLastModified(): ?\DateTimeInterface
+    {
+        return $this->lastModified;
+    }
+
+    public function setLastModified(\DateTimeInterface $lastModified): self
+    {
+        $this->lastModified = $lastModified;
 
         return $this;
     }

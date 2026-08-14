@@ -36,7 +36,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 > `logo_id` unique index).
 | `OntologyEntityAttribute` | `aaxis_ontology_entity_attribute` | name, datatype (`TYPES` const), required |
 | `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; type + JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
-| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`) |
+| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time; installer at v1_7) |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique |
 | `OntologyDataEvent` | `aaxis_ontology_data_events` | one row per flow execution (seen vs changed ids) |
@@ -114,6 +114,76 @@ Most pages (Systems, Entities, Flows, Events, Data View) are **NOT** standard Or
 They are TypeScript single-page components built on CommonBundle's reusable `DataGrid` +
 `RecordFormModal` widgets, backed by **JSON endpoints** on the bundle's controllers. The Connector
 page is the exception — it uses a normal Oro datagrid + server-side CRUD.
+
+### DWL playground (Entities grid → `dwl` badge action)
+
+A DataWeave scratchpad over one entity's stored records, modelled on the official DataWeave
+playground. Pieces:
+
+- **Action**: the Entities grid's first action, rendered as a text pill via the widget's new
+  `GridAction.badge` (see `../CommonBundle/CLAUDE.md`) and placed **before** edit/delete. It needs no
+  extra ACL — the playground only evaluates, never writes, so entity VIEW (which the page already
+  requires) is enough.
+- **UI**: `Resources/js-src/app/widgets/dwl-playground.ts` — a plain class (NOT a page component, so
+  it is **not** in `jsmodules.yml`; `entity-component.ts` imports it relatively and webpack bundles
+  it). Two panes, script + read-only Result, in a `Dialog` opened with `movable: true` and a
+  `bodyClass` the bundle's `.aaxis-dwl` SCSS turns into a flex column, so the dialog's resize handle
+  grows the textareas instead of scrolling the body. Close is ✕ / Escape / backdrop (all from
+  `Dialog`).
+- **Row limit + total**: the limit box is followed by a `/ N total records` label, filled on open by
+  `GET /entities/api/{id}/dwl/count` (`aaxis_ontology_entity_dwl_count`, exposed, same permission pair
+  as the run) and refreshed from every run's `total`, so the cap can be judged against the real volume
+  before running. ⚠️ That count is **not** the grid's `recordCount` column: `recordCount()` reports the
+  **OroCommerce table** size for internal-system entities, while the playground always reads
+  `OntologyData` — reusing the column would show a total the run then contradicts. Both endpoints go
+  through `dwlPayloadTotal()` so they can never drift. A failed count blanks the label and never
+  blocks running.
+- **Deliberately not live**: nothing runs until **Run** is pressed. The pane remembers the
+  script+limit signature of the last run and greys the Result out (`.is-stale`, light grey) as soon
+  as either drifts — so a shown result is never mistaken for the current script's output. The limit
+  is part of the signature, not just the script: changing it invalidates the result for the same
+  reason.
+- **Endpoint**: `POST /entities/api/{id}/dwl` (`aaxis_ontology_entity_dwl`, exposed, CSRF, entity
+  VIEW **plus an explicit `OntologyData` VIEW check** — the response carries record *content*, so
+  metadata-only access must not be enough). Body `{script, limit}`; `limit` null/0 = the user opted
+  out of the cap (default 100).
+  Payloads are read with a **DQL projection of the payload column only** — no entity hydration, since
+  an uncapped run can span the whole table. The script gets exactly **one** binding, `payload` (the
+  list of record payloads); no extra variables, matching the request.
+- **Script errors are results, not HTTP errors**: a parse/runtime failure returns `200` with
+  `{success: false, error}` and the playground shows it in the Result pane (`.is-error`).
+- **Output format**: `Manager/DwlOutputFormatter` reads the `output <mime>` directive from the
+  script **header only** (text before `---`, so a `---` or the word "output" inside the body can't
+  fool it) and renders json / xml / csv / text; anything unrecognised falls back to JSON, matching
+  the engine's tolerance of header-less scripts. The server returns the resolved
+  `format`/`mime`/`extension`, and **Export** saves the last run's text verbatim as a client-side
+  Blob with that extension — so screen and file always agree. (`DwlTransformer` parses the header
+  but returns plain PHP, which is why the directive is re-read here.)
+- **Engine boundary**: the playground only calls `DwlTransformer::transform()/validate()`. Everything
+  under `Dwl/` is the imported DataWeave engine — treat it as a dependency.
+
+⚠️ **`dw::Runtime::props()` is an environment-disclosure sink.** The engine implements it as
+`foreach (getenv() as ...)` (`Dwl/Runtime/StandardLibrary.php`), so a script typed in the playground
+could return the whole process environment — and Export would save it. Deployments that pass secrets
+as real env vars (compose `environment:`, k8s env, ECS task definitions) would leak a DB DSN /
+`APP_SECRET` to anyone who can open the playground; braskem7 today loads secrets from `.env-app`
+without `putenv()`, so only PHP build vars are visible there — **do not rely on that.**
+`Manager/DwlScriptGuard` therefore screens every playground script and refuses `props`:
+- It matches on the **parsed AST**, not the text — the parser normalizes `dw :: Runtime`,
+  `dw::/*c*/Runtime` and a newline-split path all to `dw::Runtime`, so a regex would be bypassable.
+  It rejects a `ModuleRef` of `dw::Runtime::props` and an `ImportDirective` from `dw::Runtime` that
+  is `import *` or names `props`. `dw::Runtime::fail` stays usable; `props` as an object key or
+  inside a string is untouched.
+- An unparseable script passes the guard on purpose, so the user sees the engine's real parse error
+  rather than a guard message about it.
+- The refusal is returned as the endpoint's normal `{success: false, error}` 200, so it renders in the
+  Result pane like any other script error.
+- The rest of the standard library was audited and is pure data manipulation — `getenv()` is its only
+  such sink, which is why denying one member is sufficient. **Re-audit if `Dwl/` gains modules.**
+- The flow-editor's DWL path is NOT screened: it sits behind an EDIT-level capability, a different
+  trust level. Optional future hardening: give the playground its own action ACL (`acls.yml` +
+  an admin-grant data migration + gating the badge in twig) so script execution is a capability
+  distinct from reading data — a permissions-model decision, deliberately not taken unilaterally.
 
 ### Connector config & secrets
 
@@ -209,15 +279,29 @@ incoming link, and triggers accept none (invalid drops flash why). Links live in
 `{from, fromPort, to}` referencing stable per-step ids, so renames don't touch them.
 Double-clicking a tile opens the **step settings** —
 a "flying" panel positioned next to the tile over a click-absorbing backdrop (a true modal: the
-user must Confirm/Cancel), titled `<type label> - <name>`. It edits the name plus the step's
+user must Confirm/Cancel; Escape = Cancel via `keydown.aaxisFlowSettings`, active even under the
+loading overlay), titled `<type label> - <name>`. It edits the name plus the step's
 per-type `config` (an optional object persisted in both `design.steps[]` and the logical
-`steps[]`): **cron** requires a valid linux cron expression (`config.expression`) — Confirm is
-blocked otherwise (client validator `isValidCron`: @-macros + 5 fields with lists/ranges/steps/
-names; server re-validates with `Cron\CronExpression`, 422 `flow_manager.invalid_cron`);
+`steps[]`): **cron** (shown as **"Schedule"** — the TYPE stays `cron`; default step names derive
+from the sanitized toolbox LABEL, so new ones are `schedule-n`) owns its first row `Name | Mode`
+(`scheduleSection`) with two modes — `{mode: interval, value: int ≥ 1, unit: minute|hour|day|
+week|month|year}` (a number + unit row) or `{mode: cron, expression}`; the cron expression input
+tints light red while invalid (`__cron-input--invalid`, client validator `isValidCron`: @-macros
++ 5 fields with lists/ranges/steps/names) and a hint line under it shows the valid symbols for
+the cron FIELD the caret is in (recomputed per input/caret move; @-start shows the macro list).
+LEGACY configs (`{expression}` without mode) open/validate as cron mode. Server: `isStepConfigValid`
+checks both shapes; a present expression still re-validates with `Cron\CronExpression`
+(422 `flow_manager.invalid_cron`);
 **entity_change** requires `{system, entity}` (selects fed by `aaxis_ontology_entity_list` —
 entities filtered by the chosen system, both referenced by NAME per the bundle's addressing);
 **reader** requires `{reader: entity|connector, destination}` (destination defaults to
-`payload`) plus, per variant, `{system, entity, mode: all|by_id, record_id (when by_id)}` or
+`payload`) plus, per variant, `{system, entity, mode: all|by_id, record_id (when by_id)}` — in
+`all` mode the Load row also offers OPTIONAL `order_by` (the selected entity's attributes, fed by
+the entity_list payload via `systemEntitySection().attributes()`; picking one reveals `order_dir`
+asc|desc) and `limit` (No limit | 1 | 10 | 100 | 1000). Entity "all" reads go through
+`OntologyDataApiManager::queryForFlow()` — NOT page-capped like the outside-facing `query()`
+(flows get every record unless the step limits itself; ordering compares the jsonb value:
+numbers numerically, strings lexically, id as tiebreaker) — or
 `{connector: <id>, path, and for rest_api connectors also operation: get|put|post|patch|delete,
 body: empty|json|text|xml, body_content (when body ≠ empty)}`. Reader popup layout: a full-width
 FIXED first row `Name | Reader type | Destination` (the reader takes over the name placement via
@@ -269,14 +353,34 @@ into the URL via `history.replaceState` so refresh reopens the same flow) and re
 state; every mutation path (add/move/rename/remove steps, link changes, toolbox move/visibility,
 name/switch inputs, drag ends) calls `syncDirty()`. On open the editor restores from `design` (strictly
 validated; corrupted/outdated → warning flash + empty canvas; NULL → rebuilt from `steps`).
-**Debug**: a Debug topbar button (shown only while a REAL trigger exists, synced in
-`updateReachability`) POSTs the CURRENT canvas (steps with configs + links + trigger input,
-unsaved edits included) to the exposed `aaxis_ontology_flow_debug` endpoint
-(`flow_update` ACL + CSRF), which walks the graph breadth-first from the trigger via
-`Manager/FlowDebugExecutor` and returns the output context shown as pretty JSON in a dialog.
+**Debug / Run Now**: two topbar buttons (both shown only while a REAL trigger exists, synced in
+`updateReachability`; both collect the trigger input via `collectDebugInput()` — cron/queue run
+immediately, entity_change asks for its event first). **Run Now** (`data-role="debug"`) POSTs the
+CURRENT canvas (steps with configs + links + trigger input, unsaved edits included) to the
+exposed `aaxis_ontology_flow_debug` endpoint (`flow_update` ACL + CSRF), which walks the graph
+breadth-first from the trigger via `Manager/FlowDebugExecutor::execute()` and returns the final
+output context. **Debug** (`data-role="debug-step"`) steps through the flow: each POST to the
+exposed `aaxis_ontology_flow_debug_step` endpoint executes ONE step of the execution order
+(`FlowDebugExecutor::executeFrom()` — index 0 seeds the context and mints the run's flow-uuid;
+later calls receive the CLIENT-HELD context back and require its flow-uuid, so all steps of a
+session stamp the same uuid; `runAll: true` finishes the rest in one call) and the state modal
+shows the context after that step (`showStepState`: title `Debug — <step> (i/N)`) with
+Cancel | Run all | Next step — or just Close when done (aborting cannot undo writers that already
+queued). Both result views render the context as a COLLAPSIBLE JSON tree (`renderJsonTree()`:
+every object/array line toggles its children — expanded by default, collapsed nodes preview
+their item count; reuses the aaxis-json-* value colors). NOTE: new exposed routes need
+`fos:js-routing:dump --format=json --target=public/media/js/admin_routes.json`.
 Cron/queue triggers run immediately; entity_change first asks for system/entity (prefilled from
 the trigger's config, reusing `systemEntitySection`) + a JSON payload seeded into the context as
-`payload`. Executed for real: entity readers (`all` = first page via OntologyDataApiManager::query
+`payload`. Every TOP-LEVEL execution mints ONE v4 uuid up front, seeded into the context as
+**`flow-uuid`** (first key of the output JSON): all writers of the run stamp their upserts with
+it, so several write events group under a single identity in Events/Data View. Sub-flows never
+mint their own — `execute()`'s `$executionUuid` param carries the CALLER's uuid down (sub-flow
+invocation itself is still unimplemented; whoever builds it must pass the current uuid). DWL scripts reach it as
+`context["flow-uuid"]` — the transformer binds the whole context as a `context` object because
+hyphens aren't valid DWL identifiers (an actual `context` destination would shadow the alias).
+`flow-uuid` is a RESERVED destination (rejected in `isStepConfigValid` + the TS panels'
+`destinationError()` — jsmessage `destination_reserved`). Executed for real: entity readers (`all` = first page via OntologyDataApiManager::query
 — capped at 100, `by_id` = read(); a MISSING record yields null, not an error) and **rest_api
 connector readers** (URL = connector server[:port] + step path; connector headers; auth=headers
 merges auth_headers; auth=oauth POSTs the token path — form-encoded oauth.body + oauth.headers —
@@ -286,19 +390,41 @@ HTTP ≥ 400 aborts naming the step). sftp/file_system connector readers emit a 
 placeholder note; **dwl_transform** steps execute their DWL script via `Dwl/DwlTransformer` with
 the WHOLE current context bound as variables (payload, prior destinations…), result stored under
 their destination; **writer/entity** steps write the context value named by `config.content`
-(a single object or an array of objects) into the configured system/entity via the SAME path as
-the Data View "Add Data" — `upsertRecords()` (uid inferred from the entity's unique_attribute,
-ONE queued message, write is async) **stamped with the flow being debugged** (the editor sends
-`flowId` in the debug POST; a never-saved flow falls back to `requireEnabledFlow(Manual)`) —
-storing the receipt `{uuid, count, queued: true}` under the destination; writer/connector emits
-a `_debug` placeholder; other step types are no-ops for now. `upsertRecords()` rejects a batch
-that REPEATS a unique id (names both record numbers) — the `aaxis_ontology_data_upsert` PG
-function would otherwise reject the whole message asynchronously where the only trace is an
-`app.ERROR` log line and an event row with `finished_at` set but empty `changed_ids` (the
-processor closes events ONLY on validation errors; the success path leaves them open for the
-next pipeline stage, still a TODO). The writer's properties dialog reuses the
-reader's (`ioSection(kind)`) with the entity variant showing a Content textbox instead of
+(a single object or an array of objects) into the configured system/entity **synchronously** via
+`OntologyDataApiManager::upsertRecordsSync()` — same validation + `aaxis_ontology_data_upsert` PG
+function as the async Data View "Add Data" path (`upsertRecords()`, still queued), but no queue:
+uid inferred from the entity's unique_attribute, **stamped with the flow being debugged** (the
+editor sends `flowId` in the debug POST; a never-saved flow falls back to
+`requireEnabledFlow(Manual)`) **and with the run's `flow-uuid`** (the optional uuid arg). The
+receipt stored under the destination reports the REAL outcome — `{uuid, count, upsert:
+<created+changed>, changedIds: [<the upserted ids>]}` (unchanged records excluded; an EMPTY
+content — null / [] / "" — is NOT an error: the write is skipped, no event row, receipt
+`{uuid: <run uuid>, count: 0, upsert: 0, changedIds: []}`) — and the
+event row is recorded AND completed inline (unique_ids = seen, changed_ids = upserted,
+finished_at set); PG validation errors throw, naming the step. Writer/connector emits a `_debug`
+placeholder; other step types are no-ops for now. `prepareUpsertBatch()` (shared by both paths)
+rejects a batch that REPEATS a unique id, naming both record numbers. GOTCHA (async path only,
+i.e. Add Data / REST API): the consumer closes events ONLY on validation errors — the only trace
+is an `app.ERROR` log line and an event with `finished_at` set but empty `changed_ids`; the
+success path leaves events open for the next pipeline stage (still a TODO). The writer's properties dialog reuses the
+reader's (`ioSection(kind)`) with the entity variant showing a Content textarea instead of
 Load/Id; config discriminator is `writer: entity|connector`.
+**DWL-toggled fields** render through ONE reusable component — `dwlTextField(labelKey, {value,
+dwl}, {compact?, fixed?})` — which owns the title row (label + the pure-text/DWL `dwlToggle()`),
+the textarea, and the behavior: turning DWL on (or opening with it on) pretty-prints the code via
+`prettyPrintDwl()` (re-indents each line to its brace/bracket/paren depth, 2 spaces per level;
+string/comment contents never count) and applies code styling (`__settings-textarea--code`,
+spellcheck off). Users: the connector Body content, the writer's Content (`compact` variant —
+ALWAYS a textarea so toggling changes no visuals), and the transform's code (`fixed`: always-DWL,
+no switch shown). Config flags `body_dwl` / `content_dwl` (lenient-absent bools in
+`isStepConfigValid`). ON = the field is evaluated as a DWL expression against the execution
+context at run time: the body result is sent as-is when a string and JSON-encoded otherwise
+(`renderDwl()`); the writer content result IS the record(s) to write (`content_dwl` off keeps the
+literal context-key lookup). Both parse-validate on save via `stepDwlSnippets()` → the same 422
+`flow_manager.invalid_dwl`.
+**Settings loading**: sections doing catalog fetches (`systemEntitySection`, `ioSection`) return a
+`ready` promise; `openStepSettings` overlays a spinner (`__settings-loading`) that blocks the whole
+panel (buttons included, submit guarded) until every `ready` settles, then focuses the name input.
 **DWL engine** (`Dwl/`): the Language+Runtime subset of the user's php-dw DataWeave port
 (BSD-3-Clause, license copy in `Dwl/LICENSE`; origin `~/Github/dw-cli/php-dw`), namespaced
 `Aaxis\Bundle\OntologyBundle\Dwl\`. Three import gotchas handled in `DwlTransformer`: the AST is
@@ -307,7 +433,18 @@ the php↔Value bridge is local (`toValue()`/`->toPhp()`); and `Value::toPhp()` 
 as **stdClass** (upstream keeps `{}` vs `[]` apart) — invisible in the JSON debug dialog but fatal
 for `is_array()` consumers like the writer ("Record #1 must be a JSON object") → `transform()`
 flattens its result to plain assoc arrays via `toPlainPhp()`, matching what readers produce
-(`json_decode` assoc). Keep the engine files pristine; fix shapes at this facade. The `%dw` header/`---` separator are
+(`json_decode` assoc). SHAPE fixes belong at this facade; engine FEATURES are added to the engine
+files and always MIRRORED to the upstream repo (namespace swap only, `DataWeave\` ↔ this bundle;
+run upstream's phpunit after) so the copies never diverge — done so far for min/max-over-arrays,
+Value::compare and the DATE SUPPORT: `|…|` literals (ISO dates/times and `|PT1S|` periods — the
+lexer falls back to the `|` operator when the pipes don't wrap something date-shaped), temporal
+Values (`Value::dateTime(dt, kind)` with kind date|time|localtime|local_datetime|datetime,
+`Value::period()` keeping the ISO text; both leave the engine as ISO strings via toPhp/toString),
+DateTime ± Period arithmetic (null temporal propagates null so `default` catches missing dates),
+`as Date/Time/LocalTime/DateTime/LocalDateTime {format: …}` and `as String {format: …}` coercions
+(Java-style patterns translated by `javaDateFormatToPhp()` — yyyy-MM-dd HH:mm:ss.SSSSSS →
+Y-m-d H:i:s.u; parsing uses `!`-reset createFromFormat), fractional-second periods via
+DateInterval->f, and `now()` returning a real DateTime. NULL passes through every coercion. The `%dw` header/`---` separator are
 optional (bare expressions work). Scripts are parse-validated on SAVE
 (422 `flow_manager.invalid_dwl` with the parser message). The Format/Cli parts of php-dw were
 deliberately NOT imported (unused). Errors (unconfigured step, unknown

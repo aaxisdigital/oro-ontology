@@ -34,6 +34,7 @@ use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\NumberLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\ObjectLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\OutputDirective;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\RangeExpression;
+use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\DateTimeLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\RegexLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\Script;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\StringLiteral;
@@ -157,6 +158,7 @@ class Evaluator
             $node instanceof BooleanLiteral => Value::boolean($node->value),
             $node instanceof NullLiteral => Value::null(),
             $node instanceof RegexLiteral => Value::regex($node->pattern),
+            $node instanceof DateTimeLiteral => $this->evalDateTimeLiteral($node),
             $node instanceof ArrayLiteral => $this->evalArray($node),
             $node instanceof ObjectLiteral => $this->evalObject($node),
             $node instanceof Identifier => $this->evalIdentifier($node),
@@ -280,12 +282,50 @@ class Evaluator
         if ($left->type === ValueType::Number && $right->type === ValueType::Number) {
             return Value::number($left->data + $right->data);
         }
+        $shifted = $this->shiftByPeriod($left, $right) ?? $this->shiftByPeriod($right, $left);
+        if ($shifted !== null) {
+            return $shifted;
+        }
         return Value::string($this->toString($left) . $this->toString($right));
     }
 
     private function subtract(Value $left, Value $right): Value
     {
+        $shifted = $this->shiftByPeriod($left, $right, true);
+        if ($shifted !== null) {
+            return $shifted;
+        }
         return Value::number($this->toNumber($left) - $this->toNumber($right));
+    }
+
+    /**
+     * DateTime ± Period arithmetic: shifts the temporal operand by the period (a negative period
+     * flips the direction). Null temporals propagate as null — a missing date stays missing, so
+     * a downstream `default` can catch it. Returns null when the pair is not temporal+period.
+     */
+    private function shiftByPeriod(Value $temporal, Value $period, bool $subtract = false): ?Value
+    {
+        if ($period->type !== ValueType::Period) {
+            return null;
+        }
+        if ($temporal->type === ValueType::Null) {
+            return Value::null();
+        }
+        if ($temporal->type !== ValueType::DateTime && $temporal->type !== ValueType::Date) {
+            return null;
+        }
+        /** @var \DateTimeImmutable $dateTime */
+        $dateTime = $temporal->data;
+        /** @var \DateInterval $interval */
+        $interval = $period->data;
+        $plain = clone $interval;
+        $plain->invert = 0;
+        $backwards = $subtract !== ($interval->invert === 1);
+
+        return Value::dateTime(
+            $backwards ? $dateTime->sub($plain) : $dateTime->add($plain),
+            $temporal->attributes['kind'] ?? 'datetime'
+        );
     }
 
     private function concat(Value $left, Value $right): Value
@@ -941,13 +981,160 @@ class Evaluator
     {
         $value = $this->eval($node->expression);
         $typeName = strtolower($node->targetType->name);
+        if ($value->type === ValueType::Null) {
+            return Value::null(); // null flows through coercions (pairs with `default`)
+        }
+        $format = $node->targetType->metadata['format'] ?? null;
+        $format = \is_string($format) && $format !== '' ? $format : null;
 
         return match ($typeName) {
-            'string' => Value::string($this->toString($value)),
+            'string' => Value::string($this->coerceToString($value, $format)),
             'number' => Value::number($this->toNumber($value)),
             'boolean' => Value::boolean($value->isTruthy()),
+            'date', 'time', 'localtime', 'datetime', 'localdatetime'
+                => $this->coerceToTemporal($value, $typeName, $format, $node->line),
+            'period' => $value->type === ValueType::Period
+                ? $value
+                : $this->parsePeriod($this->toString($value), $node->line),
             default => $value, // Pass through for unknown types
         };
+    }
+
+    /** `as String {format: ...}`: temporal values honor the (Java-style) format; others as usual. */
+    private function coerceToString(Value $value, ?string $format): string
+    {
+        if (($value->type === ValueType::DateTime || $value->type === ValueType::Date) && $format !== null) {
+            return $value->data->format(self::javaDateFormatToPhp($format));
+        }
+        return $this->toString($value);
+    }
+
+    /** `as LocalDateTime {format: ...}` and friends: parses strings, re-kinds temporal values. */
+    private function coerceToTemporal(Value $value, string $target, ?string $format, int $line): Value
+    {
+        $kind = match ($target) {
+            'date' => 'date',
+            'time' => 'time',
+            'localtime' => 'localtime',
+            'localdatetime' => 'local_datetime',
+            default => 'datetime',
+        };
+        if ($value->type === ValueType::DateTime || $value->type === ValueType::Date) {
+            return Value::dateTime($value->data, $kind);
+        }
+        $text = $this->toString($value);
+        if ($format !== null) {
+            // '!' resets the fields the format does not mention (instead of "now" bleeding in).
+            $dateTime = \DateTimeImmutable::createFromFormat('!' . self::javaDateFormatToPhp($format), $text);
+            if ($dateTime === false) {
+                throw new RuntimeException("Cannot parse '$text' as $target with format \"$format\" at line $line");
+            }
+            return Value::dateTime($dateTime, $kind);
+        }
+        return $this->parseTemporal($text, $kind, $line);
+    }
+
+    /** A |…| literal: an ISO-8601 period (|PT1S|) or a date/time (|2003-10-01T23:57:59Z|). */
+    private function evalDateTimeLiteral(DateTimeLiteral $node): Value
+    {
+        if (preg_match('/^-?P/i', $node->text)) {
+            return $this->parsePeriod($node->text, $node->line);
+        }
+        return $this->parseTemporal($node->text, null, $node->line);
+    }
+
+    private function parsePeriod(string $iso, int $line): Value
+    {
+        $negative = str_starts_with($iso, '-');
+        $spec = strtoupper(ltrim($iso, '-'));
+        // DateInterval rejects fractional seconds — carried separately via its `f` property.
+        $fraction = 0.0;
+        if (preg_match('/(\d+)\.(\d+)S/', $spec, $m)) {
+            $fraction = (float) ('0.' . $m[2]);
+            $spec = str_replace($m[0], $m[1] . 'S', $spec);
+        }
+        try {
+            $interval = new \DateInterval($spec);
+        } catch (\Exception) {
+            throw new RuntimeException("Invalid period '|$iso|' at line $line");
+        }
+        $interval->f = $fraction;
+        if ($negative) {
+            $interval->invert = 1;
+        }
+        return Value::period($interval, $iso);
+    }
+
+    private function parseTemporal(string $text, ?string $kind, int $line): Value
+    {
+        try {
+            if (preg_match('/^\d{2}:\d{2}/', $text)) { // time-only, anchored to the epoch date
+                return Value::dateTime(new \DateTimeImmutable('1970-01-01 ' . $text), $kind ?? 'time');
+            }
+            $dateTime = new \DateTimeImmutable($text);
+        } catch (\Exception) {
+            throw new RuntimeException("Invalid date/time '|$text|' at line $line");
+        }
+        // Without an explicit target the text's own shape decides the flavor.
+        $kind ??= !str_contains($text, ':') ? 'date'
+            : (preg_match('/(Z|[+-]\d{2}:?\d{2})$/i', $text) ? 'datetime' : 'local_datetime');
+
+        return Value::dateTime($dateTime, $kind);
+    }
+
+    /**
+     * Translates the (Java-style) DataWeave date format patterns to PHP's date() syntax:
+     * "yyyy-MM-dd HH:mm:ss.SSSSSS" → "Y-m-d H:i:s.u". Single-quoted literals ('T') and unmapped
+     * letters come out backslash-escaped; runs match their longest known prefix.
+     */
+    private static function javaDateFormatToPhp(string $format): string
+    {
+        $map = [
+            'yyyy' => 'Y', 'yy' => 'y', 'MMMM' => 'F', 'MMM' => 'M', 'MM' => 'm', 'M' => 'n',
+            'dd' => 'd', 'd' => 'j', 'EEEE' => 'l', 'EEE' => 'D',
+            'HH' => 'H', 'H' => 'G', 'hh' => 'h', 'h' => 'g', 'mm' => 'i', 'ss' => 's',
+            'SSSSSS' => 'u', 'SSS' => 'v', 'a' => 'A',
+            'XXX' => 'P', 'X' => 'P', 'Z' => 'O', 'z' => 'T',
+        ];
+        $out = '';
+        $i = 0;
+        $len = \strlen($format);
+        while ($i < $len) {
+            $ch = $format[$i];
+            if ($ch === "'") {
+                $i++;
+                while ($i < $len && $format[$i] !== "'") {
+                    $out .= '\\' . $format[$i];
+                    $i++;
+                }
+                $i++; // closing quote ('' renders one literal quote as an escaped nothing)
+                continue;
+            }
+            if (!ctype_alpha($ch)) {
+                $out .= $ch;
+                $i++;
+                continue;
+            }
+            $run = $ch;
+            while ($i + \strlen($run) < $len && $format[$i + \strlen($run)] === $ch) {
+                $run .= $ch;
+            }
+            $i += \strlen($run);
+            while ($run !== '') {
+                $piece = $run;
+                while ($piece !== '' && !isset($map[$piece])) {
+                    $piece = substr($piece, 0, -1);
+                }
+                if ($piece === '') {
+                    $out .= '\\' . $run[0];
+                    $run = substr($run, 1);
+                } else {
+                    $out .= $map[$piece];
+                    $run = substr($run, \strlen($piece));
+                }
+            }
+        }
+        return $out;
     }
 
     private function evalRange(RangeExpression $node): Value
@@ -1002,6 +1189,8 @@ class Evaluator
             ValueType::Null => 'null',
             ValueType::Array => json_encode(array_map(fn(Value $v) => $this->toString($v), $value->data)),
             ValueType::Object => json_encode($this->objectToString($value)),
+            ValueType::Date, ValueType::DateTime => Value::formatTemporal($value),
+            ValueType::Period => (string) ($value->attributes['iso'] ?? ''),
             default => is_scalar($value->data) ? (string) $value->data : json_encode($value->data),
         };
     }

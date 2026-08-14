@@ -153,6 +153,18 @@ class StringLiteral extends Node
     }
 }
 
+/** A |…| date/time/period literal — `text` is the raw content between the pipes. */
+class DateTimeLiteral extends Node
+{
+    public function __construct(
+        public readonly string $text,
+        int $line = 0,
+        int $column = 0,
+    ) {
+        parent::__construct($line, $column);
+    }
+}
+
 class BooleanLiteral extends Node
 {
     public function __construct(

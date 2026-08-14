@@ -6,6 +6,7 @@ import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FieldChangeContext, FormField, SelectOption} from 'aaxiscommon/js/app/widgets/record-form-modal';
+import DwlPlayground from '../widgets/dwl-playground';
 
 interface OntologyEntityOptions {
     _sourceElement: any;
@@ -64,7 +65,11 @@ class OntologyEntityComponent extends BaseComponent {
         this.$el = options._sourceElement;
         this.opts = options;
 
-        const actions: GridAction[] = [];
+        // The DWL playground is read-only (it evaluates, never writes), so viewing the page is
+        // enough — and it leads the action list, before the edit/delete icons.
+        const actions: GridAction[] = [
+            {key: 'dwl', label: __('aaxis.ontology.dwl.action'), badge: 'dwl'}
+        ];
         if (options.canUpdate) {
             actions.push({key: 'edit', label: __('aaxis.common.grid.edit'), icon: 'fa-pencil'});
         }
@@ -134,11 +139,22 @@ class OntologyEntityComponent extends BaseComponent {
         return $('<span/>', {'class': 'aaxis-attr-cell', text: String(row.attributeCount || 0)});
     }
 
-    private onAction(action: string, row: EntityRecord): void {        if (action === 'edit') {
+    private onAction(action: string, row: EntityRecord): void {
+        if (action === 'edit') {
             this.openForm(row);
         } else if (action === 'delete') {
             this.remove(row);
+        } else if (action === 'dwl') {
+            this.openDwlPlayground(row);
         }
+    }
+
+    /** Opens the DataWeave playground over this entity's stored records. */
+    private openDwlPlayground(row: EntityRecord): void {
+        new DwlPlayground({
+            entityId: row.id,
+            entityLabel: row.displayName || row.name
+        }).open();
     }
 
     private onAdd(): void {

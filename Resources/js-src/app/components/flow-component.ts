@@ -14,6 +14,8 @@ interface FlowRecord {
     name: string | null;
     enabled: boolean;
     type: string;
+    lastExecuted: string | null;
+    lastModified: string | null;
 }
 
 /**
@@ -45,7 +47,15 @@ class OntologyFlowComponent extends BaseComponent {
                     key: 'type', label: __('aaxis.ontology.flow_view.type'), type: 'text', width: '120px',
                     render: (row: FlowRecord) => __('aaxis.ontology.flow_view.type_' + (row.type || 'subflow'))
                 },
-                {key: 'enabled', label: __('aaxis.ontology.flow_view.enabled'), type: 'boolean', width: '120px'}
+                {key: 'enabled', label: __('aaxis.ontology.flow_view.enabled'), type: 'boolean', width: '120px'},
+                {
+                    key: 'lastExecuted', label: __('aaxis.ontology.flow_view.last_executed'), type: 'datetime',
+                    width: '190px', render: (row: FlowRecord) => this.renderDate(row.lastExecuted)
+                },
+                {
+                    key: 'lastModified', label: __('aaxis.ontology.flow_view.last_modified'), type: 'datetime',
+                    width: '190px', render: (row: FlowRecord) => this.renderDate(row.lastModified)
+                }
             ],
             actions,
             gridKey: 'ontology-flow-view',
@@ -86,6 +96,14 @@ class OntologyFlowComponent extends BaseComponent {
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_view.load_error')))
             .finally(() => this.setBusy(false));
+    }
+
+    private renderDate(value: string | null): string {
+        if (!value) {
+            return '';
+        }
+        const d = new Date(value);
+        return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
     }
 
     private setBusy(busy: boolean): void {

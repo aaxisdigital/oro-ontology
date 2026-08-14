@@ -114,11 +114,115 @@ class OntologyDataApiManager
      * Returns the batch uuid.
      *
      * @param array<int, array<int|string, mixed>> $records list of payload objects (one per record)
+     * @param string|null                          $uuid    stamp the batch with this uuid instead of
+     *                                                      minting one — lets a flow execution group
+     *                                                      SEVERAL writes under one identity
      *
      * @throws OntologyApiException
      */
-    public function upsertRecords(OntologyEntity $entity, array $records, OntologyFlow $flow): string
+    public function upsertRecords(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid = null): string
     {
+        [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid);
+
+        // The async upsert flow expects unique_id and payload as parallel arrays (one per record).
+        $this->producer->send(OntologyDataUpsertTopic::getName(), [
+            'flow_id' => $flow->getId(),
+            'uuid' => $uuid,
+            'entity_id' => $entity->getId(),
+            'unique_id' => $uniqueIds,
+            'updated_at' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format(\DateTimeInterface::ATOM),
+            'payload' => $payloads,
+        ]);
+
+        return $uuid;
+    }
+
+    /**
+     * Like {@see upsertRecords()} but SYNCHRONOUS — for flow executions, which report the write's
+     * actual outcome in their step receipt. Calls the aaxis_ontology_data_upsert function directly
+     * (no queue) and records the SAME event row the async consumer would, completed on the spot
+     * (changed_ids + finished_at). Validation errors from the function throw instead of vanishing
+     * into a log line.
+     *
+     * @param array<int, array<int|string, mixed>> $records
+     *
+     * @return array{uuid: string, seen: array<int, string>, changed: array<int, string>}
+     *         seen = every unique id in the batch; changed = the ids actually created or updated
+     *         (unchanged records are excluded)
+     *
+     * @throws OntologyApiException
+     */
+    public function upsertRecordsSync(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid = null): array
+    {
+        [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid);
+
+        $connection = $this->connection();
+        $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $eventId = (int) $connection->fetchOne(
+            'INSERT INTO aaxis_ontology_data_events (flow_id, uuid, entity_id, unique_ids, started_at)'
+            . ' VALUES (?, ?, ?, ?, ?) RETURNING id',
+            [
+                $flow->getId(),
+                $uuid,
+                $entity->getId(),
+                // simple_array column: stored as a comma-separated string (same as the consumer).
+                implode(',', $uniqueIds),
+                $startedAt->format('Y-m-d H:i:s'),
+            ]
+        );
+
+        $input = json_encode([
+            'flow_id' => $flow->getId(),
+            'uuid' => $uuid,
+            'entity_id' => $entity->getId(),
+            'unique_id' => $uniqueIds,
+            'updated_at' => $startedAt->format(\DateTimeInterface::ATOM),
+            'payload' => $payloads,
+        ], JSON_THROW_ON_ERROR);
+        $raw = $connection->fetchOne('SELECT aaxis_ontology_data_upsert(CAST(? AS jsonb))', [$input]);
+        $response = json_decode((string) $raw, true);
+        $result = \is_array($response) && \is_array($response['payload'] ?? null) ? $response['payload'] : [];
+
+        $errors = $result['errors'] ?? null;
+        // The function marks untouched records with json null — created/updated ones carry a diff.
+        $changed = $errors === null
+            ? array_values(array_map('strval', array_keys(array_filter($result, static fn ($diff) => $diff !== null))))
+            : [];
+
+        $connection->update(
+            'aaxis_ontology_data_events',
+            [
+                'changed_ids' => $changed === [] ? null : implode(',', $changed),
+                'finished_at' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s'),
+            ],
+            ['id' => $eventId]
+        );
+
+        if ($errors !== null) {
+            throw OntologyApiException::invalidPayload(implode('; ', array_map('strval', (array) $errors)));
+        }
+
+        return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
+    }
+
+    /**
+     * The shared per-record validation of a write batch: unique attribute present and non-empty on
+     * every record, no repeated ids, attribute contract enforced, missing attribute definitions
+     * synced — returning the batch uuid (validated or minted) and the parallel id/payload arrays.
+     *
+     * @param array<int, array<int|string, mixed>> $records
+     *
+     * @return array{0: string, 1: array<int, string>, 2: array<int, array<int|string, mixed>>}
+     *
+     * @throws OntologyApiException
+     */
+    private function prepareUpsertBatch(OntologyEntity $entity, array $records, ?string $uuid): array
+    {
+        // The aaxis_ontology_data_upsert PG function also enforces this shape — reject a malformed
+        // caller-provided uuid here, where the caller can see it.
+        if ($uuid !== null && !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $uuid)) {
+            throw OntologyApiException::invalidPayload(sprintf('"%s" is not a valid batch uuid.', $uuid));
+        }
         if ($records === []) {
             throw OntologyApiException::invalidPayload('At least one record is required.');
         }
@@ -147,8 +251,8 @@ class OntologyDataApiManager
                 ));
             }
 
-            // A batch cannot repeat a unique id — the aaxis_ontology_data_upsert function rejects the
-            // WHOLE message (async, only logged), so fail fast here where the caller can see it.
+            // A batch cannot repeat a unique id — the aaxis_ontology_data_upsert function rejects
+            // the WHOLE batch, so fail fast here where the caller can see it.
             $idString = (string) $idValue;
             if (isset($seenAt[$idString])) {
                 throw OntologyApiException::invalidPayload(sprintf(
@@ -172,19 +276,7 @@ class OntologyDataApiManager
         // present in the payloads but not yet defined is created (datatype undefined, not required).
         $this->attributeReconciler->syncFromRecords($entity, $payloads);
 
-        $uuid = $this->generateUuid();
-
-        // The async upsert flow expects unique_id and payload as parallel arrays (one per record).
-        $this->producer->send(OntologyDataUpsertTopic::getName(), [
-            'flow_id' => $flow->getId(),
-            'uuid' => $uuid,
-            'entity_id' => $entity->getId(),
-            'unique_id' => $uniqueIds,
-            'updated_at' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format(\DateTimeInterface::ATOM),
-            'payload' => $payloads,
-        ]);
-
-        return $uuid;
+        return [$uuid ?? $this->generateUuid(), $uniqueIds, $payloads];
     }
 
     /**
@@ -228,6 +320,46 @@ class OntologyDataApiManager
             $pageSize,
             $offset
         );
+
+        $rows = $this->connection()->fetchAllAssociative($sql, $params, $types);
+
+        return array_map(fn (array $row): ?array => $this->decodePayload($row['payload']), $rows);
+    }
+
+    /**
+     * Reads an entity's records for a FLOW execution. Unlike {@see query()} — the outside-facing
+     * API, capped by the configured max page size — this is NOT paged: a flow step gets every
+     * record unless it asks for a limit itself. Optional ordering by ONE payload attribute uses
+     * jsonb comparison (numbers order numerically, strings lexically), with the row id as a
+     * stable tiebreaker.
+     *
+     * @return array<int, array<int|string, mixed>|null>
+     *
+     * @throws OntologyApiException
+     */
+    public function queryForFlow(
+        string $systemName,
+        string $entityName,
+        ?string $orderBy = null,
+        string $direction = 'ASC',
+        ?int $limit = null,
+    ): array {
+        $entity = $this->resolveEntity($systemName, $entityName, false);
+
+        $sql = 'SELECT payload FROM aaxis_ontology_data WHERE entity_id = :entity_id';
+        $params = ['entity_id' => $entity->getId()];
+        $types = ['entity_id' => ParameterType::INTEGER];
+
+        $orderBy = trim((string) $orderBy);
+        if ($orderBy !== '') {
+            $params['orderAttr'] = $orderBy;
+            $sql .= sprintf(' ORDER BY payload -> :orderAttr %s, id ASC', strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC');
+        } else {
+            $sql .= ' ORDER BY id ASC';
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= ' LIMIT ' . $limit; // validated integer, inlined (Postgres LIMIT param typing)
+        }
 
         $rows = $this->connection()->fetchAllAssociative($sql, $params, $types);
 
@@ -395,9 +527,10 @@ class OntologyDataApiManager
     }
 
     /**
-     * Generates an RFC 4122 version 4 UUID (mirrors OntologyDataController).
+     * Generates an RFC 4122 version 4 UUID (mirrors OntologyDataController). Public so callers
+     * batching SEVERAL upserts under one identity (e.g. a flow execution) can mint it up front.
      */
-    private function generateUuid(): string
+    public function generateUuid(): string
     {
         $data = random_bytes(16);
         $data[6] = \chr((\ord($data[6]) & 0x0f) | 0x40);

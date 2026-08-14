@@ -35,11 +35,17 @@
                             <span class="fa fa-wrench" aria-hidden="true"></span>
                             {{ 'aaxis.ontology.flow_editor.toolbox_toggle'|trans }}
                         </button>
-                        {# Debug is only offered for flows that contain a trigger (kept in sync by the component). #}
-                        <button type="button" class="btn" data-role="debug" hidden
+                        {# Debugging is only offered for flows that contain a trigger (kept in sync by the
+                           component): Debug steps through the flow one step at a time, Run Now executes it all. #}
+                        <button type="button" class="btn" data-role="debug-step" hidden
                                 title="{{ 'aaxis.ontology.flow_editor.debug'|trans }}">
                             <span class="fa fa-bug" aria-hidden="true"></span>
                             {{ 'aaxis.ontology.flow_editor.debug'|trans }}
+                        </button>
+                        <button type="button" class="btn" data-role="debug" hidden
+                                title="{{ 'aaxis.ontology.flow_editor.run_now'|trans }}">
+                            <span class="fa fa-play" aria-hidden="true"></span>
+                            {{ 'aaxis.ontology.flow_editor.run_now'|trans }}
                         </button>
                         {# Clean state at load: the exit button reads Close and Save is disabled
                            until something changes (flow-editor-component keeps both in sync). #}
@@ -55,7 +61,8 @@
                 <div class="aaxis-flow-editor__canvas" data-role="canvas">
                     <div class="aaxis-flow-editor__toolbox" data-role="toolbox">
                         <div class="aaxis-flow-editor__toolbox-handle" data-role="toolbox-handle">
-                            <span class="fa fa-arrows" aria-hidden="true"></span>
+                            {# Same icon as the topbar's show/hide Toolbox button. #}
+                            <span class="fa fa-wrench" aria-hidden="true"></span>
                             {{ 'aaxis.ontology.flow_editor.toolbox.title'|trans }}
                             <button type="button" class="aaxis-flow-editor__toolbox-hide" data-role="toolbox-hide"
                                     title="{{ 'aaxis.ontology.flow_editor.toolbox.hide'|trans }}"

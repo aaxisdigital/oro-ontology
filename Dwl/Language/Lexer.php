@@ -117,8 +117,45 @@ final class Lexer
             return $this->readIdentifier();
         }
 
+        // Date/time/period literal: |2003-10-01|, |23:57:59|, |PT1S|… — anything not date-shaped
+        // between the pipes falls back to the `|` operator (type unions).
+        if ($ch === '|') {
+            $literal = $this->tryReadDateLiteral();
+            if ($literal !== null) {
+                return $literal;
+            }
+        }
+
         // Operators and delimiters
         return $this->readOperator();
+    }
+
+    /**
+     * Attempts to read a DataWeave date/time/period literal. Only consumes input when the pipes
+     * wrap something date-shaped on ONE line: an ISO-8601 duration (-?P…) or a value starting
+     * like a date (2003-…) / time (23:…). Returns null otherwise, leaving `|` untouched.
+     */
+    private function tryReadDateLiteral(): ?Token
+    {
+        $line = $this->line;
+        $col = $this->column;
+        $end = $this->pos + 1;
+        while ($end < $this->length && $end - $this->pos <= 64) {
+            $c = $this->source[$end];
+            if ($c === '|') {
+                $inner = substr($this->source, $this->pos + 1, $end - $this->pos - 1);
+                if ($inner !== '' && preg_match('/^(-?P[0-9.YMWDTHS]+|\d{2,4}[:\-][0-9:.TZ+\-]+)$/i', $inner)) {
+                    $this->advance($end - $this->pos + 1);
+                    return new Token(TokenType::DateLiteral, $inner, $line, $col);
+                }
+                return null;
+            }
+            if ($c === "\n" || preg_match('/[^0-9A-Za-z:.+\-]/', $c)) {
+                return null;
+            }
+            $end++;
+        }
+        return null;
     }
 
     private function readDwVersion(): Token

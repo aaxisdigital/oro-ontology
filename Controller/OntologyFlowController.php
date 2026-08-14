@@ -137,7 +137,70 @@ class OntologyFlowController extends AbstractController
         if (!\is_array($payload)) {
             return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
         }
+        $parsed = $this->parseDebugDefinition($payload);
+        if ($parsed instanceof JsonResponse) {
+            return $parsed;
+        }
+        [$steps, $links, $input, $flow] = $parsed;
 
+        try {
+            $output = $this->container->get(FlowDebugExecutor::class)->execute($steps, $links, $input, $flow);
+        } catch (\RuntimeException $e) {
+            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
+        }
+
+        return new JsonResponse(['success' => true, 'output' => $output]);
+    }
+
+    /**
+     * Step-by-step debug ("Debug" button; the full run above is "Run Now"): executes ONE step of
+     * the execution order — or the rest of it when runAll — against the context accumulated so
+     * far, which the CLIENT holds between calls. Returns the new context plus progress metadata
+     * ({step, index, total, done}) for the stepper modal.
+     */
+    #[Route(path: '/flows/api/debug-step', name: 'aaxis_ontology_flow_debug_step', options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('aaxis_ontology_flow_update')]
+    #[CsrfProtection]
+    public function debugStepAction(Request $request): JsonResponse
+    {
+        $payload = json_decode($request->getContent(), true);
+        if (!\is_array($payload)) {
+            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+        }
+        $parsed = $this->parseDebugDefinition($payload);
+        if ($parsed instanceof JsonResponse) {
+            return $parsed;
+        }
+        [$steps, $links, $input, $flow] = $parsed;
+
+        $index = $payload['index'] ?? 0;
+        $context = $payload['context'] ?? null;
+        if (!\is_int($index) || $index < 0
+            || ($context !== null && (!\is_array($context) || ($context !== [] && array_is_list($context))))
+        ) {
+            return new JsonResponse(['success' => false, 'message' => 'Invalid debug state.'], 400);
+        }
+
+        try {
+            $result = $this->container->get(FlowDebugExecutor::class)
+                ->executeFrom($steps, $links, $input, $index, $context, $flow, ($payload['runAll'] ?? false) === true);
+        } catch (\RuntimeException $e) {
+            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
+        }
+
+        return new JsonResponse(['success' => true] + $result);
+    }
+
+    /**
+     * Validates/normalizes the shared debug payload (steps, links, trigger input, flowId) used by
+     * both debug endpoints. Returns the error response directly when something is malformed.
+     *
+     * @param array<string, mixed> $payload
+     *
+     * @return array{0: array<int, array<string, mixed>>, 1: array<int, array<string, mixed>>, 2: array<string, mixed>, 3: OntologyFlow|null}|JsonResponse
+     */
+    private function parseDebugDefinition(array $payload): array|JsonResponse
+    {
         $steps = [];
         $ids = [];
         foreach (\is_array($payload['steps'] ?? null) ? $payload['steps'] : [] as $step) {
@@ -176,13 +239,7 @@ class OntologyFlowController extends AbstractController
             }
         }
 
-        try {
-            $output = $this->container->get(FlowDebugExecutor::class)->execute($steps, $links, $input, $flow);
-        } catch (\RuntimeException $e) {
-            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
-        }
-
-        return new JsonResponse(['success' => true, 'output' => $output]);
+        return [$steps, $links, $input, $flow];
     }
 
     /**
@@ -252,10 +309,10 @@ class OntologyFlowController extends AbstractController
                         'message' => $this->trans('aaxis.ontology.flow_manager.invalid_step_config', ['{{ name }}' => $step['name']]),
                     ], 422);
                 }
-                // DWL scripts must parse to be saved.
-                $code = $step['config']['code'] ?? null;
-                if ($step['type'] === 'dwl_transform' && \is_string($code) && trim($code) !== '') {
-                    $dwlError = $this->container->get(DwlTransformer::class)->validate($code);
+                // Every DWL snippet a step carries (transform code, DWL-toggled body/content)
+                // must parse to be saved.
+                foreach ($this->stepDwlSnippets($step) as $snippet) {
+                    $dwlError = $this->container->get(DwlTransformer::class)->validate($snippet);
                     if ($dwlError !== null) {
                         return new JsonResponse([
                             'success' => false,
@@ -273,6 +330,8 @@ class OntologyFlowController extends AbstractController
         $entity->setName($name);
         $entity->setEnabled((bool) ($payload['enabled'] ?? true));
         $entity->setType(OntologyFlow::computeType($entity->getSteps()));
+        // Every save rewrites the flow definition — that IS a modification.
+        $entity->setLastModified(new \DateTime('now', new \DateTimeZone('UTC')));
 
         $em = $this->registry()->getManagerForClass(OntologyFlow::class);
         $em->persist($entity);
@@ -329,6 +388,38 @@ class OntologyFlowController extends AbstractController
      *
      * @param array{type: string, name: string, config: array<string, mixed>|null} $step
      */
+    /**
+     * The DWL snippets a step carries: the transform's code, plus body_content/content when their
+     * DWL toggles are on. All of them must parse for the flow to save.
+     *
+     * @param array{type: string, config: array<string, mixed>|null} $step
+     *
+     * @return array<int, string>
+     */
+    private function stepDwlSnippets(array $step): array
+    {
+        $config = $step['config'];
+        if (!\is_array($config)) {
+            return [];
+        }
+        $snippets = [];
+        if ($step['type'] === 'dwl_transform' && \is_string($config['code'] ?? null) && trim($config['code']) !== '') {
+            $snippets[] = $config['code'];
+        }
+        if (\in_array($step['type'], ['reader', 'writer'], true) && ($config['body_dwl'] ?? false) === true
+            && \is_string($config['body_content'] ?? null) && trim($config['body_content']) !== ''
+        ) {
+            $snippets[] = $config['body_content'];
+        }
+        if ($step['type'] === 'writer' && ($config['content_dwl'] ?? false) === true
+            && \is_string($config['content'] ?? null) && trim($config['content']) !== ''
+        ) {
+            $snippets[] = $config['content'];
+        }
+
+        return $snippets;
+    }
+
     private function isStepConfigValid(array $step): bool
     {
         $config = $step['config'];
@@ -341,27 +432,47 @@ class OntologyFlowController extends AbstractController
         $enumOk = static fn (string $key, array $allowed): bool =>
             !isset($config[$key]) || \in_array($config[$key], $allowed, true);
 
+        // The DWL on/off toggles (body_dwl / content_dwl) are lenient when absent, bool when set.
+        $boolOk = static fn (string $key): bool => !isset($config[$key]) || \is_bool($config[$key]);
+
+        // "flow-uuid" is reserved: every execution seeds its uuid into the context under it.
+        $destinationOk = static fn (): bool =>
+            $filled('destination') && strtolower(trim((string) $config['destination'])) !== 'flow-uuid';
+
+        $connectorOk = static fn (): bool =>
+            is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
+            && $filled('path')
+            && $enumOk('operation', ['get', 'put', 'post', 'patch', 'delete'])
+            && $enumOk('body', ['empty', 'json', 'text', 'xml'])
+            && $boolOk('body_dwl');
+
         return match ($step['type']) {
+            // Schedule: interval (value + unit) or cron (expression; also the LEGACY shape, which
+            // carries no mode). Expression syntax is checked separately with Cron\CronExpression.
+            'cron' => match ($config['mode'] ?? 'cron') {
+                'interval' => \is_int($config['value'] ?? null) && $config['value'] >= 1
+                    && \in_array($config['unit'] ?? null, ['minute', 'hour', 'day', 'week', 'month', 'year'], true),
+                'cron' => $filled('expression'),
+                default => false,
+            },
             'entity_change' => $filled('system') && $filled('entity'),
-            'dwl_transform' => $filled('code') && $filled('destination'),
-            'reader' => \is_string($config['destination'] ?? null) && trim($config['destination']) !== ''
+            'dwl_transform' => $filled('code') && $destinationOk(),
+            'reader' => $destinationOk()
                 && match ($config['reader'] ?? null) {
                     'entity' => $filled('system') && $filled('entity')
                         && $enumOk('mode', ['all', 'by_id'])
-                        && (($config['mode'] ?? 'all') !== 'by_id' || $filled('record_id')),
-                    'connector' => is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
-                        && $filled('path')
-                        && $enumOk('operation', ['get', 'put', 'post', 'patch', 'delete'])
-                        && $enumOk('body', ['empty', 'json', 'text', 'xml']),
+                        && (($config['mode'] ?? 'all') !== 'by_id' || $filled('record_id'))
+                        // "All" extras, each optional: order_by attribute (+ direction) and limit.
+                        && (!isset($config['order_by']) || \is_string($config['order_by']))
+                        && $enumOk('order_dir', ['asc', 'desc'])
+                        && $enumOk('limit', [1, 10, 100, 1000]),
+                    'connector' => $connectorOk(),
                     default => false,
                 },
-            'writer' => \is_string($config['destination'] ?? null) && trim($config['destination']) !== ''
+            'writer' => $destinationOk()
                 && match ($config['writer'] ?? null) {
-                    'entity' => $filled('system') && $filled('entity') && $filled('content'),
-                    'connector' => is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
-                        && $filled('path')
-                        && $enumOk('operation', ['get', 'put', 'post', 'patch', 'delete'])
-                        && $enumOk('body', ['empty', 'json', 'text', 'xml']),
+                    'entity' => $filled('system') && $filled('entity') && $filled('content') && $boolOk('content_dwl'),
+                    'connector' => $connectorOk(),
                     default => false,
                 },
             default => true,
@@ -382,6 +493,8 @@ class OntologyFlowController extends AbstractController
             'type' => $flow->getType(),
             'steps' => $flow->getSteps(),
             'design' => $flow->getDesign(),
+            'lastExecuted' => $flow->getLastExecuted()?->format(\DateTimeInterface::ATOM),
+            'lastModified' => $flow->getLastModified()?->format(\DateTimeInterface::ATOM),
         ];
     }
 

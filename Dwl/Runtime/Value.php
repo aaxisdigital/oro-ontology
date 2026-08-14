@@ -14,6 +14,7 @@ enum ValueType: string
     case Object = 'Object';
     case Date = 'Date';
     case DateTime = 'DateTime';
+    case Period = 'Period';
     case Regex = 'Regex';
     case Binary = 'Binary';
     case Function = 'Function';
@@ -116,6 +117,37 @@ class Value
         return new self(ValueType::Regex, $pattern);
     }
 
+    /**
+     * A temporal value; `kind` keeps the DataWeave flavor apart (date | time | localtime |
+     * local_datetime | datetime) — one ValueType, so comparisons/arithmetic stay uniform.
+     */
+    public static function dateTime(\DateTimeImmutable $dateTime, string $kind): self
+    {
+        return new self(ValueType::DateTime, $dateTime, ['kind' => $kind]);
+    }
+
+    /** An ISO-8601 period (|PT1S|…); the original text is kept for rendering. */
+    public static function period(\DateInterval $interval, string $iso): self
+    {
+        return new self(ValueType::Period, $interval, ['iso' => $iso]);
+    }
+
+    /** Renders a temporal value in its kind's ISO shape (fraction only when non-zero). */
+    public static function formatTemporal(Value $value): string
+    {
+        /** @var \DateTimeImmutable $dateTime */
+        $dateTime = $value->data;
+        $micro = $dateTime->format('u');
+        $fraction = $micro !== '000000' ? '.' . $micro : '';
+
+        return match ($value->attributes['kind'] ?? 'datetime') {
+            'date' => $dateTime->format('Y-m-d'),
+            'time', 'localtime' => $dateTime->format('H:i:s') . $fraction,
+            'local_datetime' => $dateTime->format('Y-m-d\TH:i:s') . $fraction,
+            default => $dateTime->format('Y-m-d\TH:i:s') . $fraction . $dateTime->format('P'),
+        };
+    }
+
     public static function func(callable $fn): self
     {
         return new self(ValueType::Function, $fn);
@@ -143,6 +175,9 @@ class Value
             ValueType::Null => null,
             ValueType::Array => array_map(fn(Value $v) => $v->toPhp(), $this->data),
             ValueType::Object => $this->objectToPhp(),
+            // Temporal values leave the engine as their ISO text (never as PHP objects).
+            ValueType::Date, ValueType::DateTime => self::formatTemporal($this),
+            ValueType::Period => (string) ($this->attributes['iso'] ?? ''),
             default => $this->data,
         };
     }

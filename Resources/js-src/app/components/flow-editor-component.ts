@@ -73,6 +73,135 @@ function isValidCron(expression: string): boolean {
     });
 }
 
+/**
+ * Pretty-prints DWL code by re-indenting each line to its brace/bracket/paren depth (2 spaces per
+ * level). Line structure is kept — only leading whitespace changes — and characters inside
+ * strings or after a // comment never count as delimiters.
+ */
+function prettyPrintDwl(code: string): string {
+    let depth = 0;
+    return code.split('\n').map(raw => {
+        const line = raw.trim();
+        const leadingClosers = (/^[)\]}]+/.exec(line) || [''])[0].length;
+        const indented = line === '' ? '' : '  '.repeat(Math.max(0, depth - leadingClosers)) + line;
+        let str: string | null = null;
+        for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            if (str !== null) {
+                if (ch === '\\') {
+                    i++;
+                } else if (ch === str) {
+                    str = null;
+                }
+                continue;
+            }
+            if (ch === '"' || ch === "'") {
+                str = ch;
+            } else if (ch === '/' && line[i + 1] === '/') {
+                break;
+            } else if (ch === '{' || ch === '[' || ch === '(') {
+                depth++;
+            } else if (ch === '}' || ch === ']' || ch === ')') {
+                depth = Math.max(0, depth - 1);
+            }
+        }
+        return indented;
+    }).join('\n');
+}
+
+/**
+ * Renders a value as a collapsible JSON tree: objects/arrays carry a caret and expand/collapse on
+ * click (everything starts expanded; a collapsed node shows an item-count preview), primitives
+ * reuse the aaxis-json-* color classes. JSON-faithful punctuation, pure DOM.
+ */
+function renderJsonTree(value: any): HTMLElement {
+    const root = document.createElement('div');
+    root.className = 'aaxis-json-view aaxis-json-tree';
+    root.appendChild(jsonTreeNode(value, null, true));
+    return root;
+}
+
+function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElement {
+    const node = document.createElement('div');
+    node.className = 'aaxis-json-tree__node';
+    const line = document.createElement('div');
+    line.className = 'aaxis-json-tree__line';
+    node.appendChild(line);
+    const comma = isLast ? '' : ',';
+
+    const spacer = (): HTMLElement => {
+        const el = document.createElement('span');
+        el.className = 'aaxis-json-tree__spacer';
+        return el;
+    };
+    const appendKey = (): void => {
+        if (key !== null) {
+            const k = document.createElement('span');
+            k.className = 'aaxis-json-key';
+            k.textContent = JSON.stringify(key);
+            line.appendChild(k);
+            line.appendChild(document.createTextNode(': '));
+        }
+    };
+
+    const isArray = Array.isArray(value);
+    if (!isArray && (value === null || typeof value !== 'object')) {
+        line.appendChild(spacer());
+        appendKey();
+        const v = document.createElement('span');
+        v.className = value === null ? 'aaxis-json-null'
+            : typeof value === 'string' ? 'aaxis-json-str'
+                : typeof value === 'number' ? 'aaxis-json-num' : 'aaxis-json-bool';
+        v.textContent = JSON.stringify(value);
+        line.appendChild(v);
+        line.appendChild(document.createTextNode(comma));
+        return node;
+    }
+
+    const entries: [string | null, any][] = isArray
+        ? value.map((item: any) => [null, item])
+        : Object.keys(value).map(k => [k, value[k]]);
+    const open = isArray ? '[' : '{';
+    const closeCh = isArray ? ']' : '}';
+
+    if (entries.length === 0) {
+        line.appendChild(spacer());
+        appendKey();
+        line.appendChild(document.createTextNode(open + closeCh + comma));
+        return node;
+    }
+
+    node.classList.add('aaxis-json-tree__node--collapsible');
+    const caret = document.createElement('button');
+    caret.type = 'button';
+    caret.className = 'aaxis-json-tree__caret';
+    caret.setAttribute('aria-label', 'Expand/collapse');
+    line.appendChild(caret);
+    appendKey();
+    line.appendChild(document.createTextNode(open));
+    const preview = document.createElement('span');
+    preview.className = 'aaxis-json-tree__preview';
+    preview.textContent = ` … ${entries.length} ${isArray ? 'item' : 'key'}${entries.length === 1 ? '' : 's'} … ${closeCh}${comma}`;
+    line.appendChild(preview);
+
+    const children = document.createElement('div');
+    children.className = 'aaxis-json-tree__children';
+    entries.forEach(([childKey, childValue], i) => {
+        children.appendChild(jsonTreeNode(childValue, childKey, i === entries.length - 1));
+    });
+    node.appendChild(children);
+
+    const closeLine = document.createElement('div');
+    closeLine.className = 'aaxis-json-tree__line aaxis-json-tree__close';
+    closeLine.appendChild(spacer());
+    closeLine.appendChild(document.createTextNode(closeCh + comma));
+    node.appendChild(closeLine);
+
+    // The whole opening line toggles (bigger target than the caret alone).
+    line.addEventListener('click', () => node.classList.toggle('is-collapsed'));
+    return node;
+}
+
 /** A directed connection: output port `fromPort` of step `from` → the input of step `to`. */
 interface FlowLink {
     from: string;
@@ -254,16 +383,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
-            const trigger = this.findTrigger();
-            if (!trigger) {
-                return;
-            }
-            // Cron (and queue) triggers just execute; entity change asks for its event input.
-            if (trigger.type === 'entity_change') {
-                this.openDebugInput(trigger);
-            } else {
-                this.runDebug({});
-            }
+            // Run Now: the whole flow in one request, final result only.
+            this.collectDebugInput(input => this.runDebug(input));
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="debug-step"]', (e: any) => {
+            e.preventDefault();
+            this.closeContextMenu();
+            // Debug: step-by-step — a state modal after every executed step.
+            this.collectDebugInput(input => this.stepDebug(input, 0, null));
         });
         this.$el.on('pointerdown.aaxisFlowEditor', '[data-role="toolbox"] [data-step-type]', (e: any) => {
             this.closeContextMenu();
@@ -696,9 +823,27 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     private setToolboxVisible(visible: boolean): void {
         this.toolbox().hidden = !visible;
+        if (visible) {
+            // A position saved/dragged on a larger window can sit entirely off-canvas after a
+            // resize — showing the toolbox always pulls it back into view.
+            this.clampToolboxIntoView();
+        }
         this.$el.find('[data-role="toolbox-toggle"]').toggleClass('is-active', visible);
         // Toolbox visibility is part of the persisted design → counts as a pending change.
         this.syncDirty();
+    }
+
+    /** Clamps the toolbox's explicit position into the current canvas (no-op at the CSS default spot). */
+    private clampToolboxIntoView(): void {
+        const el = this.toolbox();
+        if (el.hidden || el.style.left === '') {
+            return; // hidden (not measurable) or never moved — the default top-right spot is visible
+        }
+        const canvas = this.canvas();
+        const maxLeft = Math.max(0, canvas.clientWidth - el.offsetWidth);
+        const maxTop = Math.max(0, canvas.clientHeight - el.offsetHeight);
+        el.style.left = `${Math.min(Math.max(0, parseInt(el.style.left, 10) || 0), maxLeft)}px`;
+        el.style.top = `${Math.min(Math.max(0, parseInt(el.style.top, 10) || 0), maxTop)}px`;
     }
 
     // --- Persisted editor state (the `design` column) -----------------------------
@@ -841,12 +986,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
             // wider window would otherwise land outside and be clipped invisible.
             if (toolbox.visible) {
                 const el = this.toolbox();
-                const canvas = this.canvas();
-                const maxLeft = Math.max(0, canvas.clientWidth - el.offsetWidth);
-                const maxTop = Math.max(0, canvas.clientHeight - el.offsetHeight);
-                el.style.left = `${Math.min(Math.max(0, toolbox.x), maxLeft)}px`;
-                el.style.top = `${Math.min(Math.max(0, toolbox.y), maxTop)}px`;
+                el.style.left = `${Math.max(0, toolbox.x)}px`;
+                el.style.top = `${Math.max(0, toolbox.y)}px`;
                 el.style.right = 'auto';
+                this.clampToolboxIntoView();
             }
         }
         return true;
@@ -869,10 +1012,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     // --- Step tiles ------------------------------------------------------------
 
-    /** First "<type>-<n>" not used by any step on the canvas (names are unique per flow). */
+    /**
+     * First "<base>-<n>" not used by any step on the canvas (names are unique per flow). The base
+     * is the toolbox LABEL, sanitized — so a relabeled type (cron shown as "Schedule") names its
+     * steps after what the user sees ("schedule-1"), while every other label matches its type.
+     */
     private defaultName(type: string): string {
+        const label = this.stepMeta[type] ? this.stepMeta[type].label : type;
+        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || type;
         for (let n = 1; ; n++) {
-            const candidate = `${type}-${n}`;
+            const candidate = `${base}-${n}`;
             if (!this.nameTaken(candidate)) {
                 return candidate;
             }
@@ -980,8 +1129,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const $error = $('<p/>', {'class': 'aaxis-flow-editor__settings-error aaxis-flow-editor__settings-feedback', text: ''});
         const reposition = (): void => this.positionSettings($panel[0], step.el);
 
-        // Type-specific configuration blocks; each returns error() + merge() for the submit.
-        const sections: {error: () => string; merge: (config: Record<string, any>) => Record<string, any>}[] = [];
+        // Type-specific configuration blocks; each returns error() + merge() for the submit, and
+        // optionally a `ready` promise while its catalog data (systems/connectors…) still loads.
+        const sections: {error: () => string; merge: (config: Record<string, any>) => Record<string, any>; ready?: Promise<any>}[] = [];
         if (step.type === 'reader' || step.type === 'writer') {
             // Reader/Writer own the name placement (first fixed row: Name | Type | Destination).
             $top.prop('hidden', false);
@@ -989,14 +1139,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'dwl_transform') {
             $top.prop('hidden', false);
             sections.push(this.dwlSection($top, $body, $panel[0], step.config || {}, $input));
+        } else if (step.type === 'cron') {
+            // Schedule owns the first row too (Name | Mode).
+            $top.prop('hidden', false);
+            sections.push(this.scheduleSection($top, $body, step.config || {}, $input));
         } else {
             $body.append(
                 $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __('aaxis.ontology.flow_editor.step_name_label')}),
                 $input
             );
-            if (step.type === 'cron') {
-                sections.push(this.cronSection($body, step));
-            } else if (step.type === 'entity_change') {
+            if (step.type === 'entity_change') {
                 sections.push(this.systemEntitySection($body, step.config || {}));
             }
         }
@@ -1011,13 +1163,43 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         $(document.body).append($backdrop, $panel);
         this.positionSettings($panel[0], step.el);
-        $input.trigger('focus').trigger('select');
+
+        // While section catalogs load, a spinner overlay blocks every interaction in the panel
+        // (buttons included); focus and submit unlock once all loads settle.
+        const readies = sections.map(s => s.ready).filter(Boolean) as Promise<any>[];
+        let loading = readies.length > 0;
+        if (loading) {
+            const $loading = $('<div/>', {'class': 'aaxis-flow-editor__settings-loading'})
+                .append($('<span/>', {'class': 'fa fa-spinner fa-spin', 'aria-hidden': 'true'}));
+            $panel.append($loading);
+            Promise.allSettled(readies).then(() => {
+                loading = false;
+                $loading.remove();
+                this.positionSettings($panel[0], step.el);
+                $input.trigger('focus').trigger('select');
+            });
+        } else {
+            $input.trigger('focus').trigger('select');
+        }
 
         const close = (): void => {
+            $(document).off('keydown.aaxisFlowSettings');
             $backdrop.remove();
             $panel.remove();
         };
+        // Escape anywhere = the Cancel button (works during the loading overlay too — closing
+        // discards everything, so there is nothing half-loaded to protect).
+        $(document).on('keydown.aaxisFlowSettings', (e: any) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                close();
+            }
+        });
         const submit = (): void => {
+            if (loading) {
+                return;
+            }
             $error.text('');
             const name = String($input.val() || '').trim();
             if (name === '') {
@@ -1063,17 +1245,85 @@ class OntologyFlowEditorComponent extends BaseComponent {
         return $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __(`aaxis.ontology.flow_editor.${key}`)});
     }
 
-    /** Cron: a required, validated linux cron expression. */
-    private cronSection($body: any, step: PlacedStep): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    /**
+     * Schedule trigger (type `cron`): first row Name | Mode (Interval | Cron). Interval asks for
+     * a value + unit; Cron asks for a linux cron expression whose textbox turns light red while
+     * the value is invalid and shows, below it, symbol guidance for the cron FIELD the caret is
+     * currently editing (updates as the input/caret changes). Legacy configs ({expression} only)
+     * open in Cron mode.
+     */
+    private scheduleSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        const initialMode = initial.mode === 'interval' || (initial.mode === undefined && !initial.expression)
+            ? 'interval' : 'cron';
+        const $mode = $('<select/>', {'class': 'form-control'});
+        $mode.append($('<option/>', {value: 'interval', text: __('aaxis.ontology.flow_editor.schedule_mode_interval'), selected: initialMode === 'interval'}));
+        $mode.append($('<option/>', {value: 'cron', text: __('aaxis.ontology.flow_editor.schedule_mode_cron'), selected: initialMode === 'cron'}));
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.4),
+            this.settingsCol('schedule_mode_label', $mode)
+        ));
+
+        // Interval: every <value> <unit>.
+        const $value = $('<input/>', {type: 'number', 'class': 'form-control', min: 1, step: 1});
+        $value.val(initialMode === 'interval' && initial.value ? String(initial.value) : '1');
+        const $unit = $('<select/>', {'class': 'form-control'});
+        ['minute', 'hour', 'day', 'week', 'month', 'year'].forEach(unit => {
+            $unit.append($('<option/>', {
+                value: unit, text: __(`aaxis.ontology.flow_editor.schedule_unit_${unit}`),
+                selected: initialMode === 'interval' && initial.unit === unit
+            }));
+        });
+        const $intervalRow = $('<div/>', {'class': 'aaxis-flow-editor__settings-row'})
+            .append(this.settingsCol('schedule_value_label', $value), this.settingsCol('schedule_unit_label', $unit));
+
+        // Cron: the expression + live validity tint + per-field symbol guidance.
         const $cron = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: (step.config && step.config.expression) || '',
+            type: 'text', 'class': 'form-control aaxis-flow-editor__cron-input', maxlength: 128,
             placeholder: __('aaxis.ontology.flow_editor.cron_expression_placeholder')
         });
-        $body.append(this.settingsLabel('cron_expression_label'), $cron);
+        $cron.val(initialMode === 'cron' ? String(initial.expression || '') : '');
+        const $hint = $('<div/>', {'class': 'aaxis-flow-editor__cron-hint'});
+        const $cronBlock = $('<div/>').append(this.settingsLabel('cron_expression_label'), $cron, $hint);
+        $body.append($intervalRow, $cronBlock);
+
+        const FIELD_EXAMPLES = ['*  */15  0,30  10-20', '*  */2  8-18  0,12', '*  1  1,15  */2', '*  1-12  JAN,JUL  */3', '*  0-6  MON-FRI  SUN'];
+        const syncCron = (): void => {
+            const text = String($cron.val() || '');
+            $cron.toggleClass('aaxis-flow-editor__cron-input--invalid', !isValidCron(text));
+            if (text.trim().startsWith('@')) {
+                $hint.text(__('aaxis.ontology.flow_editor.schedule_cron_macros'));
+                return;
+            }
+            // Which of the 5 fields is being edited: whitespace groups fully before the caret.
+            const caret = ($cron[0] as HTMLInputElement).selectionStart ?? text.length;
+            const before = text.slice(0, caret);
+            const tokens = before.trim() === '' ? [] : before.trim().split(/\s+/);
+            const idx = Math.min(4, /\s$/.test(before) || tokens.length === 0 ? tokens.length : tokens.length - 1);
+            const field = __(`aaxis.ontology.flow_editor.schedule_cron_field_${idx}`);
+            $hint.text(`${field} — ${FIELD_EXAMPLES[idx]}`);
+        };
+        $cron.on('input keyup click focus', syncCron);
+        syncCron();
+
+        const syncMode = (): void => {
+            const mode = String($mode.val());
+            $intervalRow.toggle(mode === 'interval');
+            $cronBlock.toggle(mode === 'cron');
+        };
+        $mode.on('change', syncMode);
+        syncMode();
+
         return {
-            error: () => isValidCron(String($cron.val() || '')) ? '' : __('aaxis.ontology.flow_editor.cron_expression_invalid'),
-            merge: config => ({...config, expression: String($cron.val() || '').trim()})
+            error: () => {
+                if (String($mode.val()) === 'interval') {
+                    const value = Number($value.val());
+                    return Number.isInteger(value) && value >= 1 ? '' : __('aaxis.ontology.flow_editor.schedule_value_invalid');
+                }
+                return isValidCron(String($cron.val() || '')) ? '' : __('aaxis.ontology.flow_editor.cron_expression_invalid');
+            },
+            merge: config => String($mode.val()) === 'interval'
+                ? {...config, mode: 'interval', value: Number($value.val()), unit: String($unit.val())}
+                : {...config, mode: 'cron', expression: String($cron.val() || '').trim()}
         };
     }
 
@@ -1083,12 +1333,77 @@ class OntologyFlowEditorComponent extends BaseComponent {
             .append(this.settingsLabel(labelKey), $control);
     }
 
+    /** A field label with an extra control (e.g. the DWL switch) right-aligned on the same line. */
+    private settingsLabelRow(labelKey: string, $extra: any): any {
+        return $('<div/>', {'class': 'aaxis-flow-editor__settings-labelrow'})
+            .append(this.settingsLabel(labelKey), $extra);
+    }
+
+    /**
+     * Compact "DWL" on/off switch shown next to a field label: ON means the field's text is
+     * evaluated as a DWL expression against the execution context, OFF keeps it literal.
+     */
+    private dwlToggle(initialOn: boolean): {$el: any; isOn: () => boolean} {
+        const $input = $('<input/>', {type: 'checkbox'});
+        $input.prop('checked', initialOn);
+        const $el = $('<label/>', {
+            'class': 'aaxis-flow-editor__switch aaxis-flow-editor__switch--small',
+            title: __('aaxis.ontology.flow_editor.dwl_toggle_title')
+        }).append(
+            $input,
+            $('<span/>', {'class': 'aaxis-flow-editor__switch-track'})
+                .append($('<span/>', {'class': 'aaxis-flow-editor__switch-thumb'})),
+            $('<span/>', {'class': 'aaxis-flow-editor__switch-text', text: __('aaxis.ontology.flow_editor.dwl_toggle_label')})
+        );
+        return {$el, isOn: () => Boolean($input.prop('checked'))};
+    }
+
+    /**
+     * Reusable "text or DWL" field: the title row (label + the pure-text/DWL switch) and a
+     * textarea, as one component. Turning DWL on pretty-prints the code (re-indented to its
+     * nesting) and switches the textarea to code styling — same when a field opens with DWL
+     * already on. `fixed` renders an always-DWL variant with no switch (e.g. the transform's
+     * code), `compact` the lower in-column textarea.
+     */
+    private dwlTextField(labelKey: string, initial: {value: string; dwl: boolean}, opts: {compact?: boolean; fixed?: boolean} = {}): {$el: any; value: () => string; isDwl: () => boolean} {
+        const toggle = this.dwlToggle(Boolean(opts.fixed) || initial.dwl);
+        const isDwl = (): boolean => Boolean(opts.fixed) || toggle.isOn();
+        const $textarea = $('<textarea/>', {
+            'class': 'form-control aaxis-flow-editor__settings-textarea'
+                + (opts.compact ? ' aaxis-flow-editor__settings-textarea--compact' : '')
+        });
+        $textarea.val(initial.value); // textarea value must be set via .val()
+
+        const syncStyle = (): void => {
+            $textarea.attr('spellcheck', isDwl() ? 'false' : 'true');
+            $textarea.toggleClass('aaxis-flow-editor__settings-textarea--code', isDwl());
+        };
+        toggle.$el.find('input').on('change', () => {
+            syncStyle();
+            if (isDwl()) {
+                $textarea.val(prettyPrintDwl(String($textarea.val() || '')));
+            }
+        });
+        if (isDwl()) {
+            $textarea.val(prettyPrintDwl(String($textarea.val() || '')));
+        }
+        syncStyle();
+
+        const $el = $('<div/>', {'class': 'aaxis-flow-editor__dwl-field'}).append(
+            opts.fixed ? this.settingsLabel(labelKey) : this.settingsLabelRow(labelKey, toggle.$el),
+            $textarea
+        );
+        return {$el, value: () => String($textarea.val() || ''), isDwl};
+    }
+
     /**
      * System + Entity pair (entity options follow the chosen system), fed by ONE
      * aaxis_ontology_entity_list fetch. Both values are required. `inline` renders the two
-     * selects side by side on one row instead of stacked.
+     * selects side by side on one row instead of stacked. `onChange` fires whenever the selected
+     * entity may have changed (initial load included); `attributes()` exposes the currently
+     * selected entity's attributes (e.g. for the reader's Order By options).
      */
-    private systemEntitySection($body: any, initial: Record<string, any>, inline = false): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private systemEntitySection($body: any, initial: Record<string, any>, inline = false, onChange?: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>; attributes: () => {name: string}[]} {
         const $system = $('<select/>', {'class': 'form-control', disabled: true});
         const $entity = $('<select/>', {'class': 'form-control', disabled: true});
         const loadingOption = (): any => $('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')});
@@ -1101,7 +1416,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $body.append(this.settingsLabel('config_system_label'), $system, this.settingsLabel('config_entity_label'), $entity);
         }
 
-        let entities: {name: string; displayName?: string; systemName?: string}[] = [];
+        let entities: {name: string; displayName?: string; systemName?: string; attributes?: {name: string}[]}[] = [];
         const fillEntities = (): void => {
             const system = String($system.val() || '');
             const current = String(initial.entity || '');
@@ -1111,7 +1426,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             });
         };
 
-        fetch(routing.generate('aaxis_ontology_entity_list'), {credentials: 'same-origin'})
+        const ready = fetch(routing.generate('aaxis_ontology_entity_list'), {credentials: 'same-origin'})
             .then(r => r.json())
             .then((data: {systems?: {name: string}[]; entities?: any[]}) => {
                 entities = data.entities || [];
@@ -1122,14 +1437,32 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 $system.prop('disabled', false);
                 $entity.prop('disabled', false);
                 fillEntities();
+                if (onChange) {
+                    onChange();
+                }
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
-        $system.on('change', fillEntities);
+        $system.on('change', () => {
+            fillEntities();
+            if (onChange) {
+                onChange();
+            }
+        });
+        if (onChange) {
+            $entity.on('change', onChange);
+        }
 
         return {
             error: () => (String($system.val() || '') !== '' && String($entity.val() || '') !== '')
                 ? '' : __('aaxis.ontology.flow_editor.config_system_entity_required'),
-            merge: config => ({...config, system: String($system.val()), entity: String($entity.val())})
+            merge: config => ({...config, system: String($system.val()), entity: String($entity.val())}),
+            ready,
+            attributes: () => {
+                const system = String($system.val() || '');
+                const entity = String($entity.val() || '');
+                const match = entities.find(e => e.systemName === system && e.name === entity);
+                return (match && match.attributes) || [];
+            }
         };
     }
 
@@ -1140,7 +1473,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * identical for both: picker, then rest_api-only operation | path | body (+ body content in
      * the right column); sftp/file_system only the path.
      */
-    private ioSection(kind: 'reader' | 'writer', $top: any, $body: any, $side: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private ioSection(kind: 'reader' | 'writer', $top: any, $body: any, $side: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
         const isMine = initial[kind] !== undefined;
         const variant = isMine ? String(initial[kind] || '') : '';
         const $type = $('<select/>', {'class': 'form-control'});
@@ -1158,16 +1491,29 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.settingsCol('destination_label', $destination)
         ));
 
-        // Entity variant: system + entity on one row, then the kind-specific row.
+        // Entity variant: system + entity on one row, then the kind-specific row. Entity changes
+        // refresh the reader's Order By options (assigned below, reader only).
+        let onEntityChange: () => void = () => undefined;
         const $entityBlock = $('<div/>');
         $body.append($entityBlock);
-        const entityPair = this.systemEntitySection($entityBlock, variant === 'entity' ? initial : {}, true);
+        const entityPair = this.systemEntitySection($entityBlock, variant === 'entity' ? initial : {}, true, () => onEntityChange());
 
-        // reader: load-mode (+ id); writer: the Content (context key) to write.
+        // reader: load-mode (+ id); writer: the Content to write — a context key, or a DWL
+        // expression when its toggle is ON (always a textarea so toggling changes no visuals).
         const $mode = $('<select/>', {'class': 'form-control'});
         const $recordId = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255});
         let $recordIdCol: any = null;
-        const $content = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 128});
+        const content = this.dwlTextField('writer_content_label', {
+            value: variant === 'entity' ? String(initial.content || 'payload') : 'payload',
+            dwl: variant === 'entity' && initial.content_dwl === true
+        }, {compact: true});
+        // "All" extras: Order By (the selected entity's attributes) + direction + limit.
+        const $orderBy = $('<select/>', {'class': 'form-control'});
+        const $orderDir = $('<select/>', {'class': 'form-control'});
+        const $limit = $('<select/>', {'class': 'form-control'});
+        let $orderByCol: any = null;
+        let $orderDirCol: any = null;
+        let $limitCol: any = null;
         if (kind === 'reader') {
             $mode.append($('<option/>', {value: 'all', text: __('aaxis.ontology.flow_editor.reader_mode_all')}));
             $mode.append($('<option/>', {
@@ -1176,11 +1522,35 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }));
             $recordId.val(variant === 'entity' ? String(initial.record_id || '') : '');
             $recordIdCol = this.settingsCol('reader_record_id_label', $recordId, 1.4);
+
+            ['asc', 'desc'].forEach(dir => $orderDir.append($('<option/>', {
+                value: dir, text: dir.toUpperCase(),
+                selected: (variant === 'entity' ? String(initial.order_dir || 'asc') : 'asc') === dir
+            })));
+            const currentLimit = variant === 'entity' && initial.limit ? String(initial.limit) : '';
+            $limit.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_limit_none'), selected: currentLimit === ''}));
+            ['1', '10', '100', '1000'].forEach(value => $limit.append($('<option/>', {value, text: value, selected: value === currentLimit})));
+
+            $orderByCol = this.settingsCol('reader_order_by_label', $orderBy, 1.3);
+            $orderDirCol = this.settingsCol('reader_order_dir_label', $orderDir, 0.8);
+            $limitCol = this.settingsCol('reader_limit_label', $limit, 0.9);
             $entityBlock.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'})
-                .append(this.settingsCol('reader_mode_label', $mode), $recordIdCol));
+                .append(this.settingsCol('reader_mode_label', $mode, 0.9), $recordIdCol, $orderByCol, $orderDirCol, $limitCol));
+
+            // Order By options follow the SELECTED entity; the saved value survives the first fill.
+            let pendingOrderBy = variant === 'entity' ? String(initial.order_by || '') : '';
+            onEntityChange = (): void => {
+                const current = String($orderBy.val() || '') || pendingOrderBy;
+                pendingOrderBy = '';
+                $orderBy.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_order_by_none')}));
+                entityPair.attributes().forEach(attribute => $orderBy.append($('<option/>', {
+                    value: attribute.name, text: attribute.name, selected: attribute.name === current
+                })));
+                syncBlocks();
+            };
+            $orderBy.on('change', () => syncBlocks());
         } else {
-            $content.val(variant === 'entity' ? String(initial.content || 'payload') : 'payload');
-            $entityBlock.append(this.settingsLabel('writer_content_label'), $content);
+            $entityBlock.append(content.$el);
         }
 
         // Connector variant: the connector, then per-connector-type fields.
@@ -1215,7 +1585,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         // id -> connector type, so the row adapts to the chosen connector (rest_api vs sftp/fs).
         const connectorTypes: Record<string, string> = {};
-        fetch(routing.generate('aaxis_ontology_connector_list'), {credentials: 'same-origin'})
+        const connectorsReady = fetch(routing.generate('aaxis_ontology_connector_list'), {credentials: 'same-origin'})
             .then(r => r.json())
             .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
                 const current = variant === 'connector' ? String(initial.connector || '') : '';
@@ -1233,11 +1603,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
 
-        // Body content lives in the right column, below the fixed first row. NOTE: a textarea's
-        // value must be set via .val() — a `value` attribute in the creation map is ignored.
-        const $bodyContent = $('<textarea/>', {'class': 'form-control aaxis-flow-editor__settings-textarea'});
-        $bodyContent.val(variant === 'connector' ? String(initial.body_content || '') : '');
-        $side.append(this.settingsLabel('body_content_label'), $bodyContent);
+        // Body content lives in the right column, below the fixed first row.
+        const bodyContent = this.dwlTextField('body_content_label', {
+            value: variant === 'connector' ? String(initial.body_content || '') : '',
+            dwl: variant === 'connector' && initial.body_dwl === true
+        });
+        $side.append(bodyContent.$el);
 
         const isRest = (): boolean => connectorTypes[String($connector.val() || '')] === 'rest_api';
         const syncBlocks = (): void => {
@@ -1245,7 +1616,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $entityBlock.toggle(type === 'entity');
             $connectorBlock.toggle(type === 'connector');
             if ($recordIdCol) {
-                $recordIdCol.toggle(String($mode.val()) === 'by_id');
+                const all = String($mode.val()) !== 'by_id';
+                $recordIdCol.toggle(!all);
+                // The "All" extras; the direction only matters once an Order By is chosen.
+                $orderByCol.toggle(all);
+                $orderDirCol.toggle(all && String($orderBy.val() || '') !== '');
+                $limitCol.toggle(all);
             }
             // Connector fields appear only once a connector is chosen; operation/body are
             // rest_api-only (sftp/file_system need just the path).
@@ -1279,7 +1655,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     if (kind === 'reader' && String($mode.val()) === 'by_id' && String($recordId.val() || '').trim() === '') {
                         return __('aaxis.ontology.flow_editor.reader_record_id_required');
                     }
-                    if (kind === 'writer' && String($content.val() || '').trim() === '') {
+                    if (kind === 'writer' && content.value().trim() === '') {
                         return __('aaxis.ontology.flow_editor.writer_content_required');
                     }
                 } else {
@@ -1290,8 +1666,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
                         return __('aaxis.ontology.flow_editor.reader_path_required');
                     }
                 }
-                if (String($destination.val() || '').trim() === '') {
-                    return __('aaxis.ontology.flow_editor.destination_required');
+                const destinationError = this.destinationError($destination);
+                if (destinationError) {
+                    return destinationError;
                 }
                 return '';
             },
@@ -1304,9 +1681,20 @@ class OntologyFlowEditorComponent extends BaseComponent {
                         withPair.mode = String($mode.val());
                         if (withPair.mode === 'by_id') {
                             withPair.record_id = String($recordId.val() || '').trim();
+                        } else {
+                            const orderBy = String($orderBy.val() || '');
+                            if (orderBy !== '') {
+                                withPair.order_by = orderBy;
+                                withPair.order_dir = String($orderDir.val());
+                            }
+                            const limit = String($limit.val() || '');
+                            if (limit !== '') {
+                                withPair.limit = Number(limit);
+                            }
                         }
                     } else {
-                        withPair.content = String($content.val() || '').trim();
+                        withPair.content = content.value().trim();
+                        withPair.content_dwl = content.isDwl();
                     }
                     return withPair;
                 }
@@ -1316,11 +1704,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     base.operation = String($operation.val());
                     base.body = String($bodyType.val());
                     if (base.body !== 'empty') {
-                        base.body_content = String($bodyContent.val() || '');
+                        base.body_content = bodyContent.value();
+                        base.body_dwl = bodyContent.isDwl();
                     }
                 }
                 return base;
-            }
+            },
+            // Both catalogs (systems/entities + connectors) must be in before the panel unlocks.
+            ready: Promise.allSettled([entityPair.ready, connectorsReady])
         };
     }
 
@@ -1339,28 +1730,39 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.settingsCol('destination_label', $destination)
         ));
 
-        const $code = $('<textarea/>', {'class': 'form-control aaxis-flow-editor__settings-textarea', spellcheck: 'false'});
-        $code.val(String(initial.code || ''));
-        $body.append(this.settingsLabel('dwl_code_label'), $code);
+        const code = this.dwlTextField('dwl_code_label', {value: String(initial.code || ''), dwl: true}, {fixed: true});
+        $body.append(code.$el);
         // A code editor deserves the wide panel from the start.
         panel.classList.add('is-wide');
 
         return {
             error: () => {
-                if (String($code.val() || '').trim() === '') {
+                if (code.value().trim() === '') {
                     return __('aaxis.ontology.flow_editor.dwl_code_required');
                 }
-                if (String($destination.val() || '').trim() === '') {
-                    return __('aaxis.ontology.flow_editor.destination_required');
-                }
-                return '';
+                return this.destinationError($destination);
             },
             merge: config => ({
                 ...config,
-                code: String($code.val() || ''),
+                code: code.value(),
                 destination: String($destination.val() || '').trim()
             })
         };
+    }
+
+    /**
+     * Validates a destination input: required, and "flow-uuid" is reserved (every execution seeds
+     * its uuid into the context under that key). Returns '' when valid.
+     */
+    private destinationError($destination: any): string {
+        const value = String($destination.val() || '').trim();
+        if (value === '') {
+            return __('aaxis.ontology.flow_editor.destination_required');
+        }
+        if (value.toLowerCase() === 'flow-uuid') {
+            return __('aaxis.ontology.flow_editor.destination_reserved');
+        }
+        return '';
     }
 
     /** Places the settings panel next to the tile (right side preferred), clamped to the viewport. */
@@ -1418,7 +1820,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         this.steps.forEach(s => s.el.classList.toggle('is-unreachable', !reachable.has(s.id)));
         // Debug is only offered for flows that contain a REAL trigger (not a sub-flow start).
-        this.$el.find('[data-role="debug"]').prop('hidden', !this.findTrigger());
+        this.$el.find('[data-role="debug"], [data-role="debug-step"]').prop('hidden', !this.findTrigger());
     }
 
     /** Small confirm dialog (Cancel / <confirmLabel>) used by the trigger/start interplays. */
@@ -1964,8 +2366,25 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     // --- Debug execution ---------------------------------------------------------
 
+    /**
+     * Gathers the trigger input and hands it to `run` — cron/queue triggers execute right away,
+     * entity change first asks for its event (system/entity + payload). Shared by Run Now and
+     * the step-by-step Debug.
+     */
+    private collectDebugInput(run: (input: Record<string, any>) => void): void {
+        const trigger = this.findTrigger();
+        if (!trigger) {
+            return;
+        }
+        if (trigger.type === 'entity_change') {
+            this.openDebugInput(trigger, run);
+        } else {
+            run({});
+        }
+    }
+
     /** Entity-change triggers debug with an event: system/entity (prefilled from the trigger) + payload. */
-    private openDebugInput(trigger: PlacedStep): void {
+    private openDebugInput(trigger: PlacedStep, run: (input: Record<string, any>) => void): void {
         const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.debug_input_title'), width: '560px'});
         const $content = dialog.open();
 
@@ -2009,7 +2428,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
             const input = pair.merge({payload});
             dialog.close();
-            this.runDebug(input);
+            run(input);
         });
     }
 
@@ -2039,14 +2458,77 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-    /** The accumulated output context, pretty-printed as JSON. */
+    /** The accumulated output context as a collapsible JSON tree. */
     private showDebugResult(output: any): void {
         const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.debug_result_title'), width: '640px'});
         const $content = dialog.open();
-        $content.append($('<pre/>', {
-            'class': 'aaxis-json-view',
-            text: JSON.stringify(output ?? {}, null, 2)
-        }));
+        $content.append(renderJsonTree(output ?? {}));
+    }
+
+    /**
+     * Step-by-step debug: executes the step at `index` server-side (or everything left, with
+     * `runAll`) against the client-held context, then shows the state modal. Closing that modal
+     * without choosing (Cancel/Escape/backdrop) aborts the session — already-executed writers
+     * have queued their writes, that cannot be undone.
+     */
+    private stepDebug(input: Record<string, any>, index: number, context: Record<string, any> | null, runAll = false): void {
+        const $button = this.$el.find('[data-role="debug-step"]');
+        $button.prop('disabled', true);
+        const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
+        $button.prepend($spinner);
+
+        this.apiFetch(routing.generate('aaxis_ontology_flow_debug_step'), 'POST', {
+            flowId: this.flow && this.flow.id ? this.flow.id : null,
+            steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, config: s.config || null})),
+            links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
+            input, index, context, runAll
+        }).then(res => {
+            if (!res.ok || !res.data || !res.data.success) {
+                throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
+            }
+            this.showStepState(res.data, input);
+        }).catch((err: Error) => {
+            messenger.notificationFlashMessage('error', err.message || __('aaxis.ontology.flow_editor.debug_error'));
+        }).finally(() => {
+            $spinner.remove();
+            $button.prop('disabled', false);
+        });
+    }
+
+    /**
+     * The after-step state modal: the context tree plus Cancel | Run all | Next step — or just
+     * Close once the last step ran (that view IS the final result).
+     */
+    private showStepState(state: any, input: Record<string, any>): void {
+        const done = Boolean(state.done);
+        const title = done
+            ? __('aaxis.ontology.flow_editor.debug_result_title')
+            : `${__('aaxis.ontology.flow_editor.debug_step_title')} — ${state.step.name} (${state.index + 1}/${state.total})`;
+        const dialog = new Dialog({title, width: '640px'});
+        const $content = dialog.open();
+        $content.append(renderJsonTree(state.context ?? {}));
+
+        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
+        if (done) {
+            const $close = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.close')});
+            $close.on('click', () => dialog.close());
+            $actions.append($close);
+        } else {
+            const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
+            const $runAll = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.debug_run_all')});
+            const $next = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.debug_next_step')});
+            $cancel.on('click', () => dialog.close());
+            $runAll.on('click', () => {
+                dialog.close();
+                this.stepDebug(input, state.index + 1, state.context, true);
+            });
+            $next.on('click', () => {
+                dialog.close();
+                this.stepDebug(input, state.index + 1, state.context, false);
+            });
+            $actions.append($cancel, $runAll, $next);
+        }
+        $content.append($actions);
     }
 
     // --- Persistence -----------------------------------------------------------

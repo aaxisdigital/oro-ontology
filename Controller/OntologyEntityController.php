@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Controller;
 
+use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyData;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntityAttribute;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
+use Aaxis\Bundle\OntologyBundle\Manager\DwlOutputFormatter;
+use Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\EntityBundle\Provider\EntityFieldProvider;
 use Oro\Bundle\EntityBundle\Provider\EntityProvider;
@@ -125,6 +128,147 @@ class OntologyEntityController extends AbstractOntologyController
     public function deleteAction(OntologyEntity $entity): JsonResponse
     {
         return $this->deleteEntity($entity);
+    }
+
+    /**
+     * DWL playground: evaluates a DataWeave script against the entity's stored records.
+     *
+     * Body `{script, limit}` — `limit` null/0 means "no limit" (the user opted out; can be slow on
+     * large entities, which is why the UI defaults to 100). The script sees ONE binding, `payload`,
+     * holding the list of record payloads, and its `output <mime>` header decides how the result is
+     * rendered ({@see DwlOutputFormatter}) — so the on-screen Result and the exported file match.
+     *
+     * Script errors are NOT HTTP errors: they come back as `{success: false, error}` with a 200 so
+     * the playground can show them in the Result area like any other outcome.
+     *
+     * Permissions: entity VIEW opens the page, but the response contains record CONTENT, so
+     * `OntologyData` VIEW is required as well — otherwise entity-only metadata access would be
+     * enough to read the data itself. Scripts are additionally screened by {@see DwlScriptGuard}
+     * (the engine's `dw::Runtime::props()` would otherwise dump the process environment).
+     */
+    #[Route(
+        path: '/entities/api/{id}/dwl',
+        name: 'aaxis_ontology_entity_dwl',
+        requirements: ['id' => '\d+'],
+        options: ['expose' => true],
+        methods: ['POST']
+    )]
+    #[AclAncestor('aaxis_ontology_entity_view')]
+    #[CsrfProtection]
+    public function dwlAction(OntologyEntity $entity, Request $request): JsonResponse
+    {
+        if (!$this->canReadRecordContent()) {
+            return new JsonResponse(['success' => false, 'error' => 'Access denied.'], 403);
+        }
+
+        $body = json_decode($request->getContent(), true);
+        if (!\is_array($body)) {
+            return new JsonResponse(['success' => false, 'error' => 'Invalid request body.'], 400);
+        }
+        $script = (string) ($body['script'] ?? '');
+        if (trim($script) === '') {
+            return new JsonResponse(['success' => false, 'error' => 'The script is empty.'], 400);
+        }
+        $refusal = $this->container->get(DwlScriptGuard::class)->check($script);
+        if ($refusal !== null) {
+            // A refusal is a script-level outcome, so it renders in the Result pane like any error.
+            return new JsonResponse(['success' => false, 'error' => $refusal]);
+        }
+
+        $rawLimit = $body['limit'] ?? null;
+        $limit = is_numeric($rawLimit) && (int) $rawLimit > 0 ? (int) $rawLimit : null;
+
+        $total = $this->dwlPayloadTotal($entity);
+        $payload = $this->loadEntityPayloads($entity, $limit);
+
+        $formatter = $this->container->get(DwlOutputFormatter::class);
+        $output = $formatter->detect($script);
+
+        try {
+            $result = $this->container->get(DwlTransformer::class)->transform($script, ['payload' => $payload]);
+        } catch (\Throwable $e) {
+            return new JsonResponse([
+                'success' => false,
+                'error' => $e->getMessage(),
+                'rows' => \count($payload),
+                'total' => $total,
+            ]);
+        }
+
+        return new JsonResponse([
+            'success' => true,
+            'result' => $formatter->serialize($result, $output['format']),
+            'format' => $output['format'],
+            'mime' => $output['mime'],
+            'extension' => $output['extension'],
+            'rows' => \count($payload),
+            'total' => $total,
+            'truncated' => $limit !== null && $total > $limit,
+        ]);
+    }
+
+    /**
+     * How many records the playground would feed a script — shown next to its row limit so the user
+     * can judge whether to lift the cap, before running anything.
+     *
+     * Deliberately NOT the grid's `recordCount` column: that one reports the OroCommerce table size
+     * for internal-system entities ({@see recordCount()}), whereas the playground always reads
+     * `OntologyData`. Serving the same count the run itself uses keeps the two from disagreeing.
+     */
+    #[Route(
+        path: '/entities/api/{id}/dwl/count',
+        name: 'aaxis_ontology_entity_dwl_count',
+        requirements: ['id' => '\d+'],
+        options: ['expose' => true],
+        methods: ['GET']
+    )]
+    #[AclAncestor('aaxis_ontology_entity_view')]
+    public function dwlCountAction(OntologyEntity $entity): JsonResponse
+    {
+        if (!$this->canReadRecordContent()) {
+            return new JsonResponse(['success' => false, 'error' => 'Access denied.'], 403);
+        }
+
+        return new JsonResponse(['success' => true, 'total' => $this->dwlPayloadTotal($entity)]);
+    }
+
+    /**
+     * The playground exposes record CONTENT, so entity VIEW (page access) is not sufficient on its
+     * own — `OntologyData` VIEW is required too. Shared by the run and count endpoints.
+     */
+    private function canReadRecordContent(): bool
+    {
+        return $this->isGranted('VIEW', 'entity:' . OntologyData::class);
+    }
+
+    /** Number of records available to a playground run (single source of truth for both endpoints). */
+    private function dwlPayloadTotal(OntologyEntity $entity): int
+    {
+        return (int) $this->registry()->getRepository(OntologyData::class)->count(['entity' => $entity]);
+    }
+
+    /**
+     * The entity's stored record payloads, oldest first. Projects the payload column only (no entity
+     * hydration) since an unlimited playground run can span the whole table.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function loadEntityPayloads(OntologyEntity $entity, ?int $limit): array
+    {
+        $query = $this->registry()->getManagerForClass(OntologyData::class)
+            ->createQuery(
+                'SELECT d.payload FROM ' . OntologyData::class . ' d'
+                . ' WHERE d.entity = :entity ORDER BY d.id ASC'
+            )
+            ->setParameter('entity', $entity);
+        if ($limit !== null) {
+            $query->setMaxResults($limit);
+        }
+
+        return array_map(
+            static fn (array $row): array => \is_array($row['payload'] ?? null) ? $row['payload'] : [],
+            $query->getArrayResult()
+        );
     }
 
     /**
@@ -434,6 +578,9 @@ class OntologyEntityController extends AbstractOntologyController
         return array_merge(parent::getSubscribedServices(), [
             EntityProvider::class,
             EntityFieldProvider::class,
+            DwlTransformer::class,
+            DwlOutputFormatter::class,
+            DwlScriptGuard::class,
         ]);
     }
 }

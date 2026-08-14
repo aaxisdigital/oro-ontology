@@ -187,6 +187,61 @@
     color: #2b3a4a;
 }
 
+// Collapsible JSON tree (the flow debug result): carries .aaxis-json-view for the frame and the
+// aaxis-json-* value colors; each object/array line toggles its children.
+.aaxis-json-tree {
+    font-family: monospace;
+
+    &__line {
+        white-space: pre;
+    }
+
+    &__caret,
+    &__spacer {
+        display: inline-block;
+        width: 14px;
+    }
+
+    &__caret {
+        padding: 0;
+        border: 0;
+        background: none;
+        font: inherit;
+        color: #5a6b7d;
+        cursor: pointer;
+
+        &::before {
+            content: '\25be'; // ▾ expanded
+        }
+    }
+
+    &__node--collapsible > &__line {
+        cursor: pointer;
+    }
+
+    &__node.is-collapsed > &__line &__caret::before {
+        content: '\25b8'; // ▸ collapsed
+    }
+
+    &__children {
+        padding-left: 18px;
+    }
+
+    &__preview {
+        display: none;
+        color: #8a98a6;
+    }
+
+    &__node.is-collapsed > &__children,
+    &__node.is-collapsed > &__close {
+        display: none;
+    }
+
+    &__node.is-collapsed > &__line &__preview {
+        display: inline;
+    }
+}
+
 .aaxis-json-key {
     color: #1f6feb;
 }
@@ -268,6 +323,166 @@
     opacity: 0.7;
 }
 
+
+// --- DWL playground (Entities grid → "dwl" action) --------------------------
+
+// Fills the (resizable) dialog: two equal panes whose editors take all leftover height, so
+// dragging the dialog's resize handle grows the textareas rather than scrolling the body.
+.aaxis-dialog__body.aaxis-dwl {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.aaxis-dwl {
+    &__pane {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        flex: 1 1 50%;
+        min-height: 0;
+    }
+
+    &__pane-head {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex: 0 0 auto;
+    }
+
+    &__pane-title {
+        margin: 0;
+        font-size: 13.5px;
+        font-weight: font-weight('bold');
+        color: #2b3a4a;
+        flex: 0 0 auto;
+    }
+
+    // Right-aligned controls (limit + Run · status + Export).
+    &__pane-tools {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-left: auto;
+        min-width: 0;
+    }
+
+    // Keeps the limit control and its "/ N total records" label visually paired.
+    &__limit-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+    }
+
+    &__limit {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+        font-size: 12.5px;
+        color: #5c6b7a;
+        white-space: nowrap;
+        cursor: pointer;
+    }
+
+    &__limit-check {
+        margin: 0;
+    }
+
+    &__limit-value {
+        width: 76px !important;
+        max-width: 76px !important;
+        min-width: 0;
+        height: 28px !important;
+        min-height: 28px !important;
+        padding: 2px 6px;
+
+        &[disabled] {
+            background: #f4f6f8;
+            color: #9aa7b4;
+        }
+    }
+
+    // "/ 1,916 total records" — sits directly after the limit box.
+    &__total {
+        font-size: 12.5px;
+        color: #6b7a89;
+        white-space: nowrap;
+
+        &:empty {
+            display: none;
+        }
+    }
+
+    &__status {
+        font-size: 12px;
+        color: #6b7a89;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    &__run,
+    &__export {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        height: 28px;
+        padding: 0 10px;
+        white-space: nowrap;
+    }
+
+    &__export[disabled] {
+        opacity: 0.55;
+        cursor: default;
+    }
+
+    // Monospace editors; width/height forced past the admin theme's fixed input sizing.
+    &__editor {
+        flex: 1 1 auto;
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0;
+        min-height: 90px;
+        box-sizing: border-box;
+        resize: none;
+        padding: 8px 10px;
+        border: 1px solid #dfe5eb;
+        border-radius: 4px;
+        background: #fff;
+        font-family: monospace;
+        font-size: 12.5px;
+        line-height: 1.5;
+        color: #2b3a4a;
+        white-space: pre;
+        overflow: auto;
+
+        &:focus {
+            border-color: #2b6cb0;
+            outline: none;
+        }
+    }
+
+    &__editor--result {
+        background: #fcfdfe;
+
+        // Result no longer matches the current script/limit (not re-run yet).
+        &.is-stale {
+            background: #eceff2;
+            color: #6b7a89;
+        }
+
+        // Script/parse/runtime error text.
+        &.is-error {
+            color: #c0392b;
+        }
+    }
+}
 
 // --- Connector config (read-only JSON + "Configure…" popup) ----------------
 
@@ -950,6 +1165,97 @@
         font-size: 12.5px;
         box-sizing: border-box;
         width: 100%;
+
+        // In-column variant (e.g. the writer's Content): tall enough for a short expression
+        // without dwarfing the panel.
+        &--compact {
+            flex: 0 0 auto;
+            min-height: 90px;
+        }
+    }
+
+    // A field label with an extra control (e.g. the DWL switch) right-aligned on the same line.
+    &__settings-labelrow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+    }
+
+    // Compact switch variant for the settings panel (the DWL on/off toggles).
+    &__switch--small {
+        gap: 5px;
+    }
+
+    &__switch--small &__switch-track {
+        width: 30px;
+        height: 16px;
+        border-radius: 8px;
+    }
+
+    &__switch--small &__switch-thumb {
+        width: 10px;
+        height: 10px;
+    }
+
+    &__switch--small input:checked + &__switch-track &__switch-thumb {
+        transform: translateX(14px);
+    }
+
+    &__switch--small &__switch-text {
+        font-size: 11px;
+        font-weight: font-weight('bold');
+        color: #5a6b7d;
+    }
+
+    // Reusable "text or DWL" field: title row (label + DWL switch) over its textarea. The
+    // wrapper is a flex column so a full-height textarea (e.g. body content) keeps growing.
+    &__dwl-field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+
+    // Code presentation while the DWL toggle is on (the pure-text mode keeps the default look).
+    &__settings-textarea--code {
+        background: #fbfcfe;
+        color: #1b3a5b;
+    }
+
+    // Schedule trigger, cron mode: the expression tints light red while invalid…
+    &__cron-input {
+        transition: background-color 0.15s ease;
+
+        &--invalid {
+            background: #fdecea;
+        }
+    }
+
+    // …and this line under it hints the valid symbols for the cron field being edited.
+    &__cron-hint {
+        min-height: 16px;
+        font-size: 11.5px;
+        font-family: monospace;
+        color: #5a6b7d;
+    }
+
+    // Spinner overlay blocking the settings panel while its catalog data loads.
+    &__settings-loading {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.65);
+        border-radius: 8px;
+
+        .fa-spinner {
+            font-size: 22px;
+            color: #2b6cb0;
+        }
     }
 
     // Several small fields sharing one line (e.g. operation + body + path).

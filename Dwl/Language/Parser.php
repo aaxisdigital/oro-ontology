@@ -36,6 +36,7 @@ use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\ObjectLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\OutputDirective;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\RegexLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\Script;
+use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\DateTimeLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\StringLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\TypeDirective;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\TypeCoercion;
@@ -462,6 +463,12 @@ final class Parser
     private function parsePrimary(): Node
     {
         $token = $this->current();
+
+        // Date/time/period literal (|2003-10-01|, |PT1S|…)
+        if ($token->type === TokenType::DateLiteral) {
+            $this->advance();
+            return new DateTimeLiteral($token->value, $token->line, $token->column);
+        }
 
         // Number literal
         if ($token->type === TokenType::Number) {

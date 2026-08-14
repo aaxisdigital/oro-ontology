@@ -12,6 +12,7 @@ enum TokenType: string
     case Boolean = 'BOOLEAN';
     case Null = 'NULL';
     case Regex = 'REGEX';
+    case DateLiteral = 'DATE_LITERAL';
 
     // Identifiers & Keywords
     case Identifier = 'IDENTIFIER';
