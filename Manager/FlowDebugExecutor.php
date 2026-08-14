@@ -6,7 +6,9 @@ namespace Aaxis\Bundle\OntologyBundle\Manager;
 
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
+use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
 use Doctrine\Persistence\ManagerRegistry;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -23,6 +25,9 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  *    server/port + the step's path; connector headers + auth headers; auth=oauth first POSTs the
  *    token path and attaches the returned access_token; the step's operation/body are honoured);
  *    sftp/file_system connectors emit a placeholder note;
+ *  - dwl_transform: runs the step's DataWeave script with the whole context as variables;
+ *  - writer/entity: queues the real upsert (the Data View "Add Data" path), stamped with the
+ *    flow being debugged (Manual only when the flow was never saved);
  *  - everything else: no-op pass-through for now.
  */
 class FlowDebugExecutor
@@ -44,12 +49,14 @@ class FlowDebugExecutor
      * @param array<int, array{id: string, type: string, name: string, config: array<string, mixed>|null}> $steps
      * @param array<int, array{from: string, fromPort: int, to: string}> $links
      * @param array<string, mixed> $input trigger input (entity_change: system/entity/payload)
+     * @param OntologyFlow|null    $flow  the flow being debugged — writers stamp their upserts with
+     *                                    it; null (a never-saved flow) falls back to the Manual flow
      *
      * @return array<string, mixed> the accumulated output context
      *
      * @throws \RuntimeException with a user-readable message when a step cannot execute
      */
-    public function execute(array $steps, array $links, array $input): array
+    public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null): array
     {
         $byId = [];
         $trigger = null;
@@ -82,7 +89,7 @@ class FlowDebugExecutor
         $queue = [$trigger['id']];
         while ($queue !== []) {
             $id = array_shift($queue);
-            $this->executeStep($byId[$id], $context);
+            $this->executeStep($byId[$id], $context, $flow);
             foreach ($outgoing[$id] ?? [] as $link) {
                 if (isset($byId[$link['to']]) && !isset($visited[$link['to']])) {
                     $visited[$link['to']] = true;
@@ -98,9 +105,9 @@ class FlowDebugExecutor
      * @param array{id: string, type: string, name: string, config: array<string, mixed>|null} $step
      * @param array<string, mixed>                                                             $context
      */
-    private function executeStep(array $step, array &$context): void
+    private function executeStep(array $step, array &$context, ?OntologyFlow $flow): void
     {
-        if ($step['type'] !== 'reader' && $step['type'] !== 'dwl_transform') {
+        if (!\in_array($step['type'], ['reader', 'dwl_transform', 'writer'], true)) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
         }
 
@@ -119,6 +126,16 @@ class FlowDebugExecutor
                 $context[$destination] = $this->dwl->transform((string) ($config['code'] ?? ''), $context);
             } catch (\Throwable $e) {
                 throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
+            }
+
+            return;
+        }
+
+        if ($step['type'] === 'writer') {
+            if (($config['writer'] ?? null) === 'entity') {
+                $context[$destination] = $this->writeEntity($step['name'], $config, $context, $flow);
+            } else {
+                $context[$destination] = ['_debug' => 'Connector writers are not executed in debug yet.'];
             }
 
             return;
@@ -151,6 +168,59 @@ class FlowDebugExecutor
             }
             throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
         }
+    }
+
+    /**
+     * Writes the context value named by `content` into the configured entity — exactly the Data
+     * View "Add Data" path: a single object or an array of objects, unique id inferred from the
+     * entity's unique_attribute, one message queued (the write itself is asynchronous). The event
+     * is stamped with the flow being debugged; only a never-saved flow falls back to Manual.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array<string, mixed> the upsert receipt stored under the step's destination
+     */
+    private function writeEntity(string $stepName, array $config, array $context, ?OntologyFlow $flow): array
+    {
+        $contentKey = trim((string) ($config['content'] ?? ''));
+        if (!\array_key_exists($contentKey, $context)) {
+            throw new \RuntimeException(sprintf('Step "%s": content "%s" is not available in the context.', $stepName, $contentKey));
+        }
+        $value = $context[$contentKey];
+        if (\is_array($value) && $value !== [] && !array_is_list($value)) {
+            $records = [$value]; // a single record object
+        } elseif (\is_array($value) && $value !== [] && array_is_list($value)) {
+            $records = $value; // an array of record objects (validated downstream)
+        } else {
+            throw new \RuntimeException(sprintf(
+                'Step "%s": content "%s" must be an object or a non-empty array of objects.',
+                $stepName,
+                $contentKey
+            ));
+        }
+
+        $system = $this->doctrine->getRepository(OntologySystem::class)
+            ->findOneBy(['name' => (string) ($config['system'] ?? '')]);
+        $entity = $system === null ? null : $this->doctrine->getRepository(OntologyEntity::class)
+            ->findOneBy(['system' => $system, 'name' => (string) ($config['entity'] ?? '')]);
+        if ($entity === null) {
+            throw new \RuntimeException(sprintf(
+                'Step "%s": unknown entity "%s" in system "%s".',
+                $stepName,
+                (string) ($config['entity'] ?? ''),
+                (string) ($config['system'] ?? '')
+            ));
+        }
+
+        try {
+            $stampFlow = $flow ?? $this->dataApi->requireEnabledFlow(OntologyFlow::NAME_MANUAL);
+            $uuid = $this->dataApi->upsertRecords($entity, $records, $stampFlow);
+        } catch (OntologyApiException $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+        }
+
+        return ['uuid' => $uuid, 'count' => \count($records), 'queued' => true];
     }
 
     /**

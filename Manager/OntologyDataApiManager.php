@@ -132,6 +132,7 @@ class OntologyDataApiManager
 
         $uniqueIds = [];
         $payloads = [];
+        $seenAt = [];
         foreach (array_values($records) as $i => $record) {
             if (!\is_array($record)) {
                 throw OntologyApiException::invalidPayload(sprintf('Record #%d must be a JSON object.', $i + 1));
@@ -146,11 +147,24 @@ class OntologyDataApiManager
                 ));
             }
 
+            // A batch cannot repeat a unique id — the aaxis_ontology_data_upsert function rejects the
+            // WHOLE message (async, only logged), so fail fast here where the caller can see it.
+            $idString = (string) $idValue;
+            if (isset($seenAt[$idString])) {
+                throw OntologyApiException::invalidPayload(sprintf(
+                    'Record #%d duplicates the unique attribute value "%s" of record #%d — unique ids cannot repeat in one operation.',
+                    $i + 1,
+                    $idString,
+                    $seenAt[$idString]
+                ));
+            }
+            $seenAt[$idString] = $i + 1;
+
             // Enforce the entity's attribute contract (required attributes + declared types) before
             // accepting the write.
             $this->attributeReconciler->assertValid($entity, $record);
 
-            $uniqueIds[] = (string) $idValue;
+            $uniqueIds[] = $idString;
             $payloads[] = $record;
         }
 

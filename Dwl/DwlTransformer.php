@@ -51,7 +51,24 @@ class DwlTransformer
 
         $evaluator = new Evaluator($env);
 
-        return $evaluator->evaluate(Parser::parse($script))->toPhp();
+        return $this->toPlainPhp($evaluator->evaluate(Parser::parse($script))->toPhp());
+    }
+
+    /**
+     * Value::toPhp() renders DWL objects as stdClass (upstream keeps {} vs [] apart when
+     * re-encoding to JSON). Downstream flow steps expect the same shape readers produce
+     * (json_decode assoc) — plain associative arrays — so flatten recursively here.
+     */
+    private function toPlainPhp(mixed $data): mixed
+    {
+        if ($data instanceof \stdClass) {
+            $data = (array) $data;
+        }
+        if (\is_array($data)) {
+            return array_map(fn (mixed $item): mixed => $this->toPlainPhp($item), $data);
+        }
+
+        return $data;
     }
 
     private function toValue(mixed $data): Value

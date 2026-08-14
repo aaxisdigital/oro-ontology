@@ -982,10 +982,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         // Type-specific configuration blocks; each returns error() + merge() for the submit.
         const sections: {error: () => string; merge: (config: Record<string, any>) => Record<string, any>}[] = [];
-        if (step.type === 'reader') {
-            // The reader owns the name placement (first fixed row: Name | Reader type | Destination).
+        if (step.type === 'reader' || step.type === 'writer') {
+            // Reader/Writer own the name placement (first fixed row: Name | Type | Destination).
             $top.prop('hidden', false);
-            sections.push(this.readerSection($top, $body, $side, $panel[0], step.config || {}, $input, reposition));
+            sections.push(this.ioSection(step.type, $top, $body, $side, $panel[0], step.config || {}, $input, reposition));
         } else if (step.type === 'dwl_transform') {
             $top.prop('hidden', false);
             sections.push(this.dwlSection($top, $body, $panel[0], step.config || {}, $input));
@@ -1134,16 +1134,19 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
-     * Reader: fixed first row (Name | Reader type | Destination), then the variant fields:
-     * entity readers pick system+entity (one row) and load "all" or one "by id" (next row);
-     * connector readers pick a connector — rest_api ones expose operation | path | body (body
-     * content in the panel's right column, below the fixed row), sftp/file_system only the path.
+     * Reader/Writer shared section: fixed first row (Name | Type | Destination), then the
+     * variant fields. Entity variant: system+entity on one row, then (reader) load "all"/"by id"
+     * or (writer) the Content — the context key whose value gets written. Connector variant is
+     * identical for both: picker, then rest_api-only operation | path | body (+ body content in
+     * the right column); sftp/file_system only the path.
      */
-    private readerSection($top: any, $body: any, $side: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private ioSection(kind: 'reader' | 'writer', $top: any, $body: any, $side: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        const isMine = initial[kind] !== undefined;
+        const variant = isMine ? String(initial[kind] || '') : '';
         const $type = $('<select/>', {'class': 'form-control'});
         $type.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-        $type.append($('<option/>', {value: 'entity', text: __('aaxis.ontology.flow_editor.reader_type_entity'), selected: initial.reader === 'entity'}));
-        $type.append($('<option/>', {value: 'connector', text: __('aaxis.ontology.flow_editor.reader_type_connector'), selected: initial.reader === 'connector'}));
+        $type.append($('<option/>', {value: 'entity', text: __('aaxis.ontology.flow_editor.reader_type_entity'), selected: variant === 'entity'}));
+        $type.append($('<option/>', {value: 'connector', text: __('aaxis.ontology.flow_editor.reader_type_connector'), selected: variant === 'connector'}));
         const $destination = $('<input/>', {
             type: 'text', 'class': 'form-control', maxlength: 128,
             value: String(initial.destination || 'payload')
@@ -1151,27 +1154,34 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Fixed, always-visible first row.
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
-            this.settingsCol('reader_type_label', $type),
+            this.settingsCol(kind === 'reader' ? 'reader_type_label' : 'writer_type_label', $type),
             this.settingsCol('destination_label', $destination)
         ));
 
-        // Entity variant: system + entity on one row, then load-mode (+ id) on the next.
+        // Entity variant: system + entity on one row, then the kind-specific row.
         const $entityBlock = $('<div/>');
         $body.append($entityBlock);
-        const entityPair = this.systemEntitySection($entityBlock, initial.reader === 'entity' ? initial : {}, true);
+        const entityPair = this.systemEntitySection($entityBlock, variant === 'entity' ? initial : {}, true);
+
+        // reader: load-mode (+ id); writer: the Content (context key) to write.
         const $mode = $('<select/>', {'class': 'form-control'});
-        $mode.append($('<option/>', {value: 'all', text: __('aaxis.ontology.flow_editor.reader_mode_all')}));
-        $mode.append($('<option/>', {
-            value: 'by_id', text: __('aaxis.ontology.flow_editor.reader_mode_by_id'),
-            selected: initial.reader === 'entity' && initial.mode === 'by_id'
-        }));
-        const $recordId = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 255,
-            value: initial.reader === 'entity' ? String(initial.record_id || '') : ''
-        });
-        const $recordIdCol = this.settingsCol('reader_record_id_label', $recordId, 1.4);
-        $entityBlock.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'})
-            .append(this.settingsCol('reader_mode_label', $mode), $recordIdCol));
+        const $recordId = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255});
+        let $recordIdCol: any = null;
+        const $content = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 128});
+        if (kind === 'reader') {
+            $mode.append($('<option/>', {value: 'all', text: __('aaxis.ontology.flow_editor.reader_mode_all')}));
+            $mode.append($('<option/>', {
+                value: 'by_id', text: __('aaxis.ontology.flow_editor.reader_mode_by_id'),
+                selected: variant === 'entity' && initial.mode === 'by_id'
+            }));
+            $recordId.val(variant === 'entity' ? String(initial.record_id || '') : '');
+            $recordIdCol = this.settingsCol('reader_record_id_label', $recordId, 1.4);
+            $entityBlock.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'})
+                .append(this.settingsCol('reader_mode_label', $mode), $recordIdCol));
+        } else {
+            $content.val(variant === 'entity' ? String(initial.content || 'payload') : 'payload');
+            $entityBlock.append(this.settingsLabel('writer_content_label'), $content);
+        }
 
         // Connector variant: the connector, then per-connector-type fields.
         const $connectorBlock = $('<div/>');
@@ -1181,19 +1191,19 @@ class OntologyFlowEditorComponent extends BaseComponent {
         ['get', 'put', 'post', 'patch', 'delete'].forEach(op => {
             $operation.append($('<option/>', {
                 value: op, text: op.toUpperCase(),
-                selected: initial.reader === 'connector' && initial.operation === op
+                selected: variant === 'connector' && initial.operation === op
             }));
         });
         const $bodyType = $('<select/>', {'class': 'form-control'});
         ['empty', 'json', 'text', 'xml'].forEach(b => {
             $bodyType.append($('<option/>', {
                 value: b, text: __(`aaxis.ontology.flow_editor.body_${b}`),
-                selected: initial.reader === 'connector' && initial.body === b
+                selected: variant === 'connector' && initial.body === b
             }));
         });
         const $path = $('<input/>', {
             type: 'text', 'class': 'form-control', maxlength: 255,
-            value: initial.reader === 'connector' ? String(initial.path || '') : ''
+            value: variant === 'connector' ? String(initial.path || '') : ''
         });
         const $operationCol = this.settingsCol('operation_label', $operation);
         const $pathCol = this.settingsCol('path_label', $path, 1.4);
@@ -1208,7 +1218,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         fetch(routing.generate('aaxis_ontology_connector_list'), {credentials: 'same-origin'})
             .then(r => r.json())
             .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
-                const current = initial.reader === 'connector' ? String(initial.connector || '') : '';
+                const current = variant === 'connector' ? String(initial.connector || '') : '';
                 $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
                 (data.records || []).forEach(c => {
                     connectorTypes[String(c.id)] = c.type;
@@ -1226,7 +1236,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Body content lives in the right column, below the fixed first row. NOTE: a textarea's
         // value must be set via .val() — a `value` attribute in the creation map is ignored.
         const $bodyContent = $('<textarea/>', {'class': 'form-control aaxis-flow-editor__settings-textarea'});
-        $bodyContent.val(initial.reader === 'connector' ? String(initial.body_content || '') : '');
+        $bodyContent.val(variant === 'connector' ? String(initial.body_content || '') : '');
         $side.append(this.settingsLabel('body_content_label'), $bodyContent);
 
         const isRest = (): boolean => connectorTypes[String($connector.val() || '')] === 'rest_api';
@@ -1234,9 +1244,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             const type = String($type.val() || '');
             $entityBlock.toggle(type === 'entity');
             $connectorBlock.toggle(type === 'connector');
-            $recordIdCol.toggle(String($mode.val()) === 'by_id');
+            if ($recordIdCol) {
+                $recordIdCol.toggle(String($mode.val()) === 'by_id');
+            }
             // Connector fields appear only once a connector is chosen; operation/body are
-            // rest_api-only (sftp/file_system readers just need the path).
+            // rest_api-only (sftp/file_system need just the path).
             const hasConnector = String($connector.val() || '') !== '';
             $fieldsRow.prop('hidden', !hasConnector);
             $operationCol.toggle(isRest());
@@ -1264,8 +1276,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     if (pairError !== '') {
                         return pairError;
                     }
-                    if (String($mode.val()) === 'by_id' && String($recordId.val() || '').trim() === '') {
+                    if (kind === 'reader' && String($mode.val()) === 'by_id' && String($recordId.val() || '').trim() === '') {
                         return __('aaxis.ontology.flow_editor.reader_record_id_required');
+                    }
+                    if (kind === 'writer' && String($content.val() || '').trim() === '') {
+                        return __('aaxis.ontology.flow_editor.writer_content_required');
                     }
                 } else {
                     if (String($connector.val() || '') === '') {
@@ -1282,12 +1297,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
             },
             merge: config => {
                 const type = String($type.val());
-                const base: Record<string, any> = {...config, reader: type, destination: String($destination.val() || '').trim()};
+                const base: Record<string, any> = {...config, [kind]: type, destination: String($destination.val() || '').trim()};
                 if (type === 'entity') {
                     const withPair = entityPair.merge(base);
-                    withPair.mode = String($mode.val());
-                    if (withPair.mode === 'by_id') {
-                        withPair.record_id = String($recordId.val() || '').trim();
+                    if (kind === 'reader') {
+                        withPair.mode = String($mode.val());
+                        if (withPair.mode === 'by_id') {
+                            withPair.record_id = String($recordId.val() || '').trim();
+                        }
+                    } else {
+                        withPair.content = String($content.val() || '').trim();
                     }
                     return withPair;
                 }
@@ -2002,6 +2021,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $debug.prepend($spinner);
 
         this.apiFetch(routing.generate('aaxis_ontology_flow_debug'), 'POST', {
+            // Writers stamp their upserts with this flow (null = never saved -> Manual fallback).
+            flowId: this.flow && this.flow.id ? this.flow.id : null,
             steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, config: s.config || null})),
             links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
             input

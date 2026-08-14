@@ -285,12 +285,29 @@ TLS verification off like the toolbox proxy; JSON responses decoded, others retu
 HTTP ≥ 400 aborts naming the step). sftp/file_system connector readers emit a `_debug`
 placeholder note; **dwl_transform** steps execute their DWL script via `Dwl/DwlTransformer` with
 the WHOLE current context bound as variables (payload, prior destinations…), result stored under
-their destination; other step types are no-ops for now.
+their destination; **writer/entity** steps write the context value named by `config.content`
+(a single object or an array of objects) into the configured system/entity via the SAME path as
+the Data View "Add Data" — `upsertRecords()` (uid inferred from the entity's unique_attribute,
+ONE queued message, write is async) **stamped with the flow being debugged** (the editor sends
+`flowId` in the debug POST; a never-saved flow falls back to `requireEnabledFlow(Manual)`) —
+storing the receipt `{uuid, count, queued: true}` under the destination; writer/connector emits
+a `_debug` placeholder; other step types are no-ops for now. `upsertRecords()` rejects a batch
+that REPEATS a unique id (names both record numbers) — the `aaxis_ontology_data_upsert` PG
+function would otherwise reject the whole message asynchronously where the only trace is an
+`app.ERROR` log line and an event row with `finished_at` set but empty `changed_ids` (the
+processor closes events ONLY on validation errors; the success path leaves them open for the
+next pipeline stage, still a TODO). The writer's properties dialog reuses the
+reader's (`ioSection(kind)`) with the entity variant showing a Content textbox instead of
+Load/Id; config discriminator is `writer: entity|connector`.
 **DWL engine** (`Dwl/`): the Language+Runtime subset of the user's php-dw DataWeave port
 (BSD-3-Clause, license copy in `Dwl/LICENSE`; origin `~/Github/dw-cli/php-dw`), namespaced
-`Aaxis\Bundle\OntologyBundle\Dwl\`. Two import gotchas handled in `DwlTransformer`: the AST is
+`Aaxis\Bundle\OntologyBundle\Dwl\`. Three import gotchas handled in `DwlTransformer`: the AST is
 ONE file with 40 classes (upstream classmap) → `loadAst()` require_onces it since PSR-4 can't;
-and the php↔Value bridge is local (`toValue()`/`->toPhp()`). The `%dw` header/`---` separator are
+the php↔Value bridge is local (`toValue()`/`->toPhp()`); and `Value::toPhp()` renders DWL objects
+as **stdClass** (upstream keeps `{}` vs `[]` apart) — invisible in the JSON debug dialog but fatal
+for `is_array()` consumers like the writer ("Record #1 must be a JSON object") → `transform()`
+flattens its result to plain assoc arrays via `toPlainPhp()`, matching what readers produce
+(`json_decode` assoc). Keep the engine files pristine; fix shapes at this facade. The `%dw` header/`---` separator are
 optional (bare expressions work). Scripts are parse-validated on SAVE
 (422 `flow_manager.invalid_dwl` with the parser message). The Format/Cli parts of php-dw were
 deliberately NOT imported (unused). Errors (unconfigured step, unknown

@@ -164,8 +164,20 @@ class OntologyFlowController extends AbstractController
         }
         $input = \is_array($payload['input'] ?? null) && !array_is_list($payload['input']) ? $payload['input'] : [];
 
+        // Writers stamp their upserts with the flow being debugged; a never-saved flow has no id
+        // yet (flowId null) and the executor falls back to the built-in Manual flow.
+        $flow = null;
+        if (($payload['flowId'] ?? null) !== null) {
+            $flow = \is_int($payload['flowId'])
+                ? $this->container->get(ManagerRegistry::class)->getRepository(OntologyFlow::class)->find($payload['flowId'])
+                : null;
+            if ($flow === null) {
+                return new JsonResponse(['success' => false, 'message' => 'The flow being debugged no longer exists.'], 422);
+            }
+        }
+
         try {
-            $output = $this->container->get(FlowDebugExecutor::class)->execute($steps, $links, $input);
+            $output = $this->container->get(FlowDebugExecutor::class)->execute($steps, $links, $input, $flow);
         } catch (\RuntimeException $e) {
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }
@@ -337,6 +349,15 @@ class OntologyFlowController extends AbstractController
                     'entity' => $filled('system') && $filled('entity')
                         && $enumOk('mode', ['all', 'by_id'])
                         && (($config['mode'] ?? 'all') !== 'by_id' || $filled('record_id')),
+                    'connector' => is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
+                        && $filled('path')
+                        && $enumOk('operation', ['get', 'put', 'post', 'patch', 'delete'])
+                        && $enumOk('body', ['empty', 'json', 'text', 'xml']),
+                    default => false,
+                },
+            'writer' => \is_string($config['destination'] ?? null) && trim($config['destination']) !== ''
+                && match ($config['writer'] ?? null) {
+                    'entity' => $filled('system') && $filled('entity') && $filled('content'),
                     'connector' => is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
                         && $filled('path')
                         && $enumOk('operation', ['get', 'put', 'post', 'patch', 'delete'])
