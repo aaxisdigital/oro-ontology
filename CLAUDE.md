@@ -283,7 +283,17 @@ merges auth_headers; auth=oauth POSTs the token path — form-encoded oauth.body
 and attaches `access_token` as a bearer; the step's operation/body/body_content are honoured;
 TLS verification off like the toolbox proxy; JSON responses decoded, others returned raw;
 HTTP ≥ 400 aborts naming the step). sftp/file_system connector readers emit a `_debug`
-placeholder note; other step types are no-ops for now. Errors (unconfigured step, unknown
+placeholder note; **dwl_transform** steps execute their DWL script via `Dwl/DwlTransformer` with
+the WHOLE current context bound as variables (payload, prior destinations…), result stored under
+their destination; other step types are no-ops for now.
+**DWL engine** (`Dwl/`): the Language+Runtime subset of the user's php-dw DataWeave port
+(BSD-3-Clause, license copy in `Dwl/LICENSE`; origin `~/Github/dw-cli/php-dw`), namespaced
+`Aaxis\Bundle\OntologyBundle\Dwl\`. Two import gotchas handled in `DwlTransformer`: the AST is
+ONE file with 40 classes (upstream classmap) → `loadAst()` require_onces it since PSR-4 can't;
+and the php↔Value bridge is local (`toValue()`/`->toPhp()`). The `%dw` header/`---` separator are
+optional (bare expressions work). Scripts are parse-validated on SAVE
+(422 `flow_manager.invalid_dwl` with the parser message). The Format/Cli parts of php-dw were
+deliberately NOT imported (unused). Errors (unconfigured step, unknown
 system/entity, missing connector, failed request) abort with a 422 naming the step.
 Gotcha fixed here once: a textarea's initial value must be set via jQuery `.val()` — a `value`
 key in the `$('<textarea/>', {...})` creation map is silently ignored.

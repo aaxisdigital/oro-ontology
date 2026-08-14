@@ -241,6 +241,7 @@ aaxis:
             step_names_unique: 'Step names must be unique within the flow.'
             invalid_cron: 'Step "{{ name }}" has an invalid cron expression.'
             invalid_step_config: 'Step "{{ name }}" has an incomplete or invalid configuration.'
+            invalid_dwl: 'Step "{{ name }}" has an invalid DWL script: {{ error }}'
         flow_editor:
             title: 'New Flow'
             name_label: 'Flow name'

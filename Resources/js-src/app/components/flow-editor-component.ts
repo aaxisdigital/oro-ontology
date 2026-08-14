@@ -986,6 +986,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             // The reader owns the name placement (first fixed row: Name | Reader type | Destination).
             $top.prop('hidden', false);
             sections.push(this.readerSection($top, $body, $side, $panel[0], step.config || {}, $input, reposition));
+        } else if (step.type === 'dwl_transform') {
+            $top.prop('hidden', false);
+            sections.push(this.dwlSection($top, $body, $panel[0], step.config || {}, $input));
         } else {
             $body.append(
                 $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __('aaxis.ontology.flow_editor.step_name_label')}),
@@ -1299,6 +1302,45 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
                 return base;
             }
+        };
+    }
+
+    /**
+     * DWL transform: fixed first row (Name | Destination) and a wide code textarea. The script
+     * sees every key of the debug context (payload, prior destinations…) as a variable; its
+     * result lands under the destination. Syntax is validated server-side on save.
+     */
+    private dwlSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        const $destination = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 128,
+            value: String(initial.destination || 'payload')
+        });
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput),
+            this.settingsCol('destination_label', $destination)
+        ));
+
+        const $code = $('<textarea/>', {'class': 'form-control aaxis-flow-editor__settings-textarea', spellcheck: 'false'});
+        $code.val(String(initial.code || ''));
+        $body.append(this.settingsLabel('dwl_code_label'), $code);
+        // A code editor deserves the wide panel from the start.
+        panel.classList.add('is-wide');
+
+        return {
+            error: () => {
+                if (String($code.val() || '').trim() === '') {
+                    return __('aaxis.ontology.flow_editor.dwl_code_required');
+                }
+                if (String($destination.val() || '').trim() === '') {
+                    return __('aaxis.ontology.flow_editor.destination_required');
+                }
+                return '';
+            },
+            merge: config => ({
+                ...config,
+                code: String($code.val() || ''),
+                destination: String($destination.val() || '').trim()
+            })
         };
     }
 

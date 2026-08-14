@@ -240,6 +240,8 @@ aaxis:
             body_text: 'Text'
             body_xml: 'XML'
             body_content_label: 'Body content'
+            dwl_code_label: 'DWL code'
+            dwl_code_required: 'Please enter the DWL code.'
             debug_input_title: 'Debug input'
             debug_payload_label: 'Payload (JSON)'
             debug_payload_invalid: 'Please enter a valid JSON payload.'

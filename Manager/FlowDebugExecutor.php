@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Manager;
 
+use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
@@ -35,6 +36,7 @@ class FlowDebugExecutor
         private readonly OntologyDataApiManager $dataApi,
         private readonly ManagerRegistry $doctrine,
         private readonly HttpClientInterface $httpClient,
+        private readonly DwlTransformer $dwl,
     ) {
     }
 
@@ -98,7 +100,7 @@ class FlowDebugExecutor
      */
     private function executeStep(array $step, array &$context): void
     {
-        if ($step['type'] !== 'reader') {
+        if ($step['type'] !== 'reader' && $step['type'] !== 'dwl_transform') {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
         }
 
@@ -109,6 +111,17 @@ class FlowDebugExecutor
         $destination = trim((string) ($config['destination'] ?? ''));
         if ($destination === '') {
             throw new \RuntimeException(sprintf('Step "%s" has no destination.', $step['name']));
+        }
+
+        if ($step['type'] === 'dwl_transform') {
+            // The WHOLE current context is visible to the script (payload, prior destinations…).
+            try {
+                $context[$destination] = $this->dwl->transform((string) ($config['code'] ?? ''), $context);
+            } catch (\Throwable $e) {
+                throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
+            }
+
+            return;
         }
 
         if (($config['reader'] ?? null) === 'entity') {

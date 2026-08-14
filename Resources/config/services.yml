@@ -35,11 +35,14 @@ services:
 
     # Reusable Data API core (read / upsert / query), shared by the HTTP API controller and any
     # other PHP code that needs the same operations.
+    Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer: ~
+
     Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor:
         arguments:
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager'
             - '@doctrine'
             - '@http_client'
+            - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
 
     Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager:
         public: true

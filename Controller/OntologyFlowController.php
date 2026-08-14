@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Controller;
 
+use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Cron\CronExpression;
@@ -239,6 +240,20 @@ class OntologyFlowController extends AbstractController
                         'message' => $this->trans('aaxis.ontology.flow_manager.invalid_step_config', ['{{ name }}' => $step['name']]),
                     ], 422);
                 }
+                // DWL scripts must parse to be saved.
+                $code = $step['config']['code'] ?? null;
+                if ($step['type'] === 'dwl_transform' && \is_string($code) && trim($code) !== '') {
+                    $dwlError = $this->container->get(DwlTransformer::class)->validate($code);
+                    if ($dwlError !== null) {
+                        return new JsonResponse([
+                            'success' => false,
+                            'message' => $this->trans('aaxis.ontology.flow_manager.invalid_dwl', [
+                                '{{ name }}' => $step['name'],
+                                '{{ error }}' => $dwlError,
+                            ]),
+                        ], 422);
+                    }
+                }
             }
             $entity->setSteps($steps === [] ? null : $steps);
         }
@@ -316,6 +331,7 @@ class OntologyFlowController extends AbstractController
 
         return match ($step['type']) {
             'entity_change' => $filled('system') && $filled('entity'),
+            'dwl_transform' => $filled('code') && $filled('destination'),
             'reader' => \is_string($config['destination'] ?? null) && trim($config['destination']) !== ''
                 && match ($config['reader'] ?? null) {
                     'entity' => $filled('system') && $filled('entity')
@@ -385,6 +401,7 @@ class OntologyFlowController extends AbstractController
             TranslatorInterface::class,
             ConfigManager::class,
             FlowDebugExecutor::class,
+            DwlTransformer::class,
         ]);
     }
 }
