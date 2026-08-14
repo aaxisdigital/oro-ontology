@@ -23,6 +23,11 @@ class Configuration implements ConfigurationInterface
         SettingsBuilder::append($rootNode, [
             'enabled' => ['type' => 'boolean', 'value' => true],
 
+            // Flow editor: spacing (px) of the canvas dot-matrix background.
+            'flow_editor_grid_spacing' => ['type' => 'integer', 'value' => 10],
+            // Flow editor: step tile size, as a multiple of the dot spacing (tile = factor × spacing px).
+            'flow_editor_step_size_factor' => ['type' => 'integer', 'value' => 8],
+
             // Data HTTP API (read / upsert / query). Disabled by default — opt-in per environment.
             'api_read_enabled' => ['type' => 'boolean', 'value' => false],
             'api_upsert_enabled' => ['type' => 'boolean', 'value' => false],

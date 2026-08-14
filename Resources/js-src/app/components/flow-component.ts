@@ -1,10 +1,8 @@
-import $ from 'jquery';
 import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction} from 'aaxiscommon/js/app/widgets/data-grid';
-import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 
 interface OntologyFlowOptions {
     _sourceElement: any;
@@ -15,11 +13,13 @@ interface FlowRecord {
     id: number;
     name: string | null;
     enabled: boolean;
+    type: string;
 }
 
 /**
- * Flows page built on the reusable DataGrid widget. Shows data from aaxis_ontology_flow. The "Add Flow"
- * button is present but the editor is not implemented yet (larger design effort).
+ * Flows page built on the reusable DataGrid widget. Shows data from aaxis_ontology_flow.
+ * "Add Flow" and the per-row edit action open the flow editor page; the edit action is
+ * disabled for the two built-in (type = native) flows.
  */
 class OntologyFlowComponent extends BaseComponent {
     private $el!: any;
@@ -29,12 +29,22 @@ class OntologyFlowComponent extends BaseComponent {
         this.$el = options._sourceElement;
 
         const actions: GridAction[] = [
-            {key: 'edit', label: __('aaxis.common.grid.edit'), icon: 'fa-pencil'}
+            {
+                key: 'edit',
+                label: __('aaxis.common.grid.edit'),
+                icon: 'fa-pencil',
+                disabled: (row: FlowRecord) => row.type === 'native',
+                disabledTitle: __('aaxis.ontology.flow_view.edit_builtin_disabled')
+            }
         ];
 
         this.grid = new DataGrid({
             columns: [
                 {key: 'name', label: __('aaxis.ontology.flow_view.name'), type: 'text'},
+                {
+                    key: 'type', label: __('aaxis.ontology.flow_view.type'), type: 'text', width: '120px',
+                    render: (row: FlowRecord) => __('aaxis.ontology.flow_view.type_' + (row.type || 'subflow'))
+                },
                 {key: 'enabled', label: __('aaxis.ontology.flow_view.enabled'), type: 'boolean', width: '120px'}
             ],
             actions,
@@ -55,30 +65,16 @@ class OntologyFlowComponent extends BaseComponent {
         });
         this.$el.on('click.aaxisOntologyFlow', '[data-role="add"]', (e: any) => {
             e.preventDefault();
-            this.openAdd();
+            window.location.href = routing.generate('aaxis_ontology_flow_editor');
         });
 
         this.load();
     }
 
-    private onAction(action: string, _row: FlowRecord): void {
-        if (action === 'edit') {
-            // The flow editor is a larger design effort; reuse the add popup for now.
-            this.openAdd();
+    private onAction(action: string, row: FlowRecord): void {
+        if (action === 'edit' && row.type !== 'native') {
+            window.location.href = routing.generate('aaxis_ontology_flow_editor', {id: row.id});
         }
-    }
-
-    private openAdd(): void {
-        // The flow editor is a larger design effort; show a placeholder for now.
-        const dialog = new Dialog({
-            title: __('aaxis.ontology.flow_view.add_title'),
-            width: '560px'
-        });
-        const $content = dialog.open();
-        $content.append($('<p/>', {
-            'class': 'text-muted',
-            text: __('aaxis.ontology.flow_view.add_placeholder')
-        }));
     }
 
     private load(): void {

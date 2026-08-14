@@ -1,0 +1,105 @@
+{% extends '@OroUI/actions/index.html.twig' %}
+
+{% set pageTitle = flow ? flow.name : 'aaxis.ontology.flow_editor.title'|trans %}
+
+{% block content %}
+    <div class="layout-content">
+        <div class="content"
+             data-page-component-module="aaxisontology/js/app/components/flow-editor-component"
+             data-page-component-options="{{ {
+                 flow: flow,
+                 gridSpacing: gridSpacing,
+                 stepSizeFactor: stepSizeFactor,
+                 listUrl: path('aaxis_ontology_flows')
+             }|json_encode }}">
+
+            <div class="aaxis-flow-editor" data-role="editor">
+                <div class="aaxis-flow-editor__topbar">
+                    <div class="aaxis-flow-editor__name">
+                        <label class="aaxis-flow-editor__name-label" for="aaxis-flow-editor-name">
+                            {{ 'aaxis.ontology.flow_editor.name_label'|trans }}
+                        </label>
+                        <input type="text" id="aaxis-flow-editor-name" maxlength="128"
+                               class="aaxis-flow-editor__name-input" data-role="flow-name">
+                        <label class="aaxis-flow-editor__switch" title="{{ 'aaxis.ontology.flow_editor.enabled_label'|trans }}">
+                            <input type="checkbox" data-role="flow-enabled" checked>
+                            <span class="aaxis-flow-editor__switch-track">
+                                <span class="aaxis-flow-editor__switch-thumb"></span>
+                            </span>
+                            <span class="aaxis-flow-editor__switch-text">{{ 'aaxis.ontology.flow_editor.enabled_label'|trans }}</span>
+                        </label>
+                    </div>
+                    <div class="aaxis-flow-editor__controls">
+                        <button type="button" class="btn" data-role="toolbox-toggle"
+                                title="{{ 'aaxis.ontology.flow_editor.toolbox_toggle'|trans }}">
+                            <span class="fa fa-wrench" aria-hidden="true"></span>
+                            {{ 'aaxis.ontology.flow_editor.toolbox_toggle'|trans }}
+                        </button>
+                        {# Debug is only offered for flows that contain a trigger (kept in sync by the component). #}
+                        <button type="button" class="btn" data-role="debug" hidden
+                                title="{{ 'aaxis.ontology.flow_editor.debug'|trans }}">
+                            <span class="fa fa-bug" aria-hidden="true"></span>
+                            {{ 'aaxis.ontology.flow_editor.debug'|trans }}
+                        </button>
+                        {# Clean state at load: the exit button reads Close and Save is disabled
+                           until something changes (flow-editor-component keeps both in sync). #}
+                        <button type="button" class="btn" data-role="cancel">
+                            {{ 'aaxis.ontology.flow_editor.close'|trans }}
+                        </button>
+                        <button type="button" class="btn btn-primary" data-role="save" disabled>
+                            {{ 'aaxis.ontology.flow_editor.save'|trans }}
+                        </button>
+                    </div>
+                </div>
+
+                <div class="aaxis-flow-editor__canvas" data-role="canvas">
+                    <div class="aaxis-flow-editor__toolbox" data-role="toolbox">
+                        <div class="aaxis-flow-editor__toolbox-handle" data-role="toolbox-handle">
+                            <span class="fa fa-arrows" aria-hidden="true"></span>
+                            {{ 'aaxis.ontology.flow_editor.toolbox.title'|trans }}
+                            <button type="button" class="aaxis-flow-editor__toolbox-hide" data-role="toolbox-hide"
+                                    title="{{ 'aaxis.ontology.flow_editor.toolbox.hide'|trans }}"
+                                    aria-label="{{ 'aaxis.ontology.flow_editor.toolbox.hide'|trans }}">
+                                <span class="fa fa-times" aria-hidden="true"></span>
+                            </button>
+                        </div>
+                        {% set sections = [
+                            {key: 'triggers', category: 'trigger', items: [
+                                {key: 'cron', icon: 'fa-clock-o'},
+                                {key: 'queue', icon: 'fa-inbox'},
+                                {key: 'entity_change', icon: 'fa-database'}
+                            ]},
+                            {key: 'actions', category: 'action', items: [
+                                {key: 'dwl_transform', icon: 'fa-random'},
+                                {key: 'choice', icon: 'fa-code-fork'},
+                                {key: 'sub_flow', icon: 'fa-sitemap'}
+                            ]},
+                            {key: 'operations', category: 'operation', items: [
+                                {key: 'reader', icon: 'fa-download'},
+                                {key: 'writer', icon: 'fa-upload'},
+                                {key: 'invoke', icon: 'fa-bolt'}
+                            ]}
+                        ] %}
+                        {% for section in sections %}
+                            <div class="aaxis-flow-editor__toolbox-section">
+                                <div class="aaxis-flow-editor__toolbox-section-title">
+                                    {{ ('aaxis.ontology.flow_editor.toolbox.section.' ~ section.key)|trans }}
+                                </div>
+                                {% for item in section.items %}
+                                    <div class="aaxis-flow-editor__toolbox-item"
+                                         data-step-type="{{ item.key }}"
+                                         data-step-category="{{ section.category }}"
+                                         data-step-icon="{{ item.icon }}"
+                                         data-step-label="{{ ('aaxis.ontology.flow_editor.toolbox.item.' ~ item.key)|trans }}">
+                                        <span class="fa {{ item.icon }} aaxis-flow-editor__toolbox-item-icon" aria-hidden="true"></span>
+                                        {{ ('aaxis.ontology.flow_editor.toolbox.item.' ~ item.key)|trans }}
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}

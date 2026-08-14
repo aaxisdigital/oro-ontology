@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_3';
+        return 'v1_6';
     }
 
     #[\Override]
@@ -155,7 +155,9 @@ class AaxisOntologyBundleInstaller implements Installation
         $table->addColumn('id', 'integer', ['autoincrement' => true]);
         $table->addColumn('name', 'string', ['length' => 128]);
         $table->addColumn('enabled', 'boolean', ['default' => true]);
+        $table->addColumn('type', 'string', ['length' => 16, 'default' => 'subflow']);
         $table->addColumn('steps', 'json', ['notnull' => false, 'columnDefinition' => self::JSONB_NULL]);
+        $table->addColumn('design', 'json', ['notnull' => false, 'columnDefinition' => self::JSONB_NULL]);
         $table->setPrimaryKey(['id']);
         $table->addUniqueIndex(['name'], 'aaxis_ontology_flow_name_uidx');
     }

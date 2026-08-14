@@ -31,6 +31,14 @@ aaxis:
                 title: 'Settings'
             enabled:
                 label: Enabled
+            flows:
+                title: 'Flows'
+                editor_grid_spacing:
+                    label: 'Editor grid spacing (px)'
+                    tooltip: 'Spacing, in pixels, between the dots of the flow editor canvas background (default 10).'
+                editor_step_size_factor:
+                    label: 'Editor step size (grid multiples)'
+                    tooltip: 'Side of a step tile on the flow editor canvas, as a multiple of the grid spacing (default 8 — e.g. 80px tiles on a 10px grid).'
             api:
                 title: 'Data API'
                 read_enabled:
@@ -199,7 +207,7 @@ aaxis:
                 file_system: 'File System'
             config:
                 label: 'Configuration (JSON)'
-                tooltip: 'Per-type configuration as JSON. Detailed per connector type later.'
+                tooltip: 'Read-only summary of the per-type configuration. Use the "Configure…" button to change it. Secret values (passwords, keys, Authorization headers) are always shown masked as ********.'
         data:
             entity_label: Data Record
             entity_plural_label: Data View
@@ -226,5 +234,38 @@ aaxis:
         flow:
             entity_label: Flow
             entity_plural_label: Flows
+        flow_manager:
+            name_required: 'Please enter a name.'
+            name_unique: 'A flow with this name already exists.'
+            edit_builtin_forbidden: 'This is a built-in flow and cannot be edited.'
+            step_names_unique: 'Step names must be unique within the flow.'
+            invalid_cron: 'Step "{{ name }}" has an invalid cron expression.'
+            invalid_step_config: 'Step "{{ name }}" has an incomplete or invalid configuration.'
+        flow_editor:
+            title: 'New Flow'
+            name_label: 'Flow name'
+            enabled_label: 'Enabled'
+            cancel: 'Cancel'
+            close: 'Close'
+            save: 'Save'
+            debug: 'Debug'
+            toolbox_toggle: 'Toolbox'
+            toolbox:
+                title: 'Toolbox'
+                hide: 'Hide toolbox'
+                section:
+                    triggers: 'Triggers'
+                    actions: 'Actions'
+                    operations: 'Operations'
+                item:
+                    cron: 'Cron'
+                    queue: 'Queue'
+                    entity_change: 'Entity change'
+                    dwl_transform: 'DWL transform'
+                    choice: 'Choice'
+                    sub_flow: 'Sub-flow'
+                    reader: 'Reader'
+                    writer: 'Writer'
+                    invoke: 'Invoke'
         flow_view:
             add_button: 'Add Flow'

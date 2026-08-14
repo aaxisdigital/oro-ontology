@@ -13,7 +13,8 @@ use Doctrine\Persistence\ObjectManager;
  *  - {@see OntologyFlow::NAME_MANUAL} — used by the back-office "Add Data" button (Data View);
  *  - {@see OntologyFlow::NAME_REST_API} — used by the Ontology REST API endpoints.
  *
- * Both are created enabled. Disabling either in the Flows admin blocks the respective calls.
+ * Both are created enabled and native (type = native) — unlike user-created flows, the
+ * built-ins cannot be edited. Disabling either in the Flows admin blocks the respective calls.
  * Idempotent: existing flows (by name) are left untouched.
  */
 class LoadOntologyFlows implements FixtureInterface
@@ -27,7 +28,7 @@ class LoadOntologyFlows implements FixtureInterface
             if ($repository->findOneBy(['name' => $name]) !== null) {
                 continue;
             }
-            $manager->persist((new OntologyFlow())->setName($name)->setEnabled(true));
+            $manager->persist((new OntologyFlow())->setName($name)->setEnabled(true)->setType(OntologyFlow::TYPE_NATIVE));
         }
 
         $manager->flush();

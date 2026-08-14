@@ -269,6 +269,20 @@
 }
 
 
+// --- Connector config (read-only JSON + "Configure…" popup) ----------------
+
+// Block-level row so the button always lands on its own line BELOW the (inline-block)
+// JSON textarea instead of floating next to it.
+.aaxis-ontology-configure {
+    margin-top: 8px;
+}
+
+.aaxis-ontology-configure-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
 // --- Delete confirmation dialog --------------------------------------------
 
 .aaxis-ontology-confirm {
@@ -433,5 +447,577 @@
         &:empty {
             display: none;
         }
+    }
+}
+
+// --- Flow editor -------------------------------------------------------------
+
+.aaxis-flow-editor {
+    display: flex;
+    flex-direction: column;
+    // Fill the viewport below Oro's page chrome so the canvas gets all remaining height.
+    min-height: calc(100vh - 230px);
+
+    &__topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 16px;
+        background: #fff;
+        border-bottom: 1px solid #d6dde4;
+    }
+
+    &__name {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 1 1 auto;
+        min-width: 0;
+
+        // Label, input and switch have different heights — force every child onto the vertical
+        // middle regardless of theme-provided label margins/line-heights.
+        > * {
+            align-self: center;
+            margin-top: 0;
+            margin-bottom: 0;
+        }
+    }
+
+    &__name-label {
+        margin: 0;
+        font-weight: font-weight('bold');
+        color: #2b3a4a;
+        white-space: nowrap;
+    }
+
+    &__name-input {
+        width: 320px;
+        max-width: 100%;
+        height: 36px;
+        padding: 4px 10px;
+        box-sizing: border-box;
+        border: 1px solid #c7d0d9;
+        border-radius: 4px;
+        font-size: 14px;
+
+        &:focus {
+            outline: none;
+            border-color: #2b6cb0;
+        }
+    }
+
+    &__controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex: 0 0 auto;
+
+        [data-role='toolbox-toggle'].is-active .fa {
+            color: #2b6cb0;
+        }
+    }
+
+    // Enabled/disabled switch (same look as the record-form modal switch).
+    &__switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        cursor: pointer;
+
+        input {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+    }
+
+    &__switch-track {
+        position: relative;
+        width: 42px;
+        height: 24px;
+        border-radius: 12px;
+        background: #cfd6dd;
+        transition: background 0.18s ease;
+    }
+
+    &__switch-thumb {
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        transition: transform 0.18s ease;
+    }
+
+    &__switch input:checked + &__switch-track {
+        background: #2b6cb0;
+    }
+
+    &__switch input:checked + &__switch-track &__switch-thumb {
+        transform: translateX(18px);
+    }
+
+    &__switch-text {
+        font-size: 13px;
+        color: #2b3a4a;
+    }
+
+    // The canvas: a dot-matrix background (VB6-style form grid). The dot spacing comes from
+    // System Configuration via the --aaxis-flow-grid custom property set by the component.
+    &__canvas {
+        position: relative;
+        flex: 1 1 auto;
+        overflow: hidden;
+        background-color: #fbfcfe;
+        background-image: radial-gradient(circle, #b6c2cf 1px, transparent 1.5px);
+        background-size: var(--aaxis-flow-grid, 10px) var(--aaxis-flow-grid, 10px);
+    }
+
+    // Flying toolbox: absolutely positioned inside the canvas, dragged by its handle.
+    &__toolbox {
+        position: absolute;
+        top: 24px;
+        right: 24px;
+        width: 190px;
+        background: #fff;
+        border: 1px solid #d6dde4;
+        border-radius: 6px;
+        box-shadow: 0 8px 24px rgba(17, 24, 33, 0.18);
+        user-select: none;
+    }
+
+    &__toolbox-handle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid #eef1f4;
+        border-radius: 6px 6px 0 0;
+        background: #f7f9fb;
+        font-weight: font-weight('bold');
+        font-size: 12.5px;
+        color: #2b3a4a;
+        cursor: move;
+        touch-action: none;
+
+        .fa {
+            color: #8a98a6;
+        }
+    }
+
+    &__toolbox-section {
+        padding: 6px 0;
+
+        & + & {
+            border-top: 1px solid #eef1f4;
+        }
+    }
+
+    &__toolbox-section-title {
+        padding: 4px 12px;
+        font-size: 11px;
+        font-weight: font-weight('bold');
+        text-transform: uppercase;
+        color: #8a98a6;
+    }
+
+    &__toolbox-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 12px;
+        font-size: 13px;
+        color: #2b3a4a;
+        cursor: grab;
+
+        &:hover {
+            background: rgba(43, 108, 176, 0.06);
+        }
+    }
+
+    &__toolbox-item-icon {
+        width: 16px;
+        text-align: center;
+        color: #2b6cb0;
+    }
+
+    // Step tiles placed on the canvas (size set inline: factor × dot spacing).
+    &__step {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        box-sizing: border-box;
+        padding: 4px;
+        background: #fff;
+        border: 1px solid #c7d0d9;
+        border-radius: 6px;
+        box-shadow: 0 2px 8px rgba(17, 24, 33, 0.12);
+        color: #2b6cb0;
+        cursor: grab;
+        touch-action: none;
+        user-select: none;
+
+        &:hover {
+            border-color: #2b6cb0;
+        }
+
+        &.is-moving {
+            cursor: grabbing;
+            border-color: #2b6cb0;
+            box-shadow: 0 6px 18px rgba(17, 24, 33, 0.25);
+            z-index: 5;
+        }
+
+        // Drag preview while pulling a new step out of the toolbox (viewport coordinates).
+        &.is-ghost {
+            position: fixed;
+            opacity: 0.75;
+            pointer-events: none;
+            z-index: 1100;
+        }
+    }
+
+    &__step-icon {
+        line-height: 1;
+    }
+
+    // Step name, centered below the icon (font size set inline relative to the tile size).
+    // Up to TWO rows, breaking only at natural boundaries (spaces/hyphens — no mid-word breaks).
+    &__step-name {
+        max-width: 100%;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        overflow: hidden;
+        white-space: normal;
+        overflow-wrap: normal;
+        word-break: normal;
+        text-align: center;
+        line-height: 1.2;
+        color: #2b3a4a;
+    }
+
+    // Output port ("×" handle) centered on the tile's right edge; choice tiles get two (--a/--b).
+    // Borderless at rest — the circle only appears as the hover highlight.
+    &__port {
+        position: absolute;
+        right: -9px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 18px;
+        height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: #2b6cb0;
+        font-size: 12px;
+        line-height: 1;
+        cursor: crosshair;
+        touch-action: none;
+        z-index: 2;
+
+        &:hover {
+            background: #2b6cb0;
+            color: #fff;
+        }
+
+        &--a {
+            top: 33%;
+        }
+
+        &--b {
+            top: 67%;
+        }
+    }
+
+    // SVG layer holding the flow links (below the tiles, above the dot matrix).
+    &__wires {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+
+        [data-role='wire'],
+        [data-role='wire-temp'] {
+            fill: none;
+            stroke: #2b6cb0;
+            stroke-width: 2;
+        }
+
+        [data-role='wire-temp'] {
+            stroke-dasharray: 5 4;
+        }
+
+        // Invisible wide twin of each wire: the only part of the layer that takes pointer
+        // events, so the thin line is comfortably right-clickable.
+        [data-role='wire-hit'] {
+            fill: none;
+            stroke: transparent;
+            stroke-width: 12;
+            pointer-events: stroke;
+            cursor: context-menu;
+        }
+
+        [data-role='wire-group']:hover [data-role='wire'],
+        [data-role='start-group']:hover [data-role='wire'] {
+            stroke: #1b3a5b;
+        }
+
+        marker path {
+            fill: #2b6cb0;
+        }
+    }
+
+    // Valid link target under the pointer while dragging a connection.
+    &__step.is-link-target {
+        border-color: #2c7a3f;
+        box-shadow: 0 0 0 2px rgba(44, 122, 63, 0.35);
+    }
+
+    // Selected tile(s) — click or rubber-band selection.
+    &__step.is-selected {
+        border-color: #2b6cb0;
+        box-shadow: 0 0 0 2px rgba(43, 108, 176, 0.45);
+    }
+
+    // Steps that will NOT execute (not reachable from the trigger via flow lines).
+    &__step.is-unreachable {
+        background: #eceff2;
+
+        .aaxis-flow-editor__step-icon {
+            opacity: 0.55;
+        }
+    }
+
+    // macOS-style rubber-band selection rectangle.
+    &__marquee {
+        position: absolute;
+        z-index: 4;
+        border: 1px dashed #2b6cb0;
+        background: rgba(43, 108, 176, 0.08);
+        pointer-events: none;
+    }
+
+    // Right-click context menu on a tile.
+    &__menu {
+        position: fixed;
+        z-index: 1100;
+        min-width: 160px;
+        padding: 6px 0;
+        background: #fff;
+        border: 1px solid #d6dde4;
+        border-radius: 6px;
+        box-shadow: 0 8px 24px rgba(17, 24, 33, 0.18);
+    }
+
+    &__menu-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 7px 14px;
+        border: 0;
+        background: transparent;
+        font-size: 13px;
+        color: #2b3a4a;
+        text-align: left;
+        cursor: pointer;
+
+        .fa {
+            width: 14px;
+            text-align: center;
+            color: #5c6b7a;
+        }
+
+        &:hover {
+            background: rgba(43, 108, 176, 0.06);
+
+            .fa {
+                color: #2b6cb0;
+            }
+        }
+    }
+
+    &__toolbox[hidden] {
+        display: none;
+    }
+
+    // The × in the toolbox title bar.
+    &__toolbox-hide {
+        margin-left: auto;
+        border: 0;
+        background: transparent;
+        padding: 0 2px;
+        color: #8a98a6;
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+
+        &:hover {
+            color: #2b3a4a;
+        }
+    }
+
+    // "Flying" step settings: viewport-covering backdrop that absorbs outside clicks + a panel
+    // positioned next to the tile (see positionSettings in the component).
+    &__settings-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1090;
+        background: rgba(17, 24, 33, 0.25);
+    }
+
+    &__settings {
+        position: fixed;
+        z-index: 1095;
+        display: flex;
+        flex-direction: column;
+        width: 420px;
+        // The whole popup must stay usable: cap to the viewport and let the middle scroll,
+        // keeping the title and the Cancel/Confirm actions always reachable.
+        max-height: calc(100vh - 16px);
+        background: #fff;
+        border: 1px solid #d6dde4;
+        border-radius: 8px;
+        box-shadow: 0 12px 36px rgba(17, 24, 33, 0.28);
+
+        // Widens when a section opens the right-hand column (e.g. the reader's body content).
+        &.is-wide {
+            width: 760px;
+        }
+    }
+
+    // Full-width fixed rows above the columns (e.g. the reader's Name | Type | Destination).
+    &__settings-top {
+        flex: 0 0 auto;
+        padding: 12px 16px 0;
+
+        &[hidden] {
+            display: none;
+        }
+    }
+
+    &__settings-columns {
+        display: flex;
+        align-items: stretch;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: auto;
+    }
+
+    // Full-width validation feedback line above the actions.
+    &__settings-feedback {
+        flex: 0 0 auto;
+        padding: 4px 16px 0;
+    }
+
+    // Right-hand column of the settings panel (body content textarea).
+    &__settings-side {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        width: 320px;
+        padding: 12px 16px 12px 0;
+        margin-left: 16px;
+        border-left: 1px solid #eef1f4;
+        padding-left: 16px;
+
+        &[hidden] {
+            display: none;
+        }
+    }
+
+    &__settings-textarea {
+        flex: 1 1 auto;
+        min-height: 220px;
+        resize: vertical;
+        font-family: monospace;
+        font-size: 12.5px;
+        box-sizing: border-box;
+        width: 100%;
+    }
+
+    // Several small fields sharing one line (e.g. operation + body + path).
+    &__settings-row {
+        display: flex;
+        gap: 8px;
+    }
+
+    &__settings-col {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 0;
+    }
+
+    // Activity indicator inside the Save button while the request is in flight.
+    &__save-spinner {
+        margin-right: 6px;
+    }
+
+    &__settings-title {
+        padding: 12px 16px;
+        border-bottom: 1px solid #eef1f4;
+        font-weight: font-weight('bold');
+        font-size: 14px;
+        color: #1b3a5b;
+    }
+
+    &__settings-body {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 12px 16px 0;
+        flex: 1 1 auto;
+        min-width: 0;
+
+        .form-control {
+            width: 100%;
+            box-sizing: border-box;
+            height: 34px;
+        }
+    }
+
+    // The fixed top rows share the body's control sizing.
+    &__settings-top .form-control {
+        width: 100%;
+        box-sizing: border-box;
+        height: 34px;
+    }
+
+    &__settings-label {
+        margin: 0;
+        font-size: 12.5px;
+        font-weight: font-weight('bold');
+        color: #2b3a4a;
+    }
+
+    &__settings-error {
+        margin: 0;
+        min-height: 16px;
+        color: #c0392b;
+        font-size: 12px;
+    }
+
+    &__settings-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 10px 16px 14px;
     }
 }

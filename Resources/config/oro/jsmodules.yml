@@ -5,3 +5,5 @@ dynamic-imports:
         - aaxisontology/js/app/components/data-view-component
         - aaxisontology/js/app/components/event-component
         - aaxisontology/js/app/components/flow-component
+        - aaxisontology/js/app/components/flow-editor-component
+        - aaxisontology/js/app/components/connector-config-component

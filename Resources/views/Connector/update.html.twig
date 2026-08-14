@@ -33,6 +33,18 @@
 
 {% block content_data %}
     {% set id = 'aaxis-ontology-connector-edit' %}
+
+    {# Config is read-only JSON, authored via the type-specific "Configure" popup; the component
+       also guards Type switches (confirms before wiping the existing configuration). #}
+    {% set configComponent %}
+        <div data-page-component-module="aaxisontology/js/app/components/connector-config-component"
+             data-page-component-options="{{ {
+                 typeFieldId: form.type.vars.id,
+                 configFieldId: form.config.vars.id,
+                 connectorId: entity.id
+             }|json_encode }}"></div>
+    {% endset %}
+
     {% set dataBlocks = [{
         'title': 'aaxis.ontology.section.general'|trans,
         'subblocks': [{
@@ -41,6 +53,7 @@
                 form_row(form.name),
                 form_row(form.type),
                 form_row(form.config),
+                configComponent,
             ]
         }]
     }] %}

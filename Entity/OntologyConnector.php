@@ -10,7 +10,17 @@ use Oro\Bundle\EntityConfigBundle\Metadata\Attribute\Config;
 
 /**
  * Ontology "Connector": a named integration (SFTP / REST API / File System) belonging
- * to a {@see OntologySystem}. The per-type configuration is stored as JSON (detailed later).
+ * to a {@see OntologySystem}. The per-type configuration is stored as JSON, authored via
+ * the type-specific "Configure" popup on the edit page (never typed by hand):
+ *
+ * - file_system: {base_path}
+ * - sftp:        {server, port, user, auth: none|password|key, password?, key?}
+ * - rest_api:    {server, port?, headers{}, auth: none|headers|oauth,
+ *                 auth_headers{}?, oauth: {path, headers{}, body{}}?}
+ *
+ * Secret values inside the config (passwords, keys, Authorization headers, ...) are stored
+ * in clear but NEVER rendered — every read path masks them with the ******** sentinel and
+ * submits merge the sentinel back to the stored value ({@see \Aaxis\Bundle\OntologyBundle\Manager\ConnectorConfigSecrets}).
  */
 #[ORM\Entity]
 #[ORM\Table(name: 'aaxis_ontology_connector')]

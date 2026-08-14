@@ -5,6 +5,8 @@ system_configuration:
             icon: fa-database
         aaxis_ontology_general:
             title: aaxis.ontology.config.general.title
+        aaxis_ontology_flows:
+            title: aaxis.ontology.config.flows.title
         aaxis_ontology_api:
             title: aaxis.ontology.config.api.title
 
@@ -14,6 +16,22 @@ system_configuration:
             type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
             options:
                 label: aaxis.ontology.config.enabled.label
+                required: false
+
+        # --- Flows ---
+        aaxis_ontology.flow_editor_grid_spacing:
+            data_type: integer
+            type: Symfony\Component\Form\Extension\Core\Type\IntegerType
+            options:
+                label: aaxis.ontology.config.flows.editor_grid_spacing.label
+                tooltip: aaxis.ontology.config.flows.editor_grid_spacing.tooltip
+                required: false
+        aaxis_ontology.flow_editor_step_size_factor:
+            data_type: integer
+            type: Symfony\Component\Form\Extension\Core\Type\IntegerType
+            options:
+                label: aaxis.ontology.config.flows.editor_step_size_factor.label
+                tooltip: aaxis.ontology.config.flows.editor_step_size_factor.tooltip
                 required: false
 
         # --- Data HTTP API ---
@@ -73,6 +91,11 @@ system_configuration:
                                         priority: 100
                                         children:
                                             - aaxis_ontology.enabled
+                                    aaxis_ontology_flows:
+                                        priority: 90
+                                        children:
+                                            - aaxis_ontology.flow_editor_grid_spacing
+                                            - aaxis_ontology.flow_editor_step_size_factor
                                     aaxis_ontology_api:
                                         priority: 80
                                         children:

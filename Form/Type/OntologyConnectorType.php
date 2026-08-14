@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Form\Type;
 
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
+use Aaxis\Bundle\OntologyBundle\Manager\ConnectorConfigSecrets;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\CallbackTransformer;
@@ -14,14 +15,23 @@ use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
 use Symfony\Component\Form\Extension\Core\Type\TextareaType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\Form\FormEvent;
+use Symfony\Component\Form\FormEvents;
 use Symfony\Component\OptionsResolver\OptionsResolver;
 
 /**
- * Form for the Ontology "Connector" entity. The per-type configuration is entered as
- * JSON and stored as an array.
+ * Form for the Ontology "Connector" entity. The per-type configuration is stored as an
+ * array and shown as read-only JSON — it is authored through the type-specific
+ * "Configure" popup (connector-config-component.ts), never typed by hand. Secret values
+ * are masked on render and merged back from the stored config on submit
+ * ({@see ConnectorConfigSecrets}).
  */
 class OntologyConnectorType extends AbstractType
 {
+    public function __construct(private readonly ConnectorConfigSecrets $secrets)
+    {
+    }
+
     #[\Override]
     public function buildForm(FormBuilderInterface $builder, array $options): void
     {
@@ -50,13 +60,26 @@ class OntologyConnectorType extends AbstractType
                 'label' => 'aaxis.ontology.connector.config.label',
                 'tooltip' => 'aaxis.ontology.connector.config.tooltip',
                 'required' => false,
-                'attr' => ['rows' => 8, 'class' => 'aaxis-ontology-json'],
+                'attr' => ['rows' => 8, 'class' => 'aaxis-ontology-json', 'readonly' => 'readonly'],
             ]);
 
-        // The "config" model value is an array; render/edit it as pretty JSON.
+        // The stored config is needed to restore masked secrets when the submit comes back.
+        $originalConfig = null;
+        $builder->addEventListener(FormEvents::PRE_SET_DATA, static function (FormEvent $event) use (&$originalConfig): void {
+            $data = $event->getData();
+            if ($data instanceof OntologyConnector) {
+                $originalConfig = $data->getConfig();
+            }
+        });
+
+        // The "config" model value is an array; render it as pretty JSON with secrets masked,
+        // and on submit decode + merge sentinel-valued secrets back from the stored config.
+        $secrets = $this->secrets;
         $builder->get('config')->addModelTransformer(new CallbackTransformer(
-            static fn (?array $value): string => $value === null || $value === [] ? '' : (string) json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES),
-            static function (?string $value): ?array {
+            static fn (?array $value): string => $value === null || $value === []
+                ? ''
+                : (string) json_encode($secrets->mask($value), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES),
+            static function (?string $value) use ($secrets, &$originalConfig): ?array {
                 $value = trim((string) $value);
                 if ($value === '') {
                     return null;
@@ -66,7 +89,7 @@ class OntologyConnectorType extends AbstractType
                     throw new TransformationFailedException('The configuration must be a valid JSON object.');
                 }
 
-                return $decoded;
+                return $secrets->merge($decoded, $originalConfig);
             }
         ));
     }

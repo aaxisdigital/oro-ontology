@@ -35,8 +35,8 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 > indexes — the installer is the single source of truth for schema (matching the pre-existing
 > `logo_id` unique index).
 | `OntologyEntityAttribute` | `aaxis_ontology_entity_attribute` | name, datatype (`TYPES` const), required |
-| `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; type + JSON config |
-| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, JSON steps |
+| `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; type + JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
+| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`) |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique |
 | `OntologyDataEvent` | `aaxis_ontology_data_events` | one row per flow execution (seen vs changed ids) |
@@ -115,6 +115,179 @@ They are TypeScript single-page components built on CommonBundle's reusable `Dat
 `RecordFormModal` widgets, backed by **JSON endpoints** on the bundle's controllers. The Connector
 page is the exception — it uses a normal Oro datagrid + server-side CRUD.
 
+### Connector config & secrets
+
+The connector's JSON config is **never typed by hand**: the form textarea is read-only (attr set in
+`OntologyConnectorType`) and `connector-config-component.ts` (attached by a page-component div in
+`Connector/update.html.twig`, options = the type/config field DOM ids) adds a **"Configure…"
+button** that opens a type-specific `RecordFormModal` popup and writes the resulting JSON back into
+the textarea. The component **hides the mapped textarea** (it still carries the submitted value)
+and shows a display-only twin whose JSON is re-masked client-side — so a secret typed in the popup
+never appears readable on the page either, even before saving. The client mirror of the secret-key
+rules lives in the component (`SECRET_KEYS`/`SECRET_SUFFIXES`) — **keep it in sync with the PHP
+service**. Per-type shapes (also in the entity docblock):
+
+- `file_system` → `{base_path}` (required)
+- `sftp` → `{server, port (default 22), user, auth: none|password|key, password?, key?}`
+- `rest_api` → `{server, port?, headers{}, auth: none|headers|oauth, auth_headers{}?,
+  oauth: {path, headers{}, body{}}?}` (headers are `{name: value}` objects, edited as key/value
+  rows; the OAuth token path is a required textbox and the body/headers pair renders as two tabs —
+  "OAuth body" first — via the widget's `tabGroup`)
+
+**Secrets round-trip** (`Manager/ConnectorConfigSecrets`): values are stored in clear in
+`config` but never rendered. Every read path masks them to the `********` sentinel — the form's
+model transformer (edit page), `viewAction`'s `maskedConfig` (view page). On submit the reverse
+transformer calls `merge()`: a secret still holding the sentinel is restored from the stored config
+at the same path (captured at `PRE_SET_DATA`); a sentinel with no stored counterpart becomes `''`.
+A key is "secret" when it equals one of the known names (password, key, secret, token,
+authorization, …) case-insensitively, or when its normalized form (`-`/` ` → `_`) ends in
+`_key/_token/_secret/_password` — so `X-Api-Key`-style headers are masked too. In the popups,
+stored secrets never enter the form: sftp password/key inputs start empty with a "value stored —
+leave empty to keep" hint (and the submit re-emits the sentinel); REST header rows just show the
+sentinel in the value cell, and leaving it untouched keeps the stored value.
+
+**Type switches are guarded**: changing the Type select while a config exists opens a confirm
+dialog (the config is type-specific); confirming clears the textarea, cancelling reverts the
+select (programmatic revert is muted via a suppress flag so it doesn't re-trigger the handler).
+
+**Popup layout specifics** (all three popups are `resizable: false`): sftp lays out
+server/port as a 75/25 row and auth/user/password as a 24/38/38 row, with the key textarea
+full-width below; the password/key controls are ALWAYS rendered — the auth select only toggles
+their `disabled` state (per design feedback: control enablement, not visibility). Ports are
+`min: 1, max: 65535` (validated by the widget). REST uses the same 75/25 server/port row. The
+popups use the shared `RecordFormModal` `password` field type (show/hide toggle inside the input),
+`hint` lines, `disabled` fields and number `min`/`max` — documented in `../CommonBundle/CLAUDE.md`.
+
+**"Test" in the popups**: every Configure popup has a widget `testAction` (button on the LEFT of
+Cancel/Submit) that POSTs the CURRENT popup values as `{type, config, id?}` to
+`aaxis_ontology_connector_test` (`/connectors/test-config`, CSRF-protected, view ACL + a manual
+create-OR-update grant check — deliberately NOT the shared `aaxis_common` connection-test
+endpoint, which only tests SAVED config). The controller resolves `********` sentinels from the
+persisted connector (same-type only) via `ConnectorConfigSecrets::merge()`, then delegates to
+`Manager/ConnectorTester`: file_system = base path exists/is dir/readable; sftp = ① TCP socket
+(reports the SSH banner) ② authenticate with the informed user/password-or-key; rest_api =
+① TCP socket (port defaults from scheme; bare hosts assume https/443) ② `auth: oauth` only —
+POST to the OAuth path with the informed headers + form-encoded body, success = HTTP < 400.
+SFTP auth prefers **phpseclib3** and falls back to **ext-ssh2** (password only); with neither
+installed the auth step fails with an instructive message — the app must
+`composer require phpseclib/phpseclib` to test SFTP credentials. Responses are
+`{success, message, steps:[{label, success, message}]}` and messages never contain credentials.
+
+⚠️ **Any route called from TypeScript needs `options: ['expose' => true]`** on its `#[Route]`, AND
+the exposed-routes dump must be regenerated — `routing.generate()` reads only that dump
+(`public/media/js/admin_routes.json`), not the live router. Miss either and the call fails at
+runtime with `The route "<name>" does not exist.` while everything else looks healthy (PHP lints,
+`tsc` compiles, `debug:router` lists the route). Every JSON endpoint in this bundle carries the
+flag. After adding a route:
+
+```bash
+docker compose exec php php bin/console fos:js-routing:dump --env=dev   # → public/media/js/admin_routes.json
+docker compose exec php sh -c 'grep -c <route_name> public/media/js/admin_routes.json'   # 1 = exposed
+```
+
+The **flow editor** (`aaxis_ontology_flow_editor`, `Flow/editor.html.twig` +
+`flow-editor-component.ts`, styles in `ontology.scss` under `.aaxis-flow-editor`) is opened by
+"Add Flow" and by the flows grid's edit action (disabled for the built-in `type = native` flows,
+enforced again by the editor page + update endpoint). It shows the flow name (new flows default to
+`new_flow_<6 random alphanumerics>`), an enabled switch and cancel/save, over a dot-matrix canvas
+whose spacing comes from `aaxis_ontology.flow_editor_grid_spacing` (System Configuration →
+Aaxis Ontology → Flows, default 10px, exposed to CSS as the `--aaxis-flow-grid` custom property).
+Topbar: flow name + enabled switch on the left (children forced onto the vertical middle);
+Toolbox show/hide toggle + cancel/save on the right (the toolbox title bar also carries a × that
+hides it). The draggable toolbox
+(Triggers: cron/queue/entity change · Actions: DWL transform/Choice (an "if")/sub-flow ·
+Operations: reader/writer/invoke) is the step palette: items are dragged onto the canvas as
+square tiles of `flow_editor_step_size_factor` × grid-spacing px (config, default 8 → 80px tiles
+on a 10px grid), can be moved freely afterwards and always snap to the grid. Each tile shows its
+icon with the step **name** centered below (up to two rows, breaking only at word boundaries):
+names default to `<type>-<n>` (first free n) and are unique per flow (client + server enforced).
+**Flow links**: every tile has an "×" output port on its right edge (vertically centered; `choice`
+has two, at 1/3 and 2/3 height) — drag from a port onto another tile to wire them. Links are SVG
+bezier arrows (marker `#aaxis-flow-arrow`) arriving at the target's left-center, 2px off the
+border; each port drives exactly one link (re-drag re-wires), each element accepts at most ONE
+incoming link, and triggers accept none (invalid drops flash why). Links live in the design as
+`{from, fromPort, to}` referencing stable per-step ids, so renames don't touch them.
+Double-clicking a tile opens the **step settings** —
+a "flying" panel positioned next to the tile over a click-absorbing backdrop (a true modal: the
+user must Confirm/Cancel), titled `<type label> - <name>`. It edits the name plus the step's
+per-type `config` (an optional object persisted in both `design.steps[]` and the logical
+`steps[]`): **cron** requires a valid linux cron expression (`config.expression`) — Confirm is
+blocked otherwise (client validator `isValidCron`: @-macros + 5 fields with lists/ranges/steps/
+names; server re-validates with `Cron\CronExpression`, 422 `flow_manager.invalid_cron`);
+**entity_change** requires `{system, entity}` (selects fed by `aaxis_ontology_entity_list` —
+entities filtered by the chosen system, both referenced by NAME per the bundle's addressing);
+**reader** requires `{reader: entity|connector, destination}` (destination defaults to
+`payload`) plus, per variant, `{system, entity, mode: all|by_id, record_id (when by_id)}` or
+`{connector: <id>, path, and for rest_api connectors also operation: get|put|post|patch|delete,
+body: empty|json|text|xml, body_content (when body ≠ empty)}`. Reader popup layout: a full-width
+FIXED first row `Name | Reader type | Destination` (the reader takes over the name placement via
+`$top`), then variant rows in the left column — entity: `System | Entity` row then `Load (| Id)`
+row; connector: picker (fed by the exposed `aaxis_ontology_connector_list`, which also provides
+each connector's type), then a row that adapts to the chosen connector: rest_api →
+`Operation | Path | Body`, sftp/file_system → path only. A non-empty body opens the body-content
+textarea in the right column BELOW the fixed row (panel widens via `is-wide`). Every visibility
+toggle calls `reposition()` and the panel is viewport-capped (`max-height` + scrolling middle) so
+Cancel/Confirm always stay reachable. The modal blocks Confirm on missing
+values; the server re-checks any PRESENT config's completeness in `isStepConfigValid()`
+(422 `flow_manager.invalid_step_config`) — a null config (never opened) is still saveable.
+Other types configure only the name so far. **Selection**: click selects a tile, dragging on empty canvas
+rubber-bands a multi-selection (macOS style, blue ring = selected), any outside click clears it;
+dragging a tile that belongs to a multi-selection moves the WHOLE selection (relative offsets
+preserved — the leader is clamped so the entire group stays on the canvas).
+**Right-click** on a tile opens a context menu: Remove (deletes the selection + its links); with a
+multi-selection also Align (puts everything on the first-by-X element's Y with exactly one tile
+width of gap, keeping the X-then-Y order) and — only when every element after the first receives
+no line, none after the first is a trigger and none except the last is a Choice — Connect (chains
+the selection in sequence, port 0 re-wired if used). Right-clicking a flow LINE offers Remove for
+that single connection (each wire ships an invisible 12px-wide hit twin — the only pointer-enabled
+part of the SVG layer — and highlights on hover). **Wire routing**: links are orthogonal polylines
+found by A* over the dot grid (cell = spacing, tiles inflated by one clearance cell are obstacles,
+turn penalty keeps runs straight, ~20k-expansion cap with a 3-segment fallback), leaving the port
+through a horizontal stub and arriving horizontally into the arrow tip — so a line never runs
+over/under a tile and deviates before reaching one. Where a horizontal run of one line properly
+crosses a vertical run of ANOTHER, the horizontal one draws a small semicircular "jump" arc
+(radius ≈ spacing/2, skipped within 2r of corners). Tile drags re-route via a rAF-coalesced
+redraw (`scheduleRedraw`). Only one **trigger** step is allowed — dropping a second one
+asks to replace the existing trigger. **Reachability marking**: tiles not reachable from the
+trigger via the directed links gray out (`is-unreachable`, BFS in `updateReachability()` — no
+trigger = everything gray), refreshed on every step/link mutation via addStep + redrawLinks.
+**Sub-flow "Start here"**: with no trigger on the canvas, right-clicking an element with no
+incoming line offers Start here — it becomes the reachability root, drawn as a short origin-less
+arrow into its input (right-click the arrow, or the tile's Remove start, to clear). The marker
+counts as the element's one incoming line, persists as `design.start` (validated on restore:
+non-trigger target, no incoming link, no trigger present), and dropping a trigger asks before
+removing it ("This sub-flow starts at …"). Step metadata (category/icon/label per type) is harvested
+from the toolbox items' `data-step-*` attributes, so the twig is the single source of truth for
+the palette. Save persists name + enabled + steps (`[{type, name, x, y}]`) + `design` (versioned
+canvas state: `{version, steps:[{id, type, name, x, y}], links:[{from, fromPort, to}],
+toolbox:{x, y, visible}}` — bump `DESIGN_VERSION` in the component when the shape changes) via
+`aaxis_ontology_flow_api_create` / `_update`; the server re-validates step types/names and
+recomputes the flow type. **Dirty tracking**: the editor snapshots {name, enabled, design} — Save
+is enabled only while the snapshot differs from the last-saved one, and the exit button swaps
+between Cancel (dirty) and Close (clean). Saving stays ON the page (a first save adopts the new id
+into the URL via `history.replaceState` so refresh reopens the same flow) and re-arms the clean
+state; every mutation path (add/move/rename/remove steps, link changes, toolbox move/visibility,
+name/switch inputs, drag ends) calls `syncDirty()`. On open the editor restores from `design` (strictly
+validated; corrupted/outdated → warning flash + empty canvas; NULL → rebuilt from `steps`).
+**Debug**: a Debug topbar button (shown only while a REAL trigger exists, synced in
+`updateReachability`) POSTs the CURRENT canvas (steps with configs + links + trigger input,
+unsaved edits included) to the exposed `aaxis_ontology_flow_debug` endpoint
+(`flow_update` ACL + CSRF), which walks the graph breadth-first from the trigger via
+`Manager/FlowDebugExecutor` and returns the output context shown as pretty JSON in a dialog.
+Cron/queue triggers run immediately; entity_change first asks for system/entity (prefilled from
+the trigger's config, reusing `systemEntitySection`) + a JSON payload seeded into the context as
+`payload`. Executed for real: entity readers (`all` = first page via OntologyDataApiManager::query
+— capped at 100, `by_id` = read(); a MISSING record yields null, not an error) and **rest_api
+connector readers** (URL = connector server[:port] + step path; connector headers; auth=headers
+merges auth_headers; auth=oauth POSTs the token path — form-encoded oauth.body + oauth.headers —
+and attaches `access_token` as a bearer; the step's operation/body/body_content are honoured;
+TLS verification off like the toolbox proxy; JSON responses decoded, others returned raw;
+HTTP ≥ 400 aborts naming the step). sftp/file_system connector readers emit a `_debug`
+placeholder note; other step types are no-ops for now. Errors (unconfigured step, unknown
+system/entity, missing connector, failed request) abort with a 422 naming the step.
+Gotcha fixed here once: a textarea's initial value must be set via jQuery `.val()` — a `value`
+key in the `$('<textarea/>', {...})` creation map is silently ignored.
+
 A typical CRUD field (e.g. on the Entity page) therefore lives in **several places at once** — to
 add/change one, touch all of them:
 1. `Entity/<X>.php` — Doctrine column + getter/setter.
@@ -126,6 +299,12 @@ add/change one, touch all of them:
 6. `Resources/translations/messages.en.yml` — label + any validation/placeholder strings.
 
 ## JS / TypeScript — NEVER hand-edit the compiled `.js`
+
+⚠️ **No class-field initializers in `BaseComponent` subclasses.** Oro's `BaseComponent` constructor
+calls `initialize()` — so TS field initializers (`private foo = {}`) run **after** `initialize()`
+(fields are `undefined` during it, and the initializer then overwrites anything `initialize()`
+assigned). Declare fields as `private foo!: T;` and assign them at the top of `initialize()`
+(see `flow-editor-component.ts`). Plain classes (e.g. the DataGrid widget) are unaffected.
 
 `.ts` sources live in `Resources/js-src/`; the `.js` in `Resources/public/js/` is **generated** by
 `tsc` (CommonBundle's `TypeScriptCompiler`, wired in `services.yml` and run on `oro:assets:build` via
@@ -191,6 +370,7 @@ docker compose exec php php bin/console oro:migration:load --dry-run --show-quer
 docker compose exec php php bin/console oro:migration:load --force                    # apply
 docker compose exec php php bin/console oro:assets:build --env=dev                   # after any .ts change
 docker compose exec php php bin/console oro:translation:load --env=dev               # after any translations change
+docker compose exec php php bin/console fos:js-routing:dump --env=dev                # after adding an expose'd route
 docker compose exec php php bin/console debug:router | grep aaxis_ontology
 ```
 

@@ -29,6 +29,25 @@ class OntologyFlow
     /** Flow used by the Ontology REST API endpoints. */
     public const string NAME_REST_API = 'Ontology REST API';
 
+    /** Built-in flow seeded by the data fixture; read-only in the UI. */
+    public const string TYPE_NATIVE = 'native';
+
+    /** User-created flow that contains a trigger step. */
+    public const string TYPE_FLOW = 'flow';
+
+    /** User-created flow without a trigger step (invoked from other flows). */
+    public const string TYPE_SUBFLOW = 'subflow';
+
+    /** Toolbox step types that count as triggers (drive {@see computeType}). */
+    public const array TRIGGER_STEP_TYPES = ['cron', 'queue', 'entity_change'];
+
+    /** Every step type the editor toolbox offers (triggers + actions + operations). */
+    public const array STEP_TYPES = [
+        'cron', 'queue', 'entity_change',              // triggers
+        'dwl_transform', 'choice', 'sub_flow',         // actions ("choice" acts as an if)
+        'reader', 'writer', 'invoke',                  // operations
+    ];
+
     #[ORM\Id]
     #[ORM\Column(name: 'id', type: Types::INTEGER)]
     #[ORM\GeneratedValue(strategy: 'AUTO')]
@@ -40,8 +59,25 @@ class OntologyFlow
     #[ORM\Column(name: 'enabled', type: Types::BOOLEAN, options: ['default' => true])]
     private bool $enabled = true;
 
+    /**
+     * `native` for the two built-in flows seeded by the data fixture ({@see NAME_MANUAL},
+     * {@see NAME_REST_API}) — those are read-only in the UI. User-created flows are `flow` when
+     * their steps contain a trigger and `subflow` otherwise (recomputed from the steps on every
+     * save, see {@see computeType}); the save endpoints never take the type from the payload.
+     */
+    #[ORM\Column(name: 'type', type: Types::STRING, length: 16, options: ['default' => self::TYPE_SUBFLOW])]
+    private string $type = self::TYPE_SUBFLOW;
+
     #[ORM\Column(name: 'steps', type: Types::JSON, nullable: true, options: ['jsonb' => true])]
     private ?array $steps = null;
+
+    /**
+     * The editor's canvas representation (versioned: step tiles + toolbox state), owned by the
+     * flow editor UI. Kept separate from `steps` (the logical step list): the editor restores
+     * from `design` and treats an unreadable/outdated value as corrupted, starting empty.
+     */
+    #[ORM\Column(name: 'design', type: Types::JSON, nullable: true, options: ['jsonb' => true])]
+    private ?array $design = null;
 
     public function getId(): ?int
     {
@@ -72,6 +108,41 @@ class OntologyFlow
         return $this;
     }
 
+    public function getType(): string
+    {
+        return $this->type;
+    }
+
+    /** Set TYPE_NATIVE only from the seeding fixture; user flows get {@see computeType}'s result. */
+    public function setType(string $type): self
+    {
+        $this->type = $type;
+
+        return $this;
+    }
+
+    public function isNative(): bool
+    {
+        return $this->type === self::TYPE_NATIVE;
+    }
+
+    /**
+     * The type of a user-created flow follows from its steps: a trigger step makes it a `flow`,
+     * otherwise it is a `subflow`.
+     *
+     * @param array<int, array<string, mixed>>|null $steps
+     */
+    public static function computeType(?array $steps): string
+    {
+        foreach ($steps ?? [] as $step) {
+            if (\is_array($step) && \in_array($step['type'] ?? null, self::TRIGGER_STEP_TYPES, true)) {
+                return self::TYPE_FLOW;
+            }
+        }
+
+        return self::TYPE_SUBFLOW;
+    }
+
     /**
      * @return array<int|string, mixed>|null
      */
@@ -86,6 +157,24 @@ class OntologyFlow
     public function setSteps(?array $steps): self
     {
         $this->steps = $steps;
+
+        return $this;
+    }
+
+    /**
+     * @return array<int|string, mixed>|null
+     */
+    public function getDesign(): ?array
+    {
+        return $this->design;
+    }
+
+    /**
+     * @param array<int|string, mixed>|null $design
+     */
+    public function setDesign(?array $design): self
+    {
+        $this->design = $design;
 
         return $this;
     }
