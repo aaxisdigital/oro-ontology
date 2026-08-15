@@ -263,6 +263,51 @@
     font-style: italic;
 }
 
+// Reusable "text or DWL" field (widgets/dwl-field.ts, used by the flow editor's step settings and
+// the DWL playground): a title row — label left; host tools and the pure-text/DWL switch always
+// right-aligned over the textarea — plus the textarea, whose sizing each host brings via its own
+// class. The switch reuses the flow editor's small-switch visuals.
+.aaxis-dwl-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-height: 0;
+
+    &__row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex: 0 0 auto;
+    }
+
+    &__label {
+        margin: 0;
+        font-size: 12.5px;
+        font-weight: font-weight('bold');
+        color: #2b3a4a;
+    }
+
+    &__tools {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+
+    &__textarea {
+        width: 100%;
+        box-sizing: border-box;
+
+        // Code presentation while DWL mode is active (pure text keeps the default look).
+        &--code {
+            background: #fbfcfe;
+            color: #1b3a5b;
+            font-family: monospace;
+        }
+    }
+}
+
 // Version history dialog: fixed-height flex body so the version picker, search toolbar and copy
 // button stay pinned and only the JSON view scrolls. Without this the whole dialog body scrolls
 // and the copy button drops below the fold.
@@ -675,35 +720,51 @@
 
     &__topbar {
         display: flex;
-        align-items: center;
+        // Bottom-aligned: the buttons sit on the same row as the input/switch (the labels stick
+        // up above on the left).
+        align-items: flex-end;
         justify-content: space-between;
         gap: 16px;
-        padding: 12px 16px;
+        // No horizontal padding — the Flow Name aligns with the grid's left edge (the page
+        // container already provides the outer margin); just enough breathing room vertically.
+        padding: 10px 0;
         background: #fff;
         border-bottom: 1px solid #d6dde4;
     }
 
+    // Left topbar side: stacked label-above-control fields (narrow). Top-aligned so BOTH labels
+    // sit on the same Y; the switch centers itself against the input's 36px row via its margins.
     &__name {
         display: flex;
-        align-items: center;
-        gap: 10px;
+        align-items: flex-start;
+        gap: 14px;
         flex: 1 1 auto;
         min-width: 0;
-
-        // Label, input and switch have different heights — force every child onto the vertical
-        // middle regardless of theme-provided label margins/line-heights.
-        > * {
-            align-self: center;
-            margin-top: 0;
-            margin-bottom: 0;
-        }
     }
 
-    &__name-label {
+    &__field {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 3px;
+        min-width: 0;
+    }
+
+    &__field-label {
         margin: 0;
+        font-size: 11.5px;
         font-weight: font-weight('bold');
-        color: #2b3a4a;
+        line-height: 1.2;
+        color: #5a6b7d;
         white-space: nowrap;
+    }
+
+    &__field--switch {
+        align-items: center;
+
+        .aaxis-flow-editor__switch {
+            margin: 6px 0; // 24px track + 6+6 = the input's 36px row
+        }
     }
 
     &__name-input {
@@ -725,11 +786,40 @@
     &__controls {
         display: flex;
         align-items: center;
-        gap: 12px;
+        gap: 10px;
         flex: 0 0 auto;
+
+        .btn {
+            // Flex centering ignores the whitespace text nodes between the icon and label spans,
+            // so an icon-only button (narrow mode) shows its image dead-center; the gap replaces
+            // any theme icon margin (zeroed below, it would skew the centering).
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            // Same box as the name input beside it, so the bottom-aligned row reads as one line.
+            height: 36px;
+        }
+
+        .btn .fa {
+            margin: 0;
+        }
 
         [data-role='toolbox-toggle'].is-active .fa {
             color: #2b6cb0;
+        }
+    }
+
+    // Narrow viewports: the buttons drop their text and keep icon + title tooltip only.
+    @media (max-width: 1199px) {
+        &__btn-text {
+            display: none;
+        }
+
+        &__controls .btn {
+            min-width: 44px;
+            padding-left: 0;
+            padding-right: 0;
         }
     }
 
@@ -783,12 +873,29 @@
         color: #2b3a4a;
     }
 
-    // The canvas: a dot-matrix background (VB6-style form grid). The dot spacing comes from
-    // System Configuration via the --aaxis-flow-grid custom property set by the component.
+    // The canvas area: a non-scrolling wrapper (anchors the viewport-pinned toolbox), the scroll
+    // viewport, and the inner content plane holding steps/wires. The plane carries the dot-matrix
+    // background (VB6-style form grid; spacing via the --aaxis-flow-grid custom property set by
+    // the component) and is sized by the component to the content extent, so anything placed
+    // beyond the visible area brings up scrollbars instead of being clipped away.
+    &__canvas-wrap {
+        position: relative;
+        display: flex;
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+
     &__canvas {
         position: relative;
         flex: 1 1 auto;
-        overflow: hidden;
+        overflow: auto;
+        background-color: #fbfcfe;
+    }
+
+    &__canvas-inner {
+        position: relative;
+        min-width: 100%;
+        min-height: 100%;
         background-color: #fbfcfe;
         background-image: radial-gradient(circle, #b6c2cf 1px, transparent 1.5px);
         background-size: var(--aaxis-flow-grid, 10px) var(--aaxis-flow-grid, 10px);
@@ -1174,14 +1281,6 @@
         }
     }
 
-    // A field label with an extra control (e.g. the DWL switch) right-aligned on the same line.
-    &__settings-labelrow {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-    }
-
     // Compact switch variant for the settings panel (the DWL on/off toggles).
     &__switch--small {
         gap: 5px;
@@ -1206,22 +1305,6 @@
         font-size: 11px;
         font-weight: font-weight('bold');
         color: #5a6b7d;
-    }
-
-    // Reusable "text or DWL" field: title row (label + DWL switch) over its textarea. The
-    // wrapper is a flex column so a full-height textarea (e.g. body content) keeps growing.
-    &__dwl-field {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        flex: 1 1 auto;
-        min-height: 0;
-    }
-
-    // Code presentation while the DWL toggle is on (the pure-text mode keeps the default look).
-    &__settings-textarea--code {
-        background: #fbfcfe;
-        color: #1b3a5b;
     }
 
     // Schedule trigger, cron mode: the expression tints light red while invalid…

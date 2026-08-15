@@ -44,6 +44,20 @@ services:
             - '@http_client'
             - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
 
+    # The minutely flow scheduler (see Command/RunScheduledFlowsCommand).
+    Aaxis\Bundle\OntologyBundle\Manager\ScheduledFlowRunner:
+        public: true
+        arguments:
+            - '@doctrine'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor'
+            - '@logger'
+
+    Aaxis\Bundle\OntologyBundle\Command\RunScheduledFlowsCommand:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\ScheduledFlowRunner'
+        tags:
+            - { name: console.command, command: 'aaxis:ontology:flows:run-due' }
+
     Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager:
         public: true
         arguments:

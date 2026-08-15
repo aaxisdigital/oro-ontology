@@ -36,7 +36,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 > `logo_id` unique index).
 | `OntologyEntityAttribute` | `aaxis_ontology_entity_attribute` | name, datatype (`TYPES` const), required |
 | `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; type + JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
-| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time; installer at v1_7) |
+| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|queue|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb; installer at v1_8) |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique |
 | `OntologyDataEvent` | `aaxis_ontology_data_events` | one row per flow execution (seen vs changed ids) |
@@ -262,8 +262,25 @@ enforced again by the editor page + update endpoint). It shows the flow name (ne
 `new_flow_<6 random alphanumerics>`), an enabled switch and cancel/save, over a dot-matrix canvas
 whose spacing comes from `aaxis_ontology.flow_editor_grid_spacing` (System Configuration →
 Aaxis Ontology → Flows, default 10px, exposed to CSS as the `--aaxis-flow-grid` custom property).
-Topbar: flow name + enabled switch on the left (children forced onto the vertical middle);
-Toolbox show/hide toggle + cancel/save on the right (the toolbox title bar also carries a × that
+CANVAS ARCHITECTURE: `__canvas-wrap` (non-scrolling anchor) > `__canvas` = the SCROLL VIEWPORT
+(`data-role="canvas-viewport"`) > `__canvas-inner` = the content plane carrying the dots, steps
+and wires — and, crucially, **`data-role="canvas"`**, so `canvas()` (all coordinate math measures
+against ITS rect) stays scroll-correct without per-site fixes; `canvasViewport()` returns the
+scroller. `syncCanvasExtent()` (called from every `redrawLinks`) sizes the plane to the step
+extent + one tile, so content beyond the visible area produces SCROLLBARS (place() clamps only
+top-left now — tiles may grow the plane). The toolbox lives in `__canvas-wrap`, OUTSIDE the
+scroller, so it stays viewport-pinned; its drag/clamp math uses the viewport. The editor fills
+the page via `fitEditorHeight()` (measured top → viewport bottom, refreshed on window resize —
+the CSS `min-height` calc is only a fallback; the resize handler also re-clamps the toolbox).
+Topbar: flow name + enabled switch on the left as STACKED label-above-control fields (`__field` /
+`__field-label`, controls bottom-aligned — keeps the left side narrow); every right-side button is
+icon + a `__btn-text` span that a `max-width: 1199px` viewport hides (icon-only mode, the `title`
+tooltips carry the labels — which is why syncDirty updates the cancel button's LABEL SPAN
+(`data-role="cancel-label"`) + title, never `.text()` on the button, which would wipe the icon).
+Toolbox show/hide toggle + **Organize** (hidden without steps:
+lays every step out in execution order — BFS from the trigger/"Start here", unreachable steps
+appended in reading order — with one-tile gaps, wrapping rows before the viewport width, then
+scrolls to top-left) + cancel/save on the right (the toolbox title bar also carries a × that
 hides it). The draggable toolbox
 (Triggers: cron/queue/entity change · Actions: DWL transform/Choice (an "if")/sub-flow ·
 Operations: reader/writer/invoke) is the step palette: items are dragged onto the canvas as
@@ -319,8 +336,11 @@ rubber-bands a multi-selection (macOS style, blue ring = selected), any outside 
 dragging a tile that belongs to a multi-selection moves the WHOLE selection (relative offsets
 preserved — the leader is clamped so the entire group stays on the canvas).
 **Right-click** on a tile opens a context menu: Remove (deletes the selection + its links); with a
-multi-selection also Align (puts everything on the first-by-X element's Y with exactly one tile
-width of gap, keeping the X-then-Y order) and — only when every element after the first receives
+multi-selection also Align (one row anchored at the leftmost tile's x/y with exactly one tile
+width of gap; ORDER per `alignOrderedSelection()` — steps chained by flow lines WITHIN the
+selection keep their flow sequence, chains first walked BFS from their heads (heads by X, cycle
+fallback enters at the leftmost), then every unconnected step by X-then-Y — so a link-free
+selection degrades to the old X ordering) and — only when every element after the first receives
 no line, none after the first is a trigger and none except the last is a Choice — Connect (chains
 the selection in sequence, port 0 re-wired if used). Right-clicking a flow LINE offers Remove for
 that single connection (each wire ships an invisible 12px-wide hit twin — the only pointer-enabled
@@ -409,14 +429,19 @@ is an `app.ERROR` log line and an event with `finished_at` set but empty `change
 success path leaves events open for the next pipeline stage (still a TODO). The writer's properties dialog reuses the
 reader's (`ioSection(kind)`) with the entity variant showing a Content textarea instead of
 Load/Id; config discriminator is `writer: entity|connector`.
-**DWL-toggled fields** render through ONE reusable component — `dwlTextField(labelKey, {value,
-dwl}, {compact?, fixed?})` — which owns the title row (label + the pure-text/DWL `dwlToggle()`),
-the textarea, and the behavior: turning DWL on (or opening with it on) pretty-prints the code via
+**DWL-toggled fields** render through ONE shared widget — `widgets/dwl-field.ts`,
+`createDwlField({label, value, dwl, fixed?, editorClass?, labelClass?, rowClass?, $tools?})`
+(local relative import; also exports `prettyPrintDwl`). The widget owns the title row — label
+left; optional host `$tools` + the pure-text/DWL switch ALWAYS right-aligned over the textarea
+(`.aaxis-dwl-field__*` block; switch visuals reused from the flow editor's small switch) — the
+textarea (each host brings its sizing via `editorClass`) and the behavior: whenever DWL mode is
+active (toggle turned on, opening with it on, or `fixed`) the content is pretty-printed via
 `prettyPrintDwl()` (re-indents each line to its brace/bracket/paren depth, 2 spaces per level;
-string/comment contents never count) and applies code styling (`__settings-textarea--code`,
-spellcheck off). Users: the connector Body content, the writer's Content (`compact` variant —
-ALWAYS a textarea so toggling changes no visuals), and the transform's code (`fixed`: always-DWL,
-no switch shown). Config flags `body_dwl` / `content_dwl` (lenient-absent bools in
+string/comment contents never count) and shown with code styling (`__textarea--code`, spellcheck
+off). Users: the connector Body content, the writer's Content (compact settings textarea — ALWAYS
+a textarea so toggling changes no visuals), the transform's code (`fixed`: always-DWL, switch
+HIDDEN) and the Entities DWL playground's script pane (`fixed`, with the limit/Run tools passed
+as `$tools`, so the script pretty-prints on open too). Config flags `body_dwl` / `content_dwl` (lenient-absent bools in
 `isStepConfigValid`). ON = the field is evaluated as a DWL expression against the execution
 context at run time: the body result is sent as-is when a string and JSON-encoded otherwise
 (`renderDwl()`); the writer content result IS the record(s) to write (`content_dwl` off keeps the
@@ -425,6 +450,19 @@ literal context-key lookup). Both parse-validate on save via `stepDwlSnippets()`
 **Settings loading**: sections doing catalog fetches (`systemEntitySection`, `ioSection`) return a
 `ready` promise; `openStepSettings` overlays a spinner (`__settings-loading`) that blocks the whole
 panel (buttons included, submit guarded) until every `ready` settles, then focuses the name input.
+**Scheduled execution** (`Command/RunScheduledFlowsCommand` → `Manager/ScheduledFlowRunner`): the
+`aaxis:ontology:flows:run-due` command implements `CronCommandScheduleDefinitionInterface` with
+`* * * * *` (register via `oro:cron:definitions:load`; Oro's cron infra must be consuming — run it
+by hand for a one-off sweep). Every minute it selects candidates by PLAIN COLUMNS
+(`enabled + type=flow + trigger_type='cron'`), rebuilds each flow from its saved `design` (the only
+persisted shape with step ids + links) and runs the DUE ones through the same
+`FlowDebugExecutor::execute()` as Run Now — so flow-uuid, last_executed stamping, sync writes and
+event rows behave identically; one flow's failure logs and never blocks the rest. DUE rules:
+interval mode = `value unit` elapsed since `last_executed ?? last_modified` (the creation date
+until first edit; datetimes compared as UTC wall-clock regardless of PHP tz); cron mode (and the
+legacy `{expression}` config) = the CURRENT minute matches the expression, with a same-minute
+guard against double runs; broken/unconfigured schedules and unreadable designs report
+skipped/not-due, never crash the sweep.
 **DWL engine** (`Dwl/`): the Language+Runtime subset of the user's php-dw DataWeave port
 (BSD-3-Clause, license copy in `Dwl/LICENSE`; origin `~/Github/dw-cli/php-dw`), namespaced
 `Aaxis\Bundle\OntologyBundle\Dwl\`. Three import gotchas handled in `DwlTransformer`: the AST is
@@ -436,7 +474,13 @@ flattens its result to plain assoc arrays via `toPlainPhp()`, matching what read
 (`json_decode` assoc). SHAPE fixes belong at this facade; engine FEATURES are added to the engine
 files and always MIRRORED to the upstream repo (namespace swap only, `DataWeave\` ↔ this bundle;
 run upstream's phpunit after) so the copies never diverge — done so far for min/max-over-arrays,
-Value::compare and the DATE SUPPORT: `|…|` literals (ISO dates/times and `|PT1S|` periods — the
+Value::compare, the COMPLETE `dw::core::Arrays` module (`import * from dw::core::Arrays` →
+`getCoreArraysModule()`: slice (until-exclusive) · divideBy · take/drop · takeWhile/dropWhile ·
+firstWith · indexOf/lastIndexOf/indexWhere · partition {success, failure} · splitAt/splitWhere
+{l, r} · join/leftJoin/outerJoin ({l, r} rows, type-tagged match keys) · countBy/sumBy/every/some),
+the `mod` operator (global env function; NOTE the parser gates infix names by the
+`isInfixFunction()` WHITELIST — 2-arg functions must be listed there to be used infix, the
+evaluator then resolves non-builtins from the env) and the DATE SUPPORT: `|…|` literals (ISO dates/times and `|PT1S|` periods — the
 lexer falls back to the `|` operator when the pipes don't wrap something date-shaped), temporal
 Values (`Value::dateTime(dt, kind)` with kind date|time|localtime|local_datetime|datetime,
 `Value::period()` keeping the ISO text; both leave the engine as ISO strings via toPhp/toString),

@@ -4,6 +4,7 @@ import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
+import createDwlField from '../widgets/dwl-field';
 
 interface FlowStep {
     type: string;
@@ -71,42 +72,6 @@ function isValidCron(expression: string): boolean {
             return Number.isFinite(hiV) && hiV >= loV && hiV <= spec.max;
         });
     });
-}
-
-/**
- * Pretty-prints DWL code by re-indenting each line to its brace/bracket/paren depth (2 spaces per
- * level). Line structure is kept — only leading whitespace changes — and characters inside
- * strings or after a // comment never count as delimiters.
- */
-function prettyPrintDwl(code: string): string {
-    let depth = 0;
-    return code.split('\n').map(raw => {
-        const line = raw.trim();
-        const leadingClosers = (/^[)\]}]+/.exec(line) || [''])[0].length;
-        const indented = line === '' ? '' : '  '.repeat(Math.max(0, depth - leadingClosers)) + line;
-        let str: string | null = null;
-        for (let i = 0; i < line.length; i++) {
-            const ch = line[i];
-            if (str !== null) {
-                if (ch === '\\') {
-                    i++;
-                } else if (ch === str) {
-                    str = null;
-                }
-                continue;
-            }
-            if (ch === '"' || ch === "'") {
-                str = ch;
-            } else if (ch === '/' && line[i + 1] === '/') {
-                break;
-            } else if (ch === '{' || ch === '[' || ch === '(') {
-                depth++;
-            } else if (ch === '}' || ch === ']' || ch === ')') {
-                depth = Math.max(0, depth - 1);
-            }
-        }
-        return indented;
-    }).join('\n');
 }
 
 /**
@@ -345,6 +310,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
             };
         });
 
+        // Fill the viewport below Oro's page chrome exactly (the CSS calc is only a fallback) and
+        // keep it fitted — and the toolbox reachable — across window resizes.
+        this.fitEditorHeight();
+        $(window).on('resize.aaxisFlowEditor', () => {
+            this.fitEditorHeight();
+            this.clampToolboxIntoView();
+        });
+
         this.buildWires();
         this.restore();
         // Sync the toggle's active state with however the restore left the toolbox.
@@ -379,6 +352,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.$el.on('click.aaxisFlowEditor', '[data-role="toolbox-hide"]', (e: any) => {
             e.preventDefault();
             this.setToolboxVisible(false);
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="organize"]', (e: any) => {
+            e.preventDefault();
+            this.closeContextMenu();
+            this.clearSelection();
+            this.organizeSteps();
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug"]', (e: any) => {
             e.preventDefault();
@@ -474,8 +453,47 @@ class OntologyFlowEditorComponent extends BaseComponent {
         return `new_flow_${suffix}`;
     }
 
+    /**
+     * Sizes the editor to end at the viewport bottom (minus a small page margin): the measured
+     * top position adapts to whatever chrome Oro renders above it, where the CSS calc fallback
+     * can only guess — the difference is the "dead" stripe of unused page below the canvas.
+     */
+    private fitEditorHeight(): void {
+        const root: HTMLElement = this.$el.hasClass('aaxis-flow-editor')
+            ? this.$el[0]
+            : this.$el.find('.aaxis-flow-editor')[0];
+        if (!root) {
+            return;
+        }
+        const top = root.getBoundingClientRect().top;
+        root.style.minHeight = `${Math.max(320, window.innerHeight - top - 16)}px`;
+    }
+
+    /** The content plane where steps/wires live — every canvas coordinate is measured on it. */
     private canvas(): HTMLElement {
         return this.$el.find('[data-role="canvas"]')[0];
+    }
+
+    /** The scroll viewport around the content plane (also the toolbox's pinning area). */
+    private canvasViewport(): HTMLElement {
+        return this.$el.find('[data-role="canvas-viewport"]')[0];
+    }
+
+    /**
+     * Sizes the content plane to the step extent (plus one tile of margin), so anything placed
+     * beyond the visible area shows up as scrollbars on the viewport instead of being clipped.
+     * The plane's CSS min 100% keeps it at least viewport-sized.
+     */
+    private syncCanvasExtent(): void {
+        const inner = this.canvas();
+        let maxX = 0;
+        let maxY = 0;
+        for (const step of this.steps) {
+            maxX = Math.max(maxX, step.x + this.tileSize);
+            maxY = Math.max(maxY, step.y + this.tileSize);
+        }
+        inner.style.width = maxX > 0 ? `${maxX + this.tileSize}px` : '';
+        inner.style.height = maxY > 0 ? `${maxY + this.tileSize}px` : '';
     }
 
     private toolbox(): HTMLElement {
@@ -542,6 +560,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Links define what executes — refresh the gray "won't run" marking with every redraw
         // (link add/remove, step removal, restore; step additions hook it in addStep).
         this.updateReachability();
+        this.syncCanvasExtent();
         this.wires.querySelectorAll('[data-role="wire-group"], [data-role="start-group"]').forEach(el => el.remove());
         this.drawStartArrow();
         if (!this.links.length) {
@@ -833,15 +852,76 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.syncDirty();
     }
 
+    /**
+     * "Organize": lays every step out in EXECUTION order (BFS from the trigger — or the
+     * "Start here" step in sub-flows; unreachable steps follow in reading order), left to right
+     * with one-tile gaps like Align, wrapping to a new row before passing the viewport width.
+     */
+    private organizeSteps(): void {
+        if (this.steps.length === 0) {
+            return;
+        }
+        const byId = new Map(this.steps.map(s => [s.id, s]));
+        const outgoing = new Map<string, FlowLink[]>();
+        [...this.links].sort((a, b) => a.fromPort - b.fromPort).forEach(link => {
+            const list = outgoing.get(link.from) || [];
+            list.push(link);
+            outgoing.set(link.from, list);
+        });
+
+        const ordered: PlacedStep[] = [];
+        const visited = new Set<string>();
+        const trigger = this.findTrigger();
+        const rootId = trigger ? trigger.id : this.startId;
+        if (rootId && byId.has(rootId)) {
+            visited.add(rootId);
+            const queue = [rootId];
+            while (queue.length > 0) {
+                const id = queue.shift() as string;
+                ordered.push(byId.get(id) as PlacedStep);
+                (outgoing.get(id) || []).forEach(link => {
+                    if (byId.has(link.to) && !visited.has(link.to)) {
+                        visited.add(link.to);
+                        queue.push(link.to);
+                    }
+                });
+            }
+        }
+        this.steps.filter(s => !visited.has(s.id))
+            .sort((a, b) => (a.x - b.x) || (a.y - b.y))
+            .forEach(s => ordered.push(s));
+
+        const size = this.tileSize;
+        const gap = size; // one-tile gaps, like Align
+        const margin = Math.max(this.spacing, this.snap(size / 2));
+        const usable = Math.max(this.canvasViewport().clientWidth, margin + 2 * size);
+        let x = margin;
+        let y = margin;
+        for (const step of ordered) {
+            if (x > margin && x + size + margin > usable) { // row break before passing the width
+                x = margin;
+                y += size + gap;
+            }
+            step.x = this.snap(x);
+            step.y = this.snap(y);
+            step.el.style.left = `${step.x}px`;
+            step.el.style.top = `${step.y}px`;
+            x += size + gap;
+        }
+        this.canvasViewport().scrollTo({left: 0, top: 0});
+        this.redrawLinks();
+        this.syncDirty();
+    }
+
     /** Clamps the toolbox's explicit position into the current canvas (no-op at the CSS default spot). */
     private clampToolboxIntoView(): void {
         const el = this.toolbox();
         if (el.hidden || el.style.left === '') {
             return; // hidden (not measurable) or never moved — the default top-right spot is visible
         }
-        const canvas = this.canvas();
-        const maxLeft = Math.max(0, canvas.clientWidth - el.offsetWidth);
-        const maxTop = Math.max(0, canvas.clientHeight - el.offsetHeight);
+        const viewport = this.canvasViewport();
+        const maxLeft = Math.max(0, viewport.clientWidth - el.offsetWidth);
+        const maxTop = Math.max(0, viewport.clientHeight - el.offsetHeight);
         el.style.left = `${Math.min(Math.max(0, parseInt(el.style.left, 10) || 0), maxLeft)}px`;
         el.style.top = `${Math.min(Math.max(0, parseInt(el.style.top, 10) || 0), maxTop)}px`;
     }
@@ -869,9 +949,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private syncDirty(): void {
         const dirty = this.snapshot() !== this.savedState;
         this.$el.find('[data-role="save"]').prop('disabled', !dirty);
-        this.$el.find('[data-role="cancel"]').text(
-            dirty ? __('aaxis.ontology.flow_editor.cancel') : __('aaxis.ontology.flow_editor.close')
-        );
+        const label = dirty ? __('aaxis.ontology.flow_editor.cancel') : __('aaxis.ontology.flow_editor.close');
+        // Only the label SPAN changes (the button also holds the icon); the title follows for
+        // the icon-only narrow-viewport mode.
+        this.$el.find('[data-role="cancel-label"]').text(label);
+        this.$el.find('[data-role="cancel"]').attr('title', label);
     }
 
     /** The full canvas state persisted alongside the logical steps. */
@@ -999,14 +1081,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
         return Math.round(value / this.spacing) * this.spacing;
     }
 
-    /** Snaps and clamps a canvas-relative tile position so the whole tile stays on the canvas. */
+    /**
+     * Snaps a canvas-relative tile position; only the top-left is clamped — the canvas scrolls,
+     * so placing a tile beyond the visible area just grows the scrollable plane.
+     */
     private place(x: number, y: number): {x: number; y: number} {
-        const bounds = this.canvas().getBoundingClientRect();
-        const maxX = Math.max(0, bounds.width - this.tileSize);
-        const maxY = Math.max(0, bounds.height - this.tileSize);
         return {
-            x: Math.min(Math.max(0, this.snap(x)), this.snap(maxX)),
-            y: Math.min(Math.max(0, this.snap(y)), this.snap(maxY))
+            x: Math.max(0, this.snap(x)),
+            y: Math.max(0, this.snap(y))
         };
     }
 
@@ -1333,69 +1415,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
             .append(this.settingsLabel(labelKey), $control);
     }
 
-    /** A field label with an extra control (e.g. the DWL switch) right-aligned on the same line. */
-    private settingsLabelRow(labelKey: string, $extra: any): any {
-        return $('<div/>', {'class': 'aaxis-flow-editor__settings-labelrow'})
-            .append(this.settingsLabel(labelKey), $extra);
-    }
-
-    /**
-     * Compact "DWL" on/off switch shown next to a field label: ON means the field's text is
-     * evaluated as a DWL expression against the execution context, OFF keeps it literal.
-     */
-    private dwlToggle(initialOn: boolean): {$el: any; isOn: () => boolean} {
-        const $input = $('<input/>', {type: 'checkbox'});
-        $input.prop('checked', initialOn);
-        const $el = $('<label/>', {
-            'class': 'aaxis-flow-editor__switch aaxis-flow-editor__switch--small',
-            title: __('aaxis.ontology.flow_editor.dwl_toggle_title')
-        }).append(
-            $input,
-            $('<span/>', {'class': 'aaxis-flow-editor__switch-track'})
-                .append($('<span/>', {'class': 'aaxis-flow-editor__switch-thumb'})),
-            $('<span/>', {'class': 'aaxis-flow-editor__switch-text', text: __('aaxis.ontology.flow_editor.dwl_toggle_label')})
-        );
-        return {$el, isOn: () => Boolean($input.prop('checked'))};
-    }
-
-    /**
-     * Reusable "text or DWL" field: the title row (label + the pure-text/DWL switch) and a
-     * textarea, as one component. Turning DWL on pretty-prints the code (re-indented to its
-     * nesting) and switches the textarea to code styling — same when a field opens with DWL
-     * already on. `fixed` renders an always-DWL variant with no switch (e.g. the transform's
-     * code), `compact` the lower in-column textarea.
-     */
-    private dwlTextField(labelKey: string, initial: {value: string; dwl: boolean}, opts: {compact?: boolean; fixed?: boolean} = {}): {$el: any; value: () => string; isDwl: () => boolean} {
-        const toggle = this.dwlToggle(Boolean(opts.fixed) || initial.dwl);
-        const isDwl = (): boolean => Boolean(opts.fixed) || toggle.isOn();
-        const $textarea = $('<textarea/>', {
-            'class': 'form-control aaxis-flow-editor__settings-textarea'
-                + (opts.compact ? ' aaxis-flow-editor__settings-textarea--compact' : '')
-        });
-        $textarea.val(initial.value); // textarea value must be set via .val()
-
-        const syncStyle = (): void => {
-            $textarea.attr('spellcheck', isDwl() ? 'false' : 'true');
-            $textarea.toggleClass('aaxis-flow-editor__settings-textarea--code', isDwl());
-        };
-        toggle.$el.find('input').on('change', () => {
-            syncStyle();
-            if (isDwl()) {
-                $textarea.val(prettyPrintDwl(String($textarea.val() || '')));
-            }
-        });
-        if (isDwl()) {
-            $textarea.val(prettyPrintDwl(String($textarea.val() || '')));
-        }
-        syncStyle();
-
-        const $el = $('<div/>', {'class': 'aaxis-flow-editor__dwl-field'}).append(
-            opts.fixed ? this.settingsLabel(labelKey) : this.settingsLabelRow(labelKey, toggle.$el),
-            $textarea
-        );
-        return {$el, value: () => String($textarea.val() || ''), isDwl};
-    }
-
     /**
      * System + Entity pair (entity options follow the chosen system), fed by ONE
      * aaxis_ontology_entity_list fetch. Both values are required. `inline` renders the two
@@ -1503,10 +1522,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const $mode = $('<select/>', {'class': 'form-control'});
         const $recordId = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255});
         let $recordIdCol: any = null;
-        const content = this.dwlTextField('writer_content_label', {
+        const content = createDwlField({
+            label: __('aaxis.ontology.flow_editor.writer_content_label'),
             value: variant === 'entity' ? String(initial.content || 'payload') : 'payload',
-            dwl: variant === 'entity' && initial.content_dwl === true
-        }, {compact: true});
+            dwl: variant === 'entity' && initial.content_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
         // "All" extras: Order By (the selected entity's attributes) + direction + limit.
         const $orderBy = $('<select/>', {'class': 'form-control'});
         const $orderDir = $('<select/>', {'class': 'form-control'});
@@ -1604,9 +1625,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
 
         // Body content lives in the right column, below the fixed first row.
-        const bodyContent = this.dwlTextField('body_content_label', {
+        const bodyContent = createDwlField({
+            label: __('aaxis.ontology.flow_editor.body_content_label'),
             value: variant === 'connector' ? String(initial.body_content || '') : '',
-            dwl: variant === 'connector' && initial.body_dwl === true
+            dwl: variant === 'connector' && initial.body_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea'
         });
         $side.append(bodyContent.$el);
 
@@ -1730,7 +1753,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.settingsCol('destination_label', $destination)
         ));
 
-        const code = this.dwlTextField('dwl_code_label', {value: String(initial.code || ''), dwl: true}, {fixed: true});
+        const code = createDwlField({
+            label: __('aaxis.ontology.flow_editor.dwl_code_label'),
+            value: String(initial.code || ''),
+            dwl: true,
+            fixed: true, // the transform's code IS DWL — no pure-text mode, switch hidden
+            editorClass: 'aaxis-flow-editor__settings-textarea'
+        });
         $body.append(code.$el);
         // A code editor deserves the wide panel from the start.
         panel.classList.add('is-wide');
@@ -1821,6 +1850,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.steps.forEach(s => s.el.classList.toggle('is-unreachable', !reachable.has(s.id)));
         // Debug is only offered for flows that contain a REAL trigger (not a sub-flow start).
         this.$el.find('[data-role="debug"], [data-role="debug-step"]').prop('hidden', !this.findTrigger());
+        this.$el.find('[data-role="organize"]').prop('hidden', this.steps.length === 0);
     }
 
     /** Small confirm dialog (Cancel / <confirmLabel>) used by the trigger/start interplays. */
@@ -1905,9 +1935,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (!this.panelDrag) {
             return;
         }
-        const canvas = this.canvas();
+        // The toolbox is pinned to the VIEWPORT (it floats over the scrolling canvas).
         const toolbox = this.$el.find('[data-role="toolbox"]')[0];
-        const bounds = canvas.getBoundingClientRect();
+        const bounds = this.canvasViewport().getBoundingClientRect();
 
         let left = e.clientX - bounds.left - this.panelDrag.dx;
         let top = e.clientY - bounds.top - this.panelDrag.dy;
@@ -2271,13 +2301,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * with a constant ONE-tile gap between them, keeping the horizontal sequence.
      */
     private alignSelection(): void {
-        const ordered = this.orderedSelection();
+        const ordered = this.alignOrderedSelection();
         if (ordered.length < 2) {
             return;
         }
-        const first = ordered[0];
+        // The row still starts where the leftmost selected tile sits (its x AND y), whatever
+        // position the ordering gave that tile in the sequence.
+        const anchor = [...ordered].sort((a, b) => a.x - b.x || a.y - b.y)[0];
         ordered.forEach((step, i) => {
-            const pos = this.place(first.x + i * 2 * this.tileSize, first.y);
+            const pos = this.place(anchor.x + i * 2 * this.tileSize, anchor.y);
             step.x = pos.x;
             step.y = pos.y;
             step.el.style.left = `${pos.x}px`;
@@ -2285,6 +2317,62 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         this.redrawLinks();
         this.syncDirty();
+    }
+
+    /**
+     * Align's ordering: steps already CHAINED by flow lines (links between selected pairs) keep
+     * their flow sequence — chains first, each walked breadth-first from its head (heads by X
+     * position, choice branches by port order) — then every unconnected step follows, by X.
+     * With no links inside the selection this degrades to the plain X ordering.
+     */
+    private alignOrderedSelection(): PlacedStep[] {
+        const byId = new Map(Array.from(this.selection).map(s => [s.id, s]));
+        const inner = this.links.filter(l => byId.has(l.from) && byId.has(l.to));
+        const linked = new Set<string>();
+        inner.forEach(l => {
+            linked.add(l.from);
+            linked.add(l.to);
+        });
+        const outgoing = new Map<string, FlowLink[]>();
+        [...inner].sort((a, b) => a.fromPort - b.fromPort).forEach(l => {
+            const list = outgoing.get(l.from) || [];
+            list.push(l);
+            outgoing.set(l.from, list);
+        });
+        const hasIncoming = new Set(inner.map(l => l.to));
+        const byPosition = (a: PlacedStep, b: PlacedStep): number => a.x - b.x || a.y - b.y;
+
+        const ordered: PlacedStep[] = [];
+        const visited = new Set<string>();
+        const walk = (id: string): void => {
+            visited.add(id);
+            const queue = [id];
+            while (queue.length > 0) {
+                const current = queue.shift() as string;
+                ordered.push(byId.get(current) as PlacedStep);
+                (outgoing.get(current) || []).forEach(l => {
+                    if (!visited.has(l.to)) {
+                        visited.add(l.to);
+                        queue.push(l.to);
+                    }
+                });
+            }
+        };
+        // Chain heads: linked steps with no incoming selected link, leftmost chain first.
+        Array.from(this.selection).filter(s => linked.has(s.id) && !hasIncoming.has(s.id))
+            .sort(byPosition).forEach(s => walk(s.id));
+        // A pure cycle has no head — enter it at its leftmost tile so nothing is dropped.
+        Array.from(this.selection).filter(s => linked.has(s.id) && !visited.has(s.id))
+            .sort(byPosition).forEach(s => {
+                if (!visited.has(s.id)) {
+                    walk(s.id);
+                }
+            });
+        // Then everything without a selected connection, by X position.
+        Array.from(this.selection).filter(s => !linked.has(s.id)).sort(byPosition)
+            .forEach(s => ordered.push(s));
+
+        return ordered;
     }
 
     /** Chains the selection in its horizontal sequence: first → second → … → last. */
@@ -2614,6 +2702,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.closeContextMenu();
         this.panelDrag = null;
         this.stepDrag = null;
+        $(window).off('resize.aaxisFlowEditor');
         window.removeEventListener('pointermove', this.onPointerMove);
         window.removeEventListener('pointerup', this.onPointerUp);
         super.dispose();

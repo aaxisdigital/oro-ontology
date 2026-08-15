@@ -908,6 +908,11 @@ final class Parser
             'update', 'to', 'until', 'unless', 'default', 'match',
             'matches', 'scan', 'zip', 'unzip', 'sizeOf', 'sizeof',
             'typeOf', 'typeof', 'maxBy', 'minBy', 'every', 'some',
+            // Arithmetic + the two-argument dw::core::Arrays functions (any 2-arg function is
+            // infix-callable in DataWeave; the evaluator resolves non-builtins from the env).
+            'mod', 'take', 'drop', 'takeWhile', 'dropWhile', 'divideBy',
+            'countBy', 'sumBy', 'partition', 'splitAt', 'splitWhere',
+            'firstWith', 'indexOf', 'lastIndexOf', 'indexWhere',
         ], true);
     }
 

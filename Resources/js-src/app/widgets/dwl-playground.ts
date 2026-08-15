@@ -2,6 +2,7 @@ import $ from 'jquery';
 import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
+import createDwlField from './dwl-field';
 
 export interface DwlPlaygroundOptions {
     /** Entity whose stored records become the script's `payload` binding. */
@@ -127,9 +128,6 @@ export default class DwlPlayground {
     private buildScriptPane(): any {
         const $pane = $('<div/>', {'class': 'aaxis-dwl__pane'});
 
-        const $head = $('<div/>', {'class': 'aaxis-dwl__pane-head'});
-        $head.append($('<h3/>', {'class': 'aaxis-dwl__pane-title', text: __('aaxis.ontology.dwl.script_label')}));
-
         // Limit controls: the switch owns whether a cap applies at all, the number the cap itself.
         this.$limitToggle = $('<input/>', {type: 'checkbox', 'class': 'aaxis-dwl__limit-check'}).prop('checked', true);
         this.$limitValue = $('<input/>', {
@@ -160,14 +158,21 @@ export default class DwlPlayground {
             $('<span/>', {text: ' ' + __('aaxis.ontology.dwl.run')})
         );
 
-        $head.append($('<div/>', {'class': 'aaxis-dwl__pane-tools'}).append($limit, this.$run));
-        $pane.append($head);
-
-        this.$script = $('<textarea/>', {
-            'class': 'aaxis-dwl__editor', spellcheck: false, autocomplete: 'off',
-            'aria-label': __('aaxis.ontology.dwl.script_label')
-        }).val(DEFAULT_SCRIPT);
-        $pane.append(this.$script);
+        // The shared "DWL field" component renders the title row (title left, the tools where the
+        // pure-text/DWL switch would sit — hidden here: a playground script IS DWL) + the editor,
+        // pretty-printing the script on open like the flow editor's DWL fields.
+        const field = createDwlField({
+            label: __('aaxis.ontology.dwl.script_label'),
+            labelClass: 'aaxis-dwl__pane-title',
+            rowClass: 'aaxis-dwl__pane-head',
+            value: DEFAULT_SCRIPT,
+            dwl: true,
+            fixed: true,
+            editorClass: 'aaxis-dwl__editor',
+            $tools: $('<div/>', {'class': 'aaxis-dwl__pane-tools'}).append($limit, this.$run)
+        });
+        this.$script = field.$textarea;
+        $pane.append(field.$el);
 
         this.$script.on('input', () => this.refreshStale());
         this.$limitToggle.on('change', () => {

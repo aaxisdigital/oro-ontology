@@ -79,7 +79,15 @@ class OntologyFlow
     #[ORM\Column(name: 'design', type: Types::JSON, nullable: true, options: ['jsonb' => true])]
     private ?array $design = null;
 
-    /** When the flow last RAN (debug / Run Now — later the real triggers too); null = never. */
+    /**
+     * The flow's trigger step type (`cron` | `queue` | `entity_change`), or null when it has none
+     * (subflows, the native flows). Denormalized from the steps on every save so the scheduler
+     * can select candidate flows with a plain indexed-column WHERE instead of scanning the JSON.
+     */
+    #[ORM\Column(name: 'trigger_type', type: Types::STRING, length: 16, nullable: true)]
+    private ?string $triggerType = null;
+
+    /** When the flow last RAN (debug / Run Now / the scheduler); null = never. */
     #[ORM\Column(name: 'last_executed', type: Types::DATETIME_MUTABLE, nullable: true)]
     private ?\DateTimeInterface $lastExecuted = null;
 
@@ -147,13 +155,35 @@ class OntologyFlow
      */
     public static function computeType(?array $steps): string
     {
+        return self::computeTriggerType($steps) === null ? self::TYPE_SUBFLOW : self::TYPE_FLOW;
+    }
+
+    /**
+     * The flow's trigger step type (first trigger found in the steps), or null when it has none.
+     *
+     * @param array<int, array<string, mixed>>|null $steps
+     */
+    public static function computeTriggerType(?array $steps): ?string
+    {
         foreach ($steps ?? [] as $step) {
             if (\is_array($step) && \in_array($step['type'] ?? null, self::TRIGGER_STEP_TYPES, true)) {
-                return self::TYPE_FLOW;
+                return (string) $step['type'];
             }
         }
 
-        return self::TYPE_SUBFLOW;
+        return null;
+    }
+
+    public function getTriggerType(): ?string
+    {
+        return $this->triggerType;
+    }
+
+    public function setTriggerType(?string $triggerType): self
+    {
+        $this->triggerType = $triggerType;
+
+        return $this;
     }
 
     /**

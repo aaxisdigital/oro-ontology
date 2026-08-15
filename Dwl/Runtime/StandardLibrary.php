@@ -82,6 +82,11 @@ final class StandardLibrary
 
         // Date/time
         $env->define('now', Value::func(fn(array $args) => Value::dateTime(new \DateTimeImmutable('now'), 'datetime')));
+        // DataWeave's modulo operator (`a mod b`) — float-aware, integer results stay integers.
+        $env->define('mod', Value::func(function (array $args) {
+            $result = fmod((float) $args[0]->data, (float) $args[1]->data);
+            return Value::number($result === floor($result) ? (int) $result : $result);
+        }));
 
         // Utility
         $env->define('log', Value::func(function (array $args) {
@@ -148,6 +153,105 @@ final class StandardLibrary
                 }
                 return Value::boolean(false);
             }),
+            // slice(array, from, until) — from inclusive, until EXCLUSIVE (Mule semantics).
+            'slice' => Value::func(function (array $args) {
+                $items = $args[0]->data;
+                $from = max(0, (int) $args[1]->data);
+                $until = min(\count($items), (int) $args[2]->data);
+                return Value::array($from < $until ? \array_slice($items, $from, $until - $from) : []);
+            }),
+            // divideBy(array, size) — consecutive chunks of at most `size` items.
+            'divideBy' => Value::func(function (array $args) {
+                $size = max(1, (int) $args[1]->data);
+                return Value::array(array_map(
+                    static fn(array $chunk) => Value::array($chunk),
+                    array_chunk($args[0]->data, $size)
+                ));
+            }),
+            'takeWhile' => Value::func(function (array $args) {
+                $out = [];
+                foreach ($args[0]->data as $item) {
+                    if (!($args[1]->data)([$item])->isTruthy()) {
+                        break;
+                    }
+                    $out[] = $item;
+                }
+                return Value::array($out);
+            }),
+            'dropWhile' => Value::func(function (array $args) {
+                $items = $args[0]->data;
+                $i = 0;
+                while ($i < \count($items) && ($args[1]->data)([$items[$i]])->isTruthy()) {
+                    $i++;
+                }
+                return Value::array(\array_slice($items, $i));
+            }),
+            // firstWith(array, (item, index) -> Boolean) — the first match, or null.
+            'firstWith' => Value::func(function (array $args) {
+                foreach ($args[0]->data as $i => $item) {
+                    if (($args[1]->data)([$item, Value::number($i)])->isTruthy()) {
+                        return $item;
+                    }
+                }
+                return Value::null();
+            }),
+            'indexOf' => Value::func(fn(array $args) => self::indexOf($args[0], $args[1])),
+            'lastIndexOf' => Value::func(function (array $args) {
+                $found = -1;
+                foreach ($args[0]->data as $i => $item) {
+                    if ($item->type === $args[1]->type && $item->data === $args[1]->data) {
+                        $found = $i;
+                    }
+                }
+                return Value::number($found);
+            }),
+            'indexWhere' => Value::func(function (array $args) {
+                foreach ($args[0]->data as $i => $item) {
+                    if (($args[1]->data)([$item, Value::number($i)])->isTruthy()) {
+                        return Value::number($i);
+                    }
+                }
+                return Value::number(-1);
+            }),
+            // partition(array, fn) — {success: [matches], failure: [the rest]}.
+            'partition' => Value::func(function (array $args) {
+                $success = [];
+                $failure = [];
+                foreach ($args[0]->data as $item) {
+                    if (($args[1]->data)([$item])->isTruthy()) {
+                        $success[] = $item;
+                    } else {
+                        $failure[] = $item;
+                    }
+                }
+                return Value::object([
+                    [Value::string('success'), Value::array($success)],
+                    [Value::string('failure'), Value::array($failure)],
+                ]);
+            }),
+            // splitAt(array, n) — {l: first n items, r: the rest}.
+            'splitAt' => Value::func(function (array $args) {
+                $n = max(0, (int) $args[1]->data);
+                return Value::object([
+                    [Value::string('l'), Value::array(\array_slice($args[0]->data, 0, $n))],
+                    [Value::string('r'), Value::array(\array_slice($args[0]->data, $n))],
+                ]);
+            }),
+            // splitWhere(array, fn) — splits at the FIRST item matching the condition.
+            'splitWhere' => Value::func(function (array $args) {
+                $items = $args[0]->data;
+                $i = 0;
+                while ($i < \count($items) && !($args[1]->data)([$items[$i]])->isTruthy()) {
+                    $i++;
+                }
+                return Value::object([
+                    [Value::string('l'), Value::array(\array_slice($items, 0, $i))],
+                    [Value::string('r'), Value::array(\array_slice($items, $i))],
+                ]);
+            }),
+            'join' => Value::func(fn(array $args) => self::joinArrays($args[0], $args[1], $args[2], $args[3], 'inner')),
+            'leftJoin' => Value::func(fn(array $args) => self::joinArrays($args[0], $args[1], $args[2], $args[3], 'left')),
+            'outerJoin' => Value::func(fn(array $args) => self::joinArrays($args[0], $args[1], $args[2], $args[3], 'outer')),
         ];
     }
 
@@ -328,6 +432,50 @@ final class StandardLibrary
             return end($val->data);
         }
         return Value::null();
+    }
+
+    /**
+     * dw::core::Arrays join/leftJoin/outerJoin: pairs items whose criteria values match, one
+     * {l: leftItem, r: rightItem} row per pairing. leftJoin also emits unmatched left items as
+     * {l: item}; outerJoin adds unmatched right items as {r: item}.
+     */
+    private static function joinArrays(Value $left, Value $right, Value $leftCriteria, Value $rightCriteria, string $mode): Value
+    {
+        $rightBuckets = [];
+        foreach ($right->data as $item) {
+            $rightBuckets[self::joinKey(($rightCriteria->data)([$item]))][] = $item;
+        }
+
+        $rows = [];
+        $matched = [];
+        foreach ($left->data as $item) {
+            $key = self::joinKey(($leftCriteria->data)([$item]));
+            if (isset($rightBuckets[$key])) {
+                $matched[$key] = true;
+                foreach ($rightBuckets[$key] as $rightItem) {
+                    $rows[] = Value::object([[Value::string('l'), $item], [Value::string('r'), $rightItem]]);
+                }
+            } elseif ($mode !== 'inner') {
+                $rows[] = Value::object([[Value::string('l'), $item]]);
+            }
+        }
+        if ($mode === 'outer') {
+            foreach ($rightBuckets as $key => $items) {
+                if (!isset($matched[$key])) {
+                    foreach ($items as $rightItem) {
+                        $rows[] = Value::object([[Value::string('r'), $rightItem]]);
+                    }
+                }
+            }
+        }
+
+        return Value::array($rows);
+    }
+
+    /** Matching key for joins: type-tagged so "1" (string) and 1 (number) stay distinct. */
+    private static function joinKey(Value $value): string
+    {
+        return $value->type->value . ':' . json_encode($value->toPhp());
     }
 
     private static function indexOf(Value $arr, Value $item): Value

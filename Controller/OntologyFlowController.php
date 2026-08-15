@@ -330,6 +330,7 @@ class OntologyFlowController extends AbstractController
         $entity->setName($name);
         $entity->setEnabled((bool) ($payload['enabled'] ?? true));
         $entity->setType(OntologyFlow::computeType($entity->getSteps()));
+        $entity->setTriggerType(OntologyFlow::computeTriggerType($entity->getSteps()));
         // Every save rewrites the flow definition — that IS a modification.
         $entity->setLastModified(new \DateTime('now', new \DateTimeZone('UTC')));
 

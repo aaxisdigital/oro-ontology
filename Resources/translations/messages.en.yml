@@ -252,6 +252,7 @@ aaxis:
             debug: 'Debug'
             run_now: 'Run Now'
             toolbox_toggle: 'Toolbox'
+            organize: 'Organize'
             toolbox:
                 title: 'Toolbox'
                 hide: 'Hide toolbox'
