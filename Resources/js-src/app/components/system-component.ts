@@ -38,7 +38,9 @@ class OntologySystemComponent extends BaseComponent {
         this.$el = options._sourceElement;
         this.opts = options;
 
-        const actions: GridAction[] = [];
+        const actions: GridAction[] = [
+            {key: 'entities', label: __('aaxis.ontology.system_manager.view_entities'), icon: 'fa-sitemap'}
+        ];
         if (options.canUpdate) {
             actions.push({key: 'edit', label: __('aaxis.common.grid.edit'), icon: 'fa-pencil'});
         }
@@ -95,7 +97,19 @@ class OntologySystemComponent extends BaseComponent {
             this.openForm(row);
         } else if (action === 'delete') {
             this.remove(row);
+        } else if (action === 'entities') {
+            this.openEntities(row);
         }
+    }
+
+    /**
+     * Opens the Entities page pre-filtered to this system. The name (not the id) is passed because
+     * that is what the Entities grid's `systemName` column holds.
+     */
+    private openEntities(row: SystemRecord): void {
+        const url = routing.generate('aaxis_ontology_entities')
+            + '?system=' + encodeURIComponent(String(row.name || ''));
+        window.location.assign(url);
     }
 
     private onAdd(): void {

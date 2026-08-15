@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Controller;
 
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyData;
+use Aaxis\Bundle\OntologyBundle\Entity\OntologyDataHistory;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntityAttribute;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
@@ -31,7 +32,8 @@ use Symfony\Contracts\Translation\TranslatorInterface;
  */
 class OntologyEntityController extends AbstractOntologyController
 {
-    #[Route(path: '/entities', name: 'aaxis_ontology_entities')]
+    // expose: the Systems grid links here (?system=…) via routing.generate() in TypeScript.
+    #[Route(path: '/entities', name: 'aaxis_ontology_entities', options: ['expose' => true])]
     #[Template('@AaxisOntology/Entity/index.html.twig')]
     #[Acl(id: 'aaxis_ontology_entity_view', type: 'entity', class: OntologyEntity::class, permission: 'VIEW')]
     public function indexAction(): array
@@ -205,6 +207,44 @@ class OntologyEntityController extends AbstractOntologyController
             'total' => $total,
             'truncated' => $limit !== null && $total > $limit,
         ]);
+    }
+
+    /**
+     * Deletes every stored record of the entity (the "erase records" action on the Entities grid)
+     * while keeping the entity and its attributes. Irreversible: there is no soft delete and the
+     * version history goes with it.
+     *
+     * Permissions: the entity itself survives, so this is NOT an entity-delete — it is a data
+     * delete, gated on `OntologyData` DELETE on top of the page's entity VIEW.
+     *
+     * Flow execution events (`aaxis_ontology_data_events`) are deliberately left alone: they are a
+     * log of what the flows DID, not records of the entity.
+     */
+    #[Route(
+        path: '/entities/api/{id}/records',
+        name: 'aaxis_ontology_entity_purge_records',
+        requirements: ['id' => '\d+'],
+        options: ['expose' => true],
+        methods: ['DELETE']
+    )]
+    #[AclAncestor('aaxis_ontology_entity_view')]
+    #[CsrfProtection]
+    public function purgeRecordsAction(OntologyEntity $entity): JsonResponse
+    {
+        if (!$this->isGranted('DELETE', 'entity:' . OntologyData::class)) {
+            return new JsonResponse(['success' => false, 'message' => 'Access denied.'], 403);
+        }
+
+        $em = $this->registry()->getManagerForClass(OntologyData::class);
+        // DQL deletes: no hydration, since an entity can hold a very large number of records.
+        $em->createQuery('DELETE FROM ' . OntologyDataHistory::class . ' h WHERE h.entity = :entity')
+            ->setParameter('entity', $entity)
+            ->execute();
+        $deleted = (int) $em->createQuery('DELETE FROM ' . OntologyData::class . ' d WHERE d.entity = :entity')
+            ->setParameter('entity', $entity)
+            ->execute();
+
+        return new JsonResponse(['success' => true, 'deleted' => $deleted]);
     }
 
     /**

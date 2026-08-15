@@ -39,11 +39,11 @@ class OntologyFlow
     public const string TYPE_SUBFLOW = 'subflow';
 
     /** Toolbox step types that count as triggers (drive {@see computeType}). */
-    public const array TRIGGER_STEP_TYPES = ['cron', 'queue', 'entity_change'];
+    public const array TRIGGER_STEP_TYPES = ['cron', 'endpoint', 'entity_change'];
 
     /** Every step type the editor toolbox offers (triggers + actions + operations). */
     public const array STEP_TYPES = [
-        'cron', 'queue', 'entity_change',              // triggers
+        'cron', 'endpoint', 'entity_change',           // triggers
         'dwl_transform', 'choice', 'sub_flow',         // actions ("choice" acts as an if)
         'reader', 'writer', 'invoke',                  // operations
     ];
@@ -90,6 +90,15 @@ class OntologyFlow
     /** When the flow last RAN (debug / Run Now / the scheduler); null = never. */
     #[ORM\Column(name: 'last_executed', type: Types::DATETIME_MUTABLE, nullable: true)]
     private ?\DateTimeInterface $lastExecuted = null;
+
+    /**
+     * When the last run ENDED — stamped on success AND on failure, so it always eventually catches
+     * up with {@see $lastExecuted}. Together the pair is the running-state signal used to keep a
+     * flow from being started while one of its instances is still in flight
+     * ({@see isRunning()}); null = never finished a run.
+     */
+    #[ORM\Column(name: 'last_finished', type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $lastFinished = null;
 
     /** Never null: the creation date at first, bumped by every save that rewrites the flow. */
     #[ORM\Column(name: 'last_modified', type: Types::DATETIME_MUTABLE)]
@@ -232,6 +241,35 @@ class OntologyFlow
         $this->lastExecuted = $lastExecuted;
 
         return $this;
+    }
+
+    public function getLastFinished(): ?\DateTimeInterface
+    {
+        return $this->lastFinished;
+    }
+
+    public function setLastFinished(?\DateTimeInterface $lastFinished): self
+    {
+        $this->lastFinished = $lastFinished;
+
+        return $this;
+    }
+
+    /**
+     * Whether a run is currently in flight: it started and has not reported finishing yet.
+     *
+     * Raw state only — a process killed mid-run (fatal, container restart) never stamps
+     * `last_finished` and would look "running" forever, so callers that BLOCK on this must also
+     * apply a staleness cut-off (see `ScheduledFlowRunner::RUN_STALE_AFTER_SECONDS`).
+     */
+    public function isRunning(): bool
+    {
+        if ($this->lastExecuted === null) {
+            return false;
+        }
+
+        return $this->lastFinished === null
+            || $this->lastFinished->getTimestamp() < $this->lastExecuted->getTimestamp();
     }
 
     public function getLastModified(): ?\DateTimeInterface

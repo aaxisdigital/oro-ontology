@@ -43,6 +43,11 @@ class ConnectorTester
             OntologyConnector::TYPE_FILE_SYSTEM => $this->testFileSystem($config),
             OntologyConnector::TYPE_SFTP => $this->testSftp($config),
             OntologyConnector::TYPE_REST_API => $this->testRestApi($config),
+            // database/bucket are valid types whose config shape (and therefore test) is not
+            // defined yet — say that, rather than calling a known type "unknown".
+            OntologyConnector::TYPE_DATABASE, OntologyConnector::TYPE_BUCKET => $this->result([
+                $this->step('Configuration', false, 'No test is defined for this connector type yet.'),
+            ]),
             default => $this->result([$this->step('Configuration', false, 'Unknown connector type.')]),
         };
     }

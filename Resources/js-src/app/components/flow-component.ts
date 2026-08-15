@@ -15,6 +15,10 @@ interface FlowRecord {
     enabled: boolean;
     type: string;
     lastExecuted: string | null;
+    /** When the last run ended; null while a run is still in flight (or if it never ran). */
+    lastFinished: string | null;
+    /** Derived server-side: a run started and has not reported finishing. */
+    running: boolean;
     lastModified: string | null;
 }
 
@@ -51,6 +55,15 @@ class OntologyFlowComponent extends BaseComponent {
                 {
                     key: 'lastExecuted', label: __('aaxis.ontology.flow_view.last_executed'), type: 'datetime',
                     width: '190px', render: (row: FlowRecord) => this.renderDate(row.lastExecuted)
+                },
+                {
+                    key: 'lastFinished', label: __('aaxis.ontology.flow_view.last_finished'), type: 'datetime',
+                    width: '190px',
+                    // While a run is in flight there is no finish time yet — say so rather than
+                    // showing an empty cell that reads like "never ran".
+                    render: (row: FlowRecord) => row.running
+                        ? __('aaxis.ontology.flow_view.running')
+                        : this.renderDate(row.lastFinished)
                 },
                 {
                     key: 'lastModified', label: __('aaxis.ontology.flow_view.last_modified'), type: 'datetime',

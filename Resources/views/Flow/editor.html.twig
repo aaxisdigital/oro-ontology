@@ -77,8 +77,11 @@
 
                 {# The canvas is a scroll viewport over an inner content plane (data-role="canvas",
                    where steps/wires live and every coordinate is measured — its rect follows the
-                   scroll). The toolbox floats OUTSIDE the scroller so it stays viewport-pinned. #}
+                   scroll). The toolbox floats OUTSIDE the scroller so it stays viewport-pinned.
+                   The debugger sidebar (left of the design area) is filled and shown by the
+                   component while a Debug / Run Now session is active. #}
                 <div class="aaxis-flow-editor__canvas-wrap">
+                    <aside class="aaxis-flow-editor__debugger" data-role="debugger" hidden></aside>
                     <div class="aaxis-flow-editor__canvas" data-role="canvas-viewport">
                         <div class="aaxis-flow-editor__canvas-inner" data-role="canvas"></div>
                     </div>
@@ -96,7 +99,7 @@
                         {% set sections = [
                             {key: 'triggers', category: 'trigger', items: [
                                 {key: 'cron', icon: 'fa-clock-o'},
-                                {key: 'queue', icon: 'fa-inbox'},
+                                {key: 'endpoint', icon: 'fa-plug'},
                                 {key: 'entity_change', icon: 'fa-database'}
                             ]},
                             {key: 'actions', category: 'action', items: [

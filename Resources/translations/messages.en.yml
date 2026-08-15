@@ -205,6 +205,8 @@ aaxis:
                 sftp: SFTP
                 rest_api: 'REST API'
                 file_system: 'File System'
+                database: 'Database'
+                bucket: 'Bucket'
             config:
                 label: 'Configuration (JSON)'
                 tooltip: 'Read-only summary of the per-type configuration. Use the "Configure…" button to change it. Secret values (passwords, keys, Authorization headers) are always shown masked as ********.'
@@ -262,7 +264,7 @@ aaxis:
                     operations: 'Operations'
                 item:
                     cron: 'Schedule'
-                    queue: 'Queue'
+                    endpoint: 'Endpoint'
                     entity_change: 'Entity change'
                     dwl_transform: 'DWL transform'
                     choice: 'Choice'

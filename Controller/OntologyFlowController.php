@@ -10,6 +10,7 @@ use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Cron\CronExpression;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
+use Psr\Cache\CacheItemPoolInterface;
 use Oro\Bundle\SecurityBundle\Attribute\Acl;
 use Oro\Bundle\SecurityBundle\Attribute\AclAncestor;
 use Oro\Bundle\SecurityBundle\Attribute\CsrfProtection;
@@ -149,14 +150,18 @@ class OntologyFlowController extends AbstractController
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }
 
-        return new JsonResponse(['success' => true, 'output' => $output]);
+        // The final context is stored too, so the debugger sidebar's evaluator works after a run.
+        return new JsonResponse(['success' => true, 'output' => $output, 'contextKey' => $this->storeDebugContext($output)]);
     }
 
     /**
      * Step-by-step debug ("Debug" button; the full run above is "Run Now"): executes ONE step of
      * the execution order — or the rest of it when runAll — against the context accumulated so
-     * far, which the CLIENT holds between calls. Returns the new context plus progress metadata
-     * ({step, index, total, done}) for the stepper modal.
+     * far. The context is held SERVER-SIDE between calls (cache, keyed by the run's flowUuid):
+     * the client only sends `contextKey` back — round-tripping a large context (a reader loading
+     * thousands of records) through the request body used to blow past the web server's body
+     * size limit, which answered with an HTML error page. Returns the new context (for display)
+     * plus `contextKey` and the progress metadata ({step, index, total, done}).
      */
     #[Route(path: '/flows/api/debug-step', name: 'aaxis_ontology_flow_debug_step', options: ['expose' => true], methods: ['POST'])]
     #[AclAncestor('aaxis_ontology_flow_update')]
@@ -174,11 +179,18 @@ class OntologyFlowController extends AbstractController
         [$steps, $links, $input, $flow] = $parsed;
 
         $index = $payload['index'] ?? 0;
-        $context = $payload['context'] ?? null;
-        if (!\is_int($index) || $index < 0
-            || ($context !== null && (!\is_array($context) || ($context !== [] && array_is_list($context))))
-        ) {
+        if (!\is_int($index) || $index < 0) {
             return new JsonResponse(['success' => false, 'message' => 'Invalid debug state.'], 400);
+        }
+        $context = null;
+        if ($index > 0) {
+            $context = $this->loadDebugContext($payload['contextKey'] ?? null);
+            if ($context === null) {
+                return new JsonResponse([
+                    'success' => false,
+                    'message' => 'The debug session expired — restart the debug.',
+                ], 422);
+            }
         }
 
         try {
@@ -188,7 +200,73 @@ class OntologyFlowController extends AbstractController
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }
 
-        return new JsonResponse(['success' => true] + $result);
+        return new JsonResponse(['success' => true, 'contextKey' => $this->storeDebugContext($result['context'])] + $result);
+    }
+
+    /**
+     * Evaluates ONE DWL expression against a debug session's CURRENT variables — the debugger
+     * sidebar's evaluator. The context comes from the server-side session store (`contextKey`).
+     */
+    #[Route(path: '/flows/api/debug-eval', name: 'aaxis_ontology_flow_debug_eval', options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('aaxis_ontology_flow_update')]
+    #[CsrfProtection]
+    public function debugEvalAction(Request $request): JsonResponse
+    {
+        $payload = json_decode($request->getContent(), true);
+        $expression = \is_array($payload) && \is_string($payload['expression'] ?? null) ? trim($payload['expression']) : '';
+        if ($expression === '') {
+            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+        }
+        $context = $this->loadDebugContext(\is_array($payload) ? ($payload['contextKey'] ?? null) : null);
+        if ($context === null) {
+            return new JsonResponse([
+                'success' => false,
+                'message' => 'The debug session expired — restart the debug.',
+            ], 422);
+        }
+
+        try {
+            $output = $this->container->get(DwlTransformer::class)->transform($expression, $context);
+        } catch (\Throwable $e) {
+            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
+        }
+
+        return new JsonResponse(['success' => true, 'output' => $output]);
+    }
+
+    /**
+     * Stores a debug session's context in the app cache under its flowUuid and returns that key
+     * (null when the context has no valid uuid — nothing is stored then).
+     *
+     * @param array<string, mixed> $context
+     */
+    private function storeDebugContext(array $context): ?string
+    {
+        $key = $context['flowUuid'] ?? null;
+        if (!\is_string($key) || !preg_match('/^[0-9a-f-]{36}$/i', $key)) {
+            return null;
+        }
+        $pool = $this->container->get(CacheItemPoolInterface::class);
+        $item = $pool->getItem('aaxis_ontology_debug_ctx.' . strtolower($key));
+        $item->set($context);
+        $item->expiresAfter(3600); // a debug session left open for an hour has expired anyway
+        $pool->save($item);
+
+        return $key;
+    }
+
+    /**
+     * @return array<string, mixed>|null the stored context, or null (missing/expired/bad key)
+     */
+    private function loadDebugContext(mixed $key): ?array
+    {
+        if (!\is_string($key) || !preg_match('/^[0-9a-f-]{36}$/i', $key)) {
+            return null;
+        }
+        $item = $this->container->get(CacheItemPoolInterface::class)->getItem('aaxis_ontology_debug_ctx.' . strtolower($key));
+        $value = $item->isHit() ? $item->get() : null;
+
+        return \is_array($value) ? $value : null;
     }
 
     /**
@@ -436,9 +514,11 @@ class OntologyFlowController extends AbstractController
         // The DWL on/off toggles (body_dwl / content_dwl) are lenient when absent, bool when set.
         $boolOk = static fn (string $key): bool => !isset($config[$key]) || \is_bool($config[$key]);
 
-        // "flow-uuid" is reserved: every execution seeds its uuid into the context under it.
+        // "flowUuid" is reserved (every execution seeds its uuid into the context under it);
+        // the legacy "flow-uuid" spelling stays rejected too.
         $destinationOk = static fn (): bool =>
-            $filled('destination') && strtolower(trim((string) $config['destination'])) !== 'flow-uuid';
+            $filled('destination')
+            && !\in_array(strtolower(trim((string) $config['destination'])), ['flowuuid', 'flow-uuid'], true);
 
         $connectorOk = static fn (): bool =>
             is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
@@ -495,6 +575,9 @@ class OntologyFlowController extends AbstractController
             'steps' => $flow->getSteps(),
             'design' => $flow->getDesign(),
             'lastExecuted' => $flow->getLastExecuted()?->format(\DateTimeInterface::ATOM),
+            'lastFinished' => $flow->getLastFinished()?->format(\DateTimeInterface::ATOM),
+            // Derived, not stored: last_executed with no matching last_finished yet.
+            'running' => $flow->isRunning(),
             'lastModified' => $flow->getLastModified()?->format(\DateTimeInterface::ATOM),
         ];
     }
@@ -537,6 +620,7 @@ class OntologyFlowController extends AbstractController
             ConfigManager::class,
             FlowDebugExecutor::class,
             DwlTransformer::class,
+            CacheItemPoolInterface::class,
         ]);
     }
 }

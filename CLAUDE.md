@@ -35,8 +35,8 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 > indexes — the installer is the single source of truth for schema (matching the pre-existing
 > `logo_id` unique index).
 | `OntologyEntityAttribute` | `aaxis_ontology_entity_attribute` | name, datatype (`TYPES` const), required |
-| `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; type + JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
-| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|queue|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb; installer at v1_8) |
+| `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; `type` ∈ sftp, rest_api, file_system, **database, bucket** (the last two are selectable but their config shape + Configure form are not defined yet — the button opens a "not available yet" note and `ConnectorTester` reports no test); JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
+| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|endpoint|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb — that migration still names the OLD `queue` trigger, deliberately: it is applied history, fresh installs skip it (installer ≥ v1_9), and no row ever used it), `last_finished` (datetime NULL — stamped by `FlowDebugExecutor::touchLastFinished()` when a run ENDS, from a `finally` so failures stamp too; v1_9 backfilled it from `last_executed` so pre-existing rows don't look permanently running; installer at v1_9). **`last_executed` + `last_finished` are the running-state pair** — see "Flow concurrency" below |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique |
 | `OntologyDataEvent` | `aaxis_ontology_data_events` | one row per flow execution (seen vs changed ids) |
@@ -108,12 +108,81 @@ Key facts:
 - Disabled system/entity → error on every call. Query filters/orderBy are fully parameterized
   (attribute keys + values bound; operators/direction whitelisted) — never interpolate user input.
 
+## Flow concurrency (one instance at a time)
+
+A flow's running state is **derived from two timestamps, not stored as a flag**:
+`last_executed` is stamped when a run starts, `last_finished` when it ends — so
+`OntologyFlow::isRunning()` is simply "started and `last_finished` hasn't caught up".
+
+- **Both stamps go through `FlowDebugExecutor`** (`touchLastExecuted` / `touchLastFinished`), and the
+  finish one lives in a **`finally`**: a run that throws must still release the state, or that flow
+  would never be schedulable again. `executeFrom()` (the step debugger) stamps a finish on **every**
+  call, not just the last step — nothing is executing server-side between debug steps, so a paused
+  debug session must not look like a run in progress.
+- **The guard is in `ScheduledFlowRunner`**: a due flow whose previous instance is still in flight is
+  skipped with status `running`. That is the automatic path where overlap actually arises (the cron
+  command fires every minute; a run that outlives its interval would otherwise be doubled up).
+- ⚠️ **A dead run must not lock the flow forever.** A process killed mid-run (fatal, container
+  restart, deploy) never stamps `last_finished`. `RUN_STALE_AFTER_SECONDS` (6h) is the cut-off after
+  which the scheduler assumes the run died and proceeds. Any new caller that BLOCKS on `isRunning()`
+  must apply the same cut-off — the entity method is deliberately raw state with no time policy.
+- **Manual runs are deliberately NOT blocked** — Run Now / Debug from the editor are explicit user
+  actions, and blocking them would make a stuck state undebuggable. If overlap must be prevented
+  there too, that is a product decision, not an oversight.
+- The Flows grid shows `Last finished`, rendering **"Running…"** while in flight (a blank cell would
+  read as "never ran"). The `running` flag is computed in the controller's serializer, not stored.
+
 ## UI architecture (the part that trips people up)
 
 Most pages (Systems, Entities, Flows, Events, Data View) are **NOT** standard Oro datagrids/forms.
 They are TypeScript single-page components built on CommonBundle's reusable `DataGrid` +
 `RecordFormModal` widgets, backed by **JSON endpoints** on the bundle's controllers. The Connector
 page is the exception — it uses a normal Oro datagrid + server-side CRUD.
+
+### Data View: deep link + version history dialog
+
+- **Cross-page deep links** follow one pattern: source grid action → `routing.generate(<page route>)`
+  + a `?<key>=<name>` query → target page calls `grid.setFilter()` once after its first load.
+  Systems → Entities uses `?system=` (filters `systemName`); Entities → Data View uses `?entity=`.
+  ⚠️ Both target routes are **page** routes that now carry `options: ['expose' => true]` purely
+  because TypeScript generates their URLs — page routes normally don't need it, which is exactly how
+  this was missed the first time (runtime `The route "…" does not exist.`, nothing caught at build).
+  Re-run `fos:js-routing:dump` after adding one.
+- **Entities → Data View**: the Entities grid's `data` action (fa-table, right after the `dwl` badge)
+  navigates to `aaxis_ontology_data_view?entity=<name>`, and the page turns that into the grid's
+  `entity` column filter via the widget's `setFilter()`. It passes the entity **`name`**, not
+  `displayName` or the id, because that is exactly what the Data View's `entity` column holds
+  (`OntologyDataController` serializes `getEntity()?->getName()`); the filter is a plain `equals`, so
+  the user can see and clear it. Applied **once** after the first load (`entityFilterApplied`) — it
+  seeds the view rather than pinning it, so Refresh won't re-impose a filter the user cleared.
+- **Version dialog** (`renderVersions`): the picker is an **editable text box holding only the
+  current selection**, not a `<select>` of every version — the option list would grow without bound
+  with a record's history. Jumping is done by typing a version number (a leading `v` is tolerated) or
+  a uuid (full, or a prefix that is unique) and pressing Enter; `findVersion()` resolves it, an
+  unmatched query shows an inline error and blur restores the current label so a half-typed query is
+  never left on screen. A `/ N` total sits next to the box. Below it a **range slider** — rendered
+  only when there is more than one version — has one stop per version, **oldest on the left** (the
+  `versions` array is newest-first, hence the `toIndex`/`toSlider` mirroring). It is a POSITION
+  picker, not a progress bar: the track is one flat colour end to end (hence overriding
+  `-moz-range-progress` and NOT using `accent-color`, both of which fill up to the thumb), with a
+  tick per version drawn by a repeating gradient whose `--tick-gap` JS sets inline (`100% / steps`,
+  since the count is per record). Box and slider are two views of one `selectedIndex` — everything
+  goes through `select()`, so they can't drift.
+  Search + prev/next live in the **bottom row next to Copy** (`.aaxis-json-footer--tools`), since
+  both act on the JSON above them, preceded by a **Full view ⇄ Diff only** switch.
+- **Diff only** reuses the normal diff renderer on a PRUNED pair of snapshots (`pruneToDiff()`)
+  rather than filtering the rendered lines — a changed object/array is wrapped in ONE highlight span
+  covering many lines, so line filtering would emit unbalanced HTML. Objects prune key by key
+  recursively; **arrays and scalars are kept whole** when they differ (pruning array elements would
+  renumber the indexes and misrepresent the data). Copy follows what is on screen. The oldest
+  version and a no-change version show a muted note instead of an empty pane.
+- **Erase records** (Entities grid, eraser between edit and delete): `DELETE
+  /entities/api/{id}/records` (`aaxis_ontology_entity_purge_records`) drops the entity's
+  `OntologyData` **and** `OntologyDataHistory` rows via DQL deletes (no hydration — an entity can
+  hold a lot), keeping the entity and its attributes. Gated on **`OntologyData` DELETE** on top of
+  entity VIEW: the entity survives, so this is a data delete, not an entity delete. Flow execution
+  events are deliberately NOT touched — they log what the flows did, not the entity's records. The
+  action is disabled when `recordCount` is 0 and always confirms first.
 
 ### DWL playground (Entities grid → `dwl` badge action)
 
@@ -282,14 +351,34 @@ lays every step out in execution order — BFS from the trigger/"Start here", un
 appended in reading order — with one-tile gaps, wrapping rows before the viewport width, then
 scrolls to top-left) + cancel/save on the right (the toolbox title bar also carries a × that
 hides it). The draggable toolbox
-(Triggers: cron/queue/entity change · Actions: DWL transform/Choice (an "if")/sub-flow ·
+(Triggers: cron/endpoint/entity change · Actions: DWL transform/Choice (an "if")/sub-flow ·
 Operations: reader/writer/invoke) is the step palette: items are dragged onto the canvas as
 square tiles of `flow_editor_step_size_factor` × grid-spacing px (config, default 8 → 80px tiles
-on a 10px grid), can be moved freely afterwards and always snap to the grid. Each tile shows its
+on a 10px grid), can be moved freely afterwards and always snap to the grid. A step is added ONLY
+by a real drag out of the toolbox: `startGhostDrag()` merely arms the gesture and the preview tile
+is materialised on the first move past `DRAG_THRESHOLD` (5px), so a plain click adds nothing, and
+`dropGhost()` additionally rejects a release still inside the toolbox — it floats **above** the
+canvas, so its bounds would otherwise pass the in-canvas test. Consequence to keep in mind:
+`ghostDrag.el` is nullable while a drag is armed. Each tile shows its
 icon with the step **name** centered below (up to two rows, breaking only at word boundaries):
 names default to `<type>-<n>` (first free n) and are unique per flow (client + server enforced).
+⚠️ **Settings-panel catalogs are cached in memory** (`entityCatalog()` / `connectorCatalog()`, warmed
+by `prefetchCatalogs()` at the end of `initialize()`). The reader/writer panel used to re-request
+`aaxis_ontology_entity_list` + `aaxis_ontology_connector_list` on EVERY open, and in dev a round trip
+is ~1.5s of kernel boot (measured; the queries themselves are trivial) — so opening step properties
+took seconds, every time. Consequences to keep in mind: a **failed** fetch is deliberately NOT cached
+(the field resets so the next open retries), and the catalogs are a **page-load snapshot** — a
+connector/entity created in another tab won't appear until the editor page is reloaded. Add new
+panel data sources through the same accessors rather than a bare `fetch`.
+
 **Flow links**: every tile has an "×" output port on its right edge (vertically centered; `choice`
-has two, at 1/3 and 2/3 height) — drag from a port onto another tile to wire them. Links are SVG
+has two, at 1/3 and 2/3 height) — drag from a port onto another tile to wire them. An existing wire
+can be **re-routed by dragging its arrow head** (an invisible `wire-end` grip circle at the last
+route point): the link is pulled out of `links` for the drag — so the canvas previews the result and
+the "already has an incoming line" rule doesn't count the link being edited — then on release,
+dropping it back on **the element the line STARTS from deletes it**, dropping on a valid free
+element retargets it, and dropping on its current target / the background / an element that already
+has an incoming line puts it back unchanged. Links are SVG
 bezier arrows (marker `#aaxis-flow-arrow`) arriving at the target's left-center, 2px off the
 border; each port drives exactly one link (re-drag re-wires), each element accepts at most ONE
 incoming link, and triggers accept none (invalid drops flash why). Links live in the design as
@@ -373,33 +462,49 @@ into the URL via `history.replaceState` so refresh reopens the same flow) and re
 state; every mutation path (add/move/rename/remove steps, link changes, toolbox move/visibility,
 name/switch inputs, drag ends) calls `syncDirty()`. On open the editor restores from `design` (strictly
 validated; corrupted/outdated → warning flash + empty canvas; NULL → rebuilt from `steps`).
-**Debug / Run Now**: two topbar buttons (both shown only while a REAL trigger exists, synced in
-`updateReachability`; both collect the trigger input via `collectDebugInput()` — cron/queue run
-immediately, entity_change asks for its event first). **Run Now** (`data-role="debug"`) POSTs the
-CURRENT canvas (steps with configs + links + trigger input, unsaved edits included) to the
-exposed `aaxis_ontology_flow_debug` endpoint (`flow_update` ACL + CSRF), which walks the graph
-breadth-first from the trigger via `Manager/FlowDebugExecutor::execute()` and returns the final
-output context. **Debug** (`data-role="debug-step"`) steps through the flow: each POST to the
-exposed `aaxis_ontology_flow_debug_step` endpoint executes ONE step of the execution order
-(`FlowDebugExecutor::executeFrom()` — index 0 seeds the context and mints the run's flow-uuid;
-later calls receive the CLIENT-HELD context back and require its flow-uuid, so all steps of a
-session stamp the same uuid; `runAll: true` finishes the rest in one call) and the state modal
-shows the context after that step (`showStepState`: title `Debug — <step> (i/N)`) with
-Cancel | Run all | Next step — or just Close when done (aborting cannot undo writers that already
-queued). Both result views render the context as a COLLAPSIBLE JSON tree (`renderJsonTree()`:
-every object/array line toggles its children — expanded by default, collapsed nodes preview
-their item count; reuses the aaxis-json-* value colors). NOTE: new exposed routes need
+**Debug / Run Now**: two topbar buttons — shown only while a REAL trigger exists (synced in
+`updateReachability`) and DISABLED while the Enabled switch is off or a session is already open
+(`syncDebugButtons()`, re-synced on switch change + session open/close). Both collect the trigger
+input via `collectDebugInput()` (cron/endpoint run immediately, entity_change asks for its event
+first) and then open the **debugger SIDEBAR** (`data-role="debugger"`, left of the design area in
+`__canvas-wrap`) instead of popups — `startDebugSession(mode, input)` SNAPSHOTS the canvas
+definition (steps+links) so mid-session edits can't desync the running session, and stale
+responses are ignored via session-identity checks. The sidebar holds: ONE title line — the mode
+name in bold (`__debugger-mode`) with the status right after it in regular weight
+(` — <step> (i/N)` / Running… / Finished / Failed: err, inline, never flashes); the VARIABLES
+section (`renderVariablesList()`: one line PER top-level context entry — objects/arrays start
+COLLAPSED with the count preview and expand on click, primitives inline; refreshed after every
+step); a DWL EVALUATOR just before the buttons (a `createDwlField` fixed instance whose Evaluate
+button POSTs {expression, context} to the exposed `aaxis_ontology_flow_debug_eval` endpoint →
+`DwlTransformer::transform` against the CURRENT variables, enabled once a context exists — the
+result/engine error opens in a MODAL Dialog, class `aaxis-debug-eval-error` for failures, not
+inline); and the action buttons (Cancel | Run all | Next step while stepping, just Close when
+done/failed). **Debug** (mode 'step', `data-role="debug-step"`) walks one step per POST to
+`aaxis_ontology_flow_debug_step` (`FlowDebugExecutor::executeFrom()` — index 0 seeds the context
+and mints the run's flowUuid; the context is held SERVER-SIDE between calls (cache.app,
+key aaxis_ontology_debug_ctx.<flowUuid>, TTL 1h — storeDebugContext/loadDebugContext): the
+client round-trips only `contextKey`, because shipping a large context (a reader loading
+thousands of records) in the request body blew past nginx's client_max_body_size and returned
+an HTML 413 page; an expired key 422s with 'restart the debug'; the full-run endpoint stores
+its final context too, so the sidebar evaluator works after Run Now; `runAll: true` finishes
+the rest in one call; the response's `step.id` marks the tile
+that just executed with the AMBER `is-debug-active` class, cleared on close). **Run Now** (mode
+'run', `data-role="debug"`) executes everything in ONE POST to `aaxis_ontology_flow_debug`
+(`FlowDebugExecutor::execute()`) — while it runs only the button spinner shows; the sidebar
+APPEARS WHEN THE RUN FINISHES with the final context (or the failure). Aborting cannot undo
+writers that already ran. NOTE: new exposed routes need
 `fos:js-routing:dump --format=json --target=public/media/js/admin_routes.json`.
 Cron/queue triggers run immediately; entity_change first asks for system/entity (prefilled from
 the trigger's config, reusing `systemEntitySection`) + a JSON payload seeded into the context as
 `payload`. Every TOP-LEVEL execution mints ONE v4 uuid up front, seeded into the context as
-**`flow-uuid`** (first key of the output JSON): all writers of the run stamp their upserts with
+**`flowUuid`** (first key of the output JSON): all writers of the run stamp their upserts with
 it, so several write events group under a single identity in Events/Data View. Sub-flows never
 mint their own — `execute()`'s `$executionUuid` param carries the CALLER's uuid down (sub-flow
-invocation itself is still unimplemented; whoever builds it must pass the current uuid). DWL scripts reach it as
-`context["flow-uuid"]` — the transformer binds the whole context as a `context` object because
-hyphens aren't valid DWL identifiers (an actual `context` destination would shadow the alias).
-`flow-uuid` is a RESERVED destination (rejected in `isStepConfigValid` + the TS panels'
+invocation itself is still unimplemented; whoever builds it must pass the current uuid). DWL
+scripts use `flowUuid` DIRECTLY (renamed from the old hyphenated `flow-uuid`, which was not a
+valid DWL identifier; the transformer still binds the whole context as a `context` object for
+OTHER non-identifier keys, e.g. hyphenated destinations). `flowUuid` is a RESERVED destination —
+the legacy `flow-uuid` spelling too (rejected in `isStepConfigValid` + the TS panels'
 `destinationError()` — jsmessage `destination_reserved`). Executed for real: entity readers (`all` = first page via OntologyDataApiManager::query
 — capped at 100, `by_id` = read(); a MISSING record yields null, not an error) and **rest_api
 connector readers** (URL = connector server[:port] + step path; connector headers; auth=headers
@@ -415,7 +520,7 @@ their destination; **writer/entity** steps write the context value named by `con
 function as the async Data View "Add Data" path (`upsertRecords()`, still queued), but no queue:
 uid inferred from the entity's unique_attribute, **stamped with the flow being debugged** (the
 editor sends `flowId` in the debug POST; a never-saved flow falls back to
-`requireEnabledFlow(Manual)`) **and with the run's `flow-uuid`** (the optional uuid arg). The
+`requireEnabledFlow(Manual)`) **and with the run's `flowUuid`** (the optional uuid arg). The
 receipt stored under the destination reports the REAL outcome — `{uuid, count, upsert:
 <created+changed>, changedIds: [<the upserted ids>]}` (unchanged records excluded; an EMPTY
 content — null / [] / "" — is NOT an error: the write is skipped, no event row, receipt
@@ -456,7 +561,7 @@ panel (buttons included, submit guarded) until every `ready` settles, then focus
 by hand for a one-off sweep). Every minute it selects candidates by PLAIN COLUMNS
 (`enabled + type=flow + trigger_type='cron'`), rebuilds each flow from its saved `design` (the only
 persisted shape with step ids + links) and runs the DUE ones through the same
-`FlowDebugExecutor::execute()` as Run Now — so flow-uuid, last_executed stamping, sync writes and
+`FlowDebugExecutor::execute()` as Run Now — so flowUuid, last_executed stamping, sync writes and
 event rows behave identically; one flow's failure logs and never blocks the rest. DUE rules:
 interval mode = `value unit` elapsed since `last_executed ?? last_modified` (the creation date
 until first edit; datetimes compared as UTC wall-clock regardless of PHP tz); cron mode (and the

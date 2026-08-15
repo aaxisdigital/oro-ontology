@@ -53,6 +53,8 @@ class OntologyConnectorType extends AbstractType
                     'aaxis.ontology.connector.type.sftp' => OntologyConnector::TYPE_SFTP,
                     'aaxis.ontology.connector.type.rest_api' => OntologyConnector::TYPE_REST_API,
                     'aaxis.ontology.connector.type.file_system' => OntologyConnector::TYPE_FILE_SYSTEM,
+                    'aaxis.ontology.connector.type.database' => OntologyConnector::TYPE_DATABASE,
+                    'aaxis.ontology.connector.type.bucket' => OntologyConnector::TYPE_BUCKET,
                 ],
                 'required' => true,
             ])

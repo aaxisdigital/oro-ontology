@@ -44,6 +44,8 @@ datagrids:
                                 aaxis.ontology.connector.type.sftp: sftp
                                 aaxis.ontology.connector.type.rest_api: rest_api
                                 aaxis.ontology.connector.type.file_system: file_system
+                                aaxis.ontology.connector.type.database: database
+                                aaxis.ontology.connector.type.bucket: bucket
         properties:
             id: ~
             view_link: { type: url, route: aaxis_ontology_connector_view, params: [id] }

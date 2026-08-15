@@ -201,7 +201,30 @@ class ConnectorConfigComponent extends BaseComponent {
             this.openSftpPopup(config);
         } else if (type === TYPE_REST_API) {
             this.openRestApiPopup(config);
+        } else {
+            // A connector type exists before its Configure form does (database/bucket). Say so
+            // rather than letting the button do nothing.
+            this.openUnsupportedPopup();
         }
+    }
+
+    /** Placeholder for connector types whose per-type form has not been defined yet. */
+    private openUnsupportedPopup(): void {
+        const dialog = new Dialog({
+            title: __('aaxis.ontology.connector_config.not_available_title'),
+            width: '480px'
+        });
+        const $content = dialog.open();
+
+        const $body = $('<div/>', {'class': 'aaxis-ontology-confirm'});
+        $body.append($('<p/>', {text: __('aaxis.ontology.connector_config.not_available_text')}));
+        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
+        const $close = $('<button/>', {type: 'button', 'class': 'btn', text: __('Cancel')});
+        $actions.append($close);
+        $body.append($actions);
+        $content.append($body);
+
+        $close.on('click', () => dialog.close());
     }
 
     private parseConfig(): Record<string, any> {

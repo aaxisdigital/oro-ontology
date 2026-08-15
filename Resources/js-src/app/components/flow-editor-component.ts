@@ -167,6 +167,29 @@ function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElem
     return node;
 }
 
+/**
+ * The debugger's Variables view: each top-level context entry on its own line — objects/arrays
+ * START COLLAPSED (count preview, expandable), primitives inline. Same tree pieces as
+ * renderJsonTree, minus the wrapping root braces.
+ */
+function renderVariablesList(context: Record<string, any>): HTMLElement {
+    const root = document.createElement('div');
+    root.className = 'aaxis-json-view aaxis-json-tree';
+    const keys = Object.keys(context);
+    if (keys.length === 0) {
+        root.appendChild(jsonTreeNode({}, null, true));
+        return root;
+    }
+    keys.forEach(key => {
+        const node = jsonTreeNode(context[key], key, true);
+        if (node.classList.contains('aaxis-json-tree__node--collapsible')) {
+            node.classList.add('is-collapsed');
+        }
+        root.appendChild(node);
+    });
+    return root;
+}
+
 /** A directed connection: output port `fromPort` of step `from` → the input of step `to`. */
 interface FlowLink {
     from: string;
@@ -227,6 +250,13 @@ interface PlacedStep extends FlowStep {
  * the flow's `design` (steps carry stable ids; links reference them, so renames are free).
  */
 class OntologyFlowEditorComponent extends BaseComponent {
+    /**
+     * Pointer travel (px) that separates a click from a drag. A `static readonly` is exempt from the
+     * no-field-initializer rule below — it belongs to the class, not the instance, so it is set
+     * before any constructor runs.
+     */
+    private static readonly DRAG_THRESHOLD = 5;
+
     // NO field initializers here: BaseComponent's constructor calls initialize() BEFORE the
     // subclass field initializers would run, and any initializer would then also OVERWRITE what
     // initialize() assigned. Everything is definite-assigned (!) and set up in initialize().
@@ -249,7 +279,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private savedState!: string;
 
     private panelDrag!: {pointerId: number; dx: number; dy: number} | null;
-    private ghostDrag!: {pointerId: number; type: string; el: HTMLElement} | null;
+    /**
+     * Toolbox → canvas drag. `el` is null until the pointer has actually moved past
+     * {@see DRAG_THRESHOLD}: a plain click on a toolbox item must not spawn anything.
+     */
+    private ghostDrag!: {
+        pointerId: number;
+        type: string;
+        el: HTMLElement | null;
+        startX: number;
+        startY: number;
+    } | null;
     private stepDrag!: {
         pointerId: number;
         step: PlacedStep;
@@ -258,17 +298,59 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Other selected tiles moving along, as offsets relative to the dragged one.
         group: {step: PlacedStep; offX: number; offY: number}[];
     } | null;
-    private linkDrag!: {pointerId: number; from: PlacedStep; fromPort: number; path: SVGPathElement; target: PlacedStep | null} | null;
+    /**
+     * Drawing a wire. `editing` is set when the user grabbed the ARROW of an existing link to
+     * re-route it: that link is pulled out of `links` for the duration of the drag and either
+     * re-added (retargeted / cancelled) or left out (deleted) on drop.
+     */
+    private linkDrag!: {
+        pointerId: number;
+        from: PlacedStep;
+        fromPort: number;
+        path: SVGPathElement;
+        target: PlacedStep | null;
+        editing: FlowLink | null;
+    } | null;
     private marqueeDrag!: {pointerId: number; x0: number; y0: number; el: HTMLElement; moved: boolean} | null;
+    /** Active Debug / Run Now session (the sidebar); steps+links are a SNAPSHOT taken at start. */
+    private debugSession!: {
+        mode: 'step' | 'run';
+        input: Record<string, any>;
+        steps: {id: string; type: string; name: string; config: Record<string, any> | null}[];
+        links: {from: string; fromPort: number; to: string}[];
+        context: Record<string, any> | null;
+        /** Server-side session handle: the context lives in the app cache between step calls. */
+        contextKey: string | null;
+        index: number;
+        total: number;
+        done: boolean;
+        busy: boolean;
+        /** Which sidebar button started the in-flight request — it carries the spinner. */
+        busyAction: 'next' | 'runAll' | null;
+        error: string | null;
+        statusLabel: string;
+    } | null;
+    private debugUi!: {$status: any; $vars: any; $actions: any; evalField: any; $evalRun: any} | null;
     private onPointerMove!: (e: PointerEvent) => void;
     private onPointerUp!: (e: PointerEvent) => void;
     private onDocPointerDown!: (e: PointerEvent) => void;
+    /**
+     * Catalogs the step settings panel needs (systems+entities, connectors), fetched at most ONCE
+     * per editor session. Reopening a reader/writer panel used to re-request both every time, and a
+     * round trip costs well over a second in dev (kernel boot, not the queries) — so the panel took
+     * seconds to populate on every double-click. Holding the promises makes reopening instant.
+     * Null = not requested yet (or the last attempt failed and may be retried).
+     */
+    private catalogEntities!: Promise<any> | null;
+    private catalogConnectors!: Promise<any> | null;
 
     initialize(options: FlowEditorOptions): void {
         this.$el = options._sourceElement;
         this.flow = options.flow || null;
         this.listUrl = options.listUrl || routing.generate('aaxis_ontology_flows');
         this.stepMeta = {};
+        this.catalogEntities = null;
+        this.catalogConnectors = null;
         this.steps = [];
         this.links = [];
         this.startId = null;
@@ -281,6 +363,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.stepDrag = null;
         this.linkDrag = null;
         this.marqueeDrag = null;
+        this.debugSession = null;
+        this.debugUi = null;
         this.onPointerMove = (e: PointerEvent): void => this.pointerMove(e);
         this.onPointerUp = (e: PointerEvent): void => this.pointerUp(e);
         // Closes the context menu on any press outside it (including outside the editor).
@@ -323,9 +407,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Sync the toggle's active state with however the restore left the toolbox.
         this.setToolboxVisible(!this.toolbox().hidden);
         this.markSaved();
+        // Warm the settings catalogs in the background so the first panel opens instantly too.
+        this.prefetchCatalogs();
 
         this.$el.on('input.aaxisFlowEditor', '[data-role="flow-name"]', () => this.syncDirty());
-        this.$el.on('change.aaxisFlowEditor', '[data-role="flow-enabled"]', () => this.syncDirty());
+        this.$el.on('change.aaxisFlowEditor', '[data-role="flow-enabled"]', () => {
+            this.syncDirty();
+            // A disabled flow cannot be run — Debug/Run Now grey out with the switch.
+            this.syncDebugButtons();
+        });
         this.$el.on('click.aaxisFlowEditor', '[data-role="cancel"]', (e: any) => {
             e.preventDefault();
             window.location.href = this.listUrl;
@@ -362,20 +452,39 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
-            // Run Now: the whole flow in one request, final result only.
-            this.collectDebugInput(input => this.runDebug(input));
+            // Run Now: the whole flow in one request; the sidebar shows the result at the end.
+            this.collectDebugInput(input => this.startDebugSession('run', input));
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug-step"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
-            // Debug: step-by-step — a state modal after every executed step.
-            this.collectDebugInput(input => this.stepDebug(input, 0, null));
+            // Debug: step-by-step in the sidebar — variables, stepper buttons, DWL evaluator.
+            this.collectDebugInput(input => this.startDebugSession('step', input));
         });
         this.$el.on('pointerdown.aaxisFlowEditor', '[data-role="toolbox"] [data-step-type]', (e: any) => {
             this.closeContextMenu();
             this.clearSelection();
             if (e.originalEvent.button === 0) {
                 this.startGhostDrag(e.originalEvent as PointerEvent, String($(e.currentTarget).data('stepType')));
+            }
+        });
+        // Dragging the arrow head of an existing wire re-routes that wire.
+        this.$el.on('pointerdown.aaxisFlowEditor', '[data-role="wire-end"]', (e: any) => {
+            this.closeContextMenu();
+            if (e.originalEvent.button !== 0) {
+                return;
+            }
+            const group = (e.currentTarget as SVGElement).parentElement as unknown as SVGGElement | null;
+            if (!group) {
+                return;
+            }
+            const from = String(group.getAttribute('data-from'));
+            const fromPort = Number(group.getAttribute('data-from-port')) || 0;
+            const to = String(group.getAttribute('data-to'));
+            const link = this.links.find(l => l.from === from && l.fromPort === fromPort && l.to === to);
+            if (link) {
+                e.stopPropagation();
+                this.startRelinkDrag(e.originalEvent as PointerEvent, link);
             }
         });
         this.$el.on('pointerdown.aaxisFlowEditor', '[data-role="port"]', (e: any) => {
@@ -596,6 +705,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
             hit.setAttribute('d', d);
             group.appendChild(path);
             group.appendChild(hit);
+
+            // Grab handle over the arrow head: dragging it re-routes (or deletes) this link.
+            const end = route.points[route.points.length - 1];
+            if (end) {
+                const grip = document.createElementNS(SVG_NS, 'circle');
+                grip.setAttribute('data-role', 'wire-end');
+                grip.setAttribute('cx', String(end.x));
+                grip.setAttribute('cy', String(end.y));
+                grip.setAttribute('r', '9');
+                group.appendChild(grip);
+            }
+
             this.wires.appendChild(group);
         });
     }
@@ -919,11 +1040,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (el.hidden || el.style.left === '') {
             return; // hidden (not measurable) or never moved — the default top-right spot is visible
         }
+        // Clamp into the VIEWPORT's sub-area of the wrap (the viewport starts right of the
+        // debugger sidebar when that is open — offsetLeft carries that shift).
         const viewport = this.canvasViewport();
-        const maxLeft = Math.max(0, viewport.clientWidth - el.offsetWidth);
-        const maxTop = Math.max(0, viewport.clientHeight - el.offsetHeight);
-        el.style.left = `${Math.min(Math.max(0, parseInt(el.style.left, 10) || 0), maxLeft)}px`;
-        el.style.top = `${Math.min(Math.max(0, parseInt(el.style.top, 10) || 0), maxTop)}px`;
+        const minLeft = viewport.offsetLeft;
+        const minTop = viewport.offsetTop;
+        const maxLeft = Math.max(minLeft, minLeft + viewport.clientWidth - el.offsetWidth);
+        const maxTop = Math.max(minTop, minTop + viewport.clientHeight - el.offsetHeight);
+        el.style.left = `${Math.min(Math.max(minLeft, parseInt(el.style.left, 10) || 0), maxLeft)}px`;
+        el.style.top = `${Math.min(Math.max(minTop, parseInt(el.style.top, 10) || 0), maxTop)}px`;
     }
 
     // --- Persisted editor state (the `design` column) -----------------------------
@@ -1195,10 +1320,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         const $backdrop = $('<div/>', {'class': 'aaxis-flow-editor__settings-backdrop'});
         const $panel = $('<div/>', {'class': 'aaxis-flow-editor__settings', role: 'dialog', 'aria-modal': 'true'});
-        $panel.append($('<div/>', {
+        const $title = $('<div/>', {
             'class': 'aaxis-flow-editor__settings-title',
             text: `${meta.label} - ${step.name}`
-        }));
+        });
+        $panel.append($title);
+        this.makeSettingsDraggable($panel, $title);
 
         // Layout: [$top: full-width fixed rows] over [$columns: left fields | right side column],
         // then one full-width feedback line and the actions. The panel is height-capped with the
@@ -1266,6 +1393,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         const close = (): void => {
             $(document).off('keydown.aaxisFlowSettings');
+            // Drop any in-flight drag listeners (the panel can be closed mid-drag via Escape).
+            $(document).off('.aaxisFlowSettingsDrag');
             $backdrop.remove();
             $panel.remove();
         };
@@ -1445,8 +1574,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             });
         };
 
-        const ready = fetch(routing.generate('aaxis_ontology_entity_list'), {credentials: 'same-origin'})
-            .then(r => r.json())
+        const ready = this.entityCatalog()
             .then((data: {systems?: {name: string}[]; entities?: any[]}) => {
                 entities = data.entities || [];
                 $system.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
@@ -1606,8 +1734,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         // id -> connector type, so the row adapts to the chosen connector (rest_api vs sftp/fs).
         const connectorTypes: Record<string, string> = {};
-        const connectorsReady = fetch(routing.generate('aaxis_ontology_connector_list'), {credentials: 'same-origin'})
-            .then(r => r.json())
+        const connectorsReady = this.connectorCatalog()
             .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
                 const current = variant === 'connector' ? String(initial.connector || '') : '';
                 $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
@@ -1780,22 +1907,59 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
-     * Validates a destination input: required, and "flow-uuid" is reserved (every execution seeds
-     * its uuid into the context under that key). Returns '' when valid.
+     * Validates a destination input: required, and "flowUuid" is reserved (every execution seeds
+     * its uuid into the context under that key; the legacy "flow-uuid" spelling stays rejected
+     * too). Returns '' when valid.
      */
     private destinationError($destination: any): string {
         const value = String($destination.val() || '').trim();
         if (value === '') {
             return __('aaxis.ontology.flow_editor.destination_required');
         }
-        if (value.toLowerCase() === 'flow-uuid') {
+        if (['flowuuid', 'flow-uuid'].indexOf(value.toLowerCase()) >= 0) {
             return __('aaxis.ontology.flow_editor.destination_reserved');
         }
         return '';
     }
 
     /** Places the settings panel next to the tile (right side preferred), clamped to the viewport. */
+    /**
+     * Lets the settings popup be dragged by its title bar. Once the user has moved it the panel is
+     * PINNED — {@see positionSettings} stops re-anchoring it to the tile, so a late reposition (e.g.
+     * when a section's catalog finishes loading and the panel grows) can't yank it back.
+     */
+    private makeSettingsDraggable($panel: any, $title: any): void {
+        let from: {x: number; y: number} | null = null;
+
+        const onMove = (event: any): void => {
+            if (from === null) {
+                return;
+            }
+            const width = $panel.outerWidth();
+            // Always keep a grabbable strip of the panel (and its title) on screen.
+            const left = Math.min(Math.max(event.clientX - from.x, 40 - width), window.innerWidth - 40);
+            const top = Math.min(Math.max(event.clientY - from.y, 0), window.innerHeight - 32);
+            $panel.css({left: `${left}px`, top: `${top}px`});
+        };
+
+        $title.on('mousedown', (event: any) => {
+            event.preventDefault();
+            const rect = $panel[0].getBoundingClientRect();
+            from = {x: event.clientX - rect.left, y: event.clientY - rect.top};
+            $panel[0].dataset.userMoved = '1';
+            $(document).on('mousemove.aaxisFlowSettingsDrag', onMove);
+            $(document).on('mouseup.aaxisFlowSettingsDrag', () => {
+                from = null;
+                $(document).off('.aaxisFlowSettingsDrag');
+            });
+        });
+    }
+
     private positionSettings(panel: HTMLElement, tile: HTMLElement): void {
+        // The user placed it deliberately — leave it where they put it.
+        if (panel.dataset.userMoved === '1') {
+            return;
+        }
         const rect = tile.getBoundingClientRect();
         const panelW = panel.offsetWidth;
         const panelH = panel.offsetHeight;
@@ -1850,6 +2014,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.steps.forEach(s => s.el.classList.toggle('is-unreachable', !reachable.has(s.id)));
         // Debug is only offered for flows that contain a REAL trigger (not a sub-flow start).
         this.$el.find('[data-role="debug"], [data-role="debug-step"]').prop('hidden', !this.findTrigger());
+        this.syncDebugButtons();
         this.$el.find('[data-role="organize"]').prop('hidden', this.steps.length === 0);
     }
 
@@ -1935,14 +2100,19 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (!this.panelDrag) {
             return;
         }
-        // The toolbox is pinned to the VIEWPORT (it floats over the scrolling canvas).
+        // The toolbox is positioned within the WRAP (its offset parent) but must stay inside the
+        // canvas VIEWPORT — which starts to the wrap's right of the debugger sidebar when that is
+        // open, so the two origins differ and both must be respected.
         const toolbox = this.$el.find('[data-role="toolbox"]')[0];
-        const bounds = this.canvasViewport().getBoundingClientRect();
+        const viewport = this.canvasViewport();
+        const wrapBounds = (viewport.parentElement as HTMLElement).getBoundingClientRect();
+        const minLeft = viewport.offsetLeft;
+        const minTop = viewport.offsetTop;
 
-        let left = e.clientX - bounds.left - this.panelDrag.dx;
-        let top = e.clientY - bounds.top - this.panelDrag.dy;
-        left = Math.min(Math.max(0, left), Math.max(0, bounds.width - toolbox.offsetWidth));
-        top = Math.min(Math.max(0, top), Math.max(0, bounds.height - toolbox.offsetHeight));
+        let left = e.clientX - wrapBounds.left - this.panelDrag.dx;
+        let top = e.clientY - wrapBounds.top - this.panelDrag.dy;
+        left = Math.min(Math.max(minLeft, left), Math.max(minLeft, minLeft + viewport.clientWidth - toolbox.offsetWidth));
+        top = Math.min(Math.max(minTop, top), Math.max(minTop, minTop + viewport.clientHeight - toolbox.offsetHeight));
 
         toolbox.style.left = `${left}px`;
         toolbox.style.top = `${top}px`;
@@ -1951,22 +2121,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     // --- Dragging a NEW step out of the toolbox ------------------------------------
 
+    /**
+     * Arms a toolbox drag. The tile is NOT created here — only once the pointer has travelled far
+     * enough ({@see moveGhost}), so clicking a toolbox item just selects nothing and adds nothing.
+     */
     private startGhostDrag(e: PointerEvent, type: string): void {
         if (!this.stepMeta[type]) {
             return;
         }
-        // Preview only — the real name is assigned on drop (after a possible trigger swap).
-        const el = this.buildTile(type, this.defaultName(type));
-        el.classList.add('is-ghost');
-        document.body.appendChild(el);
-        this.ghostDrag = {pointerId: e.pointerId, type, el};
-        this.positionGhost(e);
+        this.ghostDrag = {pointerId: e.pointerId, type, el: null, startX: e.clientX, startY: e.clientY};
         this.trackPointer();
         e.preventDefault();
     }
 
     private positionGhost(e: PointerEvent): void {
-        if (!this.ghostDrag) {
+        if (!this.ghostDrag?.el) {
             return;
         }
         this.ghostDrag.el.style.left = `${e.clientX - this.tileSize / 2}px`;
@@ -1974,6 +2143,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     private moveGhost(e: PointerEvent): void {
+        if (!this.ghostDrag) {
+            return;
+        }
+        // First real movement materialises the preview tile (the name is provisional — the final one
+        // is assigned on drop, after a possible trigger swap).
+        if (this.ghostDrag.el === null) {
+            const travelled = Math.hypot(e.clientX - this.ghostDrag.startX, e.clientY - this.ghostDrag.startY);
+            if (travelled < OntologyFlowEditorComponent.DRAG_THRESHOLD) {
+                return;
+            }
+            const el = this.buildTile(this.ghostDrag.type, this.defaultName(this.ghostDrag.type));
+            el.classList.add('is-ghost');
+            document.body.appendChild(el);
+            this.ghostDrag.el = el;
+        }
         this.positionGhost(e);
     }
 
@@ -1983,7 +2167,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         const {type, el} = this.ghostDrag;
         this.ghostDrag = null;
+        // No tile was ever materialised → this was a click, not a drag. Nothing to add.
+        if (el === null) {
+            return;
+        }
         el.remove();
+
+        // Released while still over the toolbox: the item was never dragged OUT, so it must not be
+        // added — the toolbox floats above the canvas, which would otherwise count as a valid drop.
+        const toolbox = this.toolbox();
+        if (!toolbox.hidden) {
+            const tb = toolbox.getBoundingClientRect();
+            if (e.clientX >= tb.left && e.clientX <= tb.right && e.clientY >= tb.top && e.clientY <= tb.bottom) {
+                return;
+            }
+        }
 
         const bounds = this.canvas().getBoundingClientRect();
         const inCanvas = e.clientX >= bounds.left && e.clientX <= bounds.right
@@ -2051,7 +2249,33 @@ class OntologyFlowEditorComponent extends BaseComponent {
         path.setAttribute('data-role', 'wire-temp');
         path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
         this.wires.appendChild(path);
-        this.linkDrag = {pointerId: e.pointerId, from, fromPort, path, target: null};
+        this.linkDrag = {pointerId: e.pointerId, from, fromPort, path, target: null, editing: null};
+        this.moveLinkDrag(e);
+        this.trackPointer();
+        e.preventDefault();
+    }
+
+    /**
+     * Grabbing an existing link's arrow head re-routes that link. The link is removed from the model
+     * up front so the canvas shows what a release would leave behind, and so the "already has an
+     * incoming line" rule doesn't count the very link being edited; {@see dropLink} puts it back
+     * unless the drop actually changes something.
+     */
+    private startRelinkDrag(e: PointerEvent, link: FlowLink): void {
+        const from = this.stepById(link.from);
+        if (!from) {
+            return;
+        }
+        this.links = this.links.filter(l => l !== link);
+        this.redrawLinks();
+
+        const path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('data-role', 'wire-temp');
+        path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
+        this.wires.appendChild(path);
+        this.linkDrag = {
+            pointerId: e.pointerId, from, fromPort: link.fromPort, path, target: null, editing: link
+        };
         this.moveLinkDrag(e);
         this.trackPointer();
         e.preventDefault();
@@ -2084,7 +2308,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (!this.linkDrag) {
             return;
         }
-        const {from, fromPort, path, target} = this.linkDrag;
+        const {from, fromPort, path, target, editing} = this.linkDrag;
         this.linkDrag = null;
         path.remove();
         if (target) {
@@ -2092,6 +2316,38 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
 
         const over = this.stepAt(e.clientX, e.clientY);
+
+        if (editing !== null) {
+            // Dropped back on the element the line STARTS from → delete it (the line is already out
+            // of `links`; leaving it out is the deletion).
+            if (over && over.id === editing.from) {
+                this.redrawLinks();
+                this.syncDirty();
+                return;
+            }
+            // Dropped where it already pointed → keep the line exactly as it was. `linkTargetError`
+            // would otherwise call the target "already used" — by this very link.
+            if (over && over.id === editing.to) {
+                this.links.push(editing);
+                this.redrawLinks();
+                return;
+            }
+            // Background, or an element that can't take the line → no change.
+            const error = over ? this.linkTargetError(from, over) : null;
+            if (!over || error === null || error !== '') {
+                if (error) {
+                    messenger.notificationFlashMessage('warning', error);
+                }
+                this.links.push(editing);
+                this.redrawLinks();
+                return;
+            }
+            this.links.push({from: editing.from, fromPort: editing.fromPort, to: over.id});
+            this.redrawLinks();
+            this.syncDirty();
+            return;
+        }
+
         if (!over) {
             return;
         }
@@ -2520,103 +2776,308 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-    /** POSTs the CURRENT canvas definition (unsaved edits included) for a debug run. */
-    private runDebug(input: Record<string, any>): void {
-        const $debug = this.$el.find('[data-role="debug"]');
-        $debug.prop('disabled', true);
+    /**
+     * Run Now / Debug availability: hidden without a real trigger (synced in updateReachability),
+     * DISABLED while the flow's Enabled switch is off or a debug session is already open.
+     */
+    private syncDebugButtons(): void {
+        const enabled = this.$el.find('[data-role="flow-enabled"]').is(':checked');
+        this.$el.find('[data-role="debug"], [data-role="debug-step"]')
+            .prop('disabled', !enabled || this.debugSession !== null);
+    }
+
+    /**
+     * Opens the debugger sidebar (left of the design area) and starts the session. The canvas
+     * definition is SNAPSHOTTED here — later canvas edits don't affect the running session.
+     * mode 'step' walks one step per request (Next step / Run all buttons); mode 'run' executes
+     * everything in one request and only shows the final result. Cancel/Close just closes —
+     * writes already performed by executed writers cannot be undone.
+     */
+    private startDebugSession(mode: 'step' | 'run', input: Record<string, any>): void {
+        this.debugSession = {
+            mode,
+            input,
+            steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, config: s.config || null})),
+            links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
+            context: null,
+            contextKey: null,
+            index: -1,
+            total: 0,
+            done: false,
+            busy: false,
+            busyAction: null,
+            error: null,
+            statusLabel: ''
+        };
+        this.syncDebugButtons();
+        if (mode === 'run') {
+            // Run Now: the sidebar only appears when the run FINISHES (see runFullSession).
+            this.runFullSession();
+        } else {
+            this.buildDebugger();
+            this.debugAdvance(0, false);
+        }
+    }
+
+    /** Builds the sidebar skeleton once per session (stable refs keep the evaluator's text). */
+    private buildDebugger(): void {
+        const session = this.debugSession;
+        if (!session) {
+            return;
+        }
+        const $panel = this.$el.find('[data-role="debugger"]');
+        $panel.empty().prop('hidden', false);
+
+        // One line: the mode in bold, the step/status right after it in regular weight.
+        const $status = $('<span/>', {'class': 'aaxis-flow-editor__debugger-status'});
+        const $title = $('<div/>', {'class': 'aaxis-flow-editor__debugger-title'}).append(
+            $('<span/>', {
+                'class': 'aaxis-flow-editor__debugger-mode',
+                text: session.mode === 'step'
+                    ? __('aaxis.ontology.flow_editor.debug_step_title')
+                    : __('aaxis.ontology.flow_editor.run_now_title')
+            }),
+            $status
+        );
+        const $vars = $('<div/>', {'class': 'aaxis-flow-editor__debugger-vars'});
+
+        // The DWL evaluator (just before the buttons): any expression, evaluated server-side
+        // against the CURRENT variables; the result opens in a modal.
+        const $evalRun = $('<button/>', {
+            type: 'button', 'class': 'btn aaxis-flow-editor__debugger-eval-run',
+            text: __('aaxis.ontology.flow_editor.debug_eval_run')
+        });
+        const evalField = createDwlField({
+            label: __('aaxis.ontology.flow_editor.debug_eval_label'),
+            value: '',
+            dwl: true,
+            fixed: true,
+            editorClass: 'aaxis-flow-editor__debugger-eval-editor',
+            $tools: $evalRun
+        });
+        $evalRun.on('click', () => this.evaluateDebugExpression());
+
+        const $actions = $('<div/>', {'class': 'aaxis-flow-editor__debugger-actions'});
+
+        $panel.append(
+            $title,
+            $('<div/>', {'class': 'aaxis-flow-editor__debugger-section', text: __('aaxis.ontology.flow_editor.debug_vars_label')}),
+            $vars,
+            evalField.$el,
+            $actions
+        );
+        this.debugUi = {$status, $vars, $actions, evalField, $evalRun};
+        this.updateDebugger();
+        // The sidebar just shrank the canvas viewport — pull the toolbox back inside it.
+        this.clampToolboxIntoView();
+    }
+
+    /** Refreshes the sidebar (status, variables tree, action buttons, evaluator availability). */
+    private updateDebugger(): void {
+        const session = this.debugSession;
+        const ui = this.debugUi;
+        if (!session || !ui) {
+            return;
+        }
+
+        if (session.error !== null) {
+            ui.$status.text(` — ${__('aaxis.ontology.flow_editor.debug_failed')}: ${session.error}`).addClass('is-error');
+        } else if (session.busy) {
+            ui.$status.text(` — ${__('aaxis.ontology.flow_editor.debug_running')}`).removeClass('is-error');
+        } else if (session.done) {
+            ui.$status.text(` — ${__('aaxis.ontology.flow_editor.debug_finished')}`).removeClass('is-error');
+        } else {
+            ui.$status.text(session.statusLabel === '' ? '' : ` — ${session.statusLabel}`).removeClass('is-error');
+        }
+
+        ui.$vars.empty();
+        if (session.context === null) {
+            ui.$vars.append($('<div/>', {'class': 'aaxis-flow-editor__debugger-empty', text: __('aaxis.ontology.flow_editor.debug_not_started')}));
+        } else {
+            // One line per variable; objects/arrays start collapsed (count preview) and expand.
+            ui.$vars.append(renderVariablesList(session.context));
+        }
+
+        const canEvaluate = session.context !== null && !session.busy;
+        ui.$evalRun.prop('disabled', !canEvaluate);
+
+        ui.$actions.empty();
+        if (session.done || session.error !== null) {
+            const $close = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.close')});
+            $close.on('click', () => this.closeDebugSession());
+            ui.$actions.append($close);
+            return;
+        }
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
+        $cancel.on('click', () => this.closeDebugSession());
+        ui.$actions.append($cancel);
+        if (session.mode === 'step') {
+            const $runAll = $('<button/>', {
+                type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.debug_run_all'),
+                disabled: session.busy
+            });
+            const $next = $('<button/>', {
+                type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.debug_next_step'),
+                disabled: session.busy
+            });
+            // The button that started the in-flight request keeps a spinner until it resolves.
+            if (session.busy) {
+                const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
+                (session.busyAction === 'runAll' ? $runAll : $next).prepend($spinner);
+            }
+            $runAll.on('click', () => this.debugAdvance(session.index + 1, true));
+            $next.on('click', () => this.debugAdvance(session.index + 1, false));
+            ui.$actions.append($runAll, $next);
+        }
+    }
+
+    /** Executes ONE step (or the rest, with runAll) against the session's client-held context. */
+    private debugAdvance(index: number, runAll: boolean): void {
+        const session = this.debugSession;
+        if (!session || session.busy || session.done) {
+            return;
+        }
+        session.busy = true;
+        session.busyAction = runAll ? 'runAll' : 'next';
+        session.error = null;
+        this.updateDebugger();
+
+        this.apiFetch(routing.generate('aaxis_ontology_flow_debug_step'), 'POST', {
+            flowId: this.flow && this.flow.id ? this.flow.id : null,
+            steps: session.steps,
+            links: session.links,
+            input: session.input,
+            index,
+            // Only the HANDLE travels — the context itself stays server-side (a big context in
+            // the request body would exceed the web server's size limit).
+            contextKey: session.contextKey,
+            runAll
+        }).then(res => {
+            if (this.debugSession !== session) {
+                return; // the session was cancelled while the request ran
+            }
+            if (!res.ok || !res.data || !res.data.success) {
+                throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
+            }
+            session.context = res.data.context ?? {};
+            session.contextKey = res.data.contextKey || null;
+            session.index = Number(res.data.index);
+            session.total = Number(res.data.total);
+            session.done = Boolean(res.data.done);
+            session.statusLabel = `${res.data.step.name} (${session.index + 1}/${session.total})`;
+            this.markActiveDebugStep(String(res.data.step.id || ''));
+        }).catch((err: Error) => {
+            if (this.debugSession === session) {
+                session.error = err.message || __('aaxis.ontology.flow_editor.debug_error');
+            }
+        }).finally(() => {
+            if (this.debugSession === session) {
+                session.busy = false;
+                this.updateDebugger();
+            }
+        });
+    }
+
+    /**
+     * Run Now: the whole flow in ONE request. While it runs only the button spinner shows —
+     * the sidebar appears when the run FINISHES, holding the final context (or the failure).
+     */
+    private runFullSession(): void {
+        const session = this.debugSession;
+        if (!session) {
+            return;
+        }
+        session.busy = true;
+        const $button = this.$el.find('[data-role="debug"]');
         const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
-        $debug.prepend($spinner);
+        $button.prepend($spinner);
 
         this.apiFetch(routing.generate('aaxis_ontology_flow_debug'), 'POST', {
             // Writers stamp their upserts with this flow (null = never saved -> Manual fallback).
             flowId: this.flow && this.flow.id ? this.flow.id : null,
-            steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, config: s.config || null})),
-            links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
-            input
+            steps: session.steps,
+            links: session.links,
+            input: session.input
         }).then(res => {
+            if (this.debugSession !== session) {
+                return;
+            }
             if (!res.ok || !res.data || !res.data.success) {
                 throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
             }
-            this.showDebugResult(res.data.output);
+            session.context = res.data.output ?? {};
+            session.contextKey = res.data.contextKey || null;
+            session.done = true;
         }).catch((err: Error) => {
-            messenger.notificationFlashMessage('error', err.message || __('aaxis.ontology.flow_editor.debug_error'));
-        }).finally(() => {
-            $spinner.remove();
-            $debug.prop('disabled', false);
-        });
-    }
-
-    /** The accumulated output context as a collapsible JSON tree. */
-    private showDebugResult(output: any): void {
-        const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.debug_result_title'), width: '640px'});
-        const $content = dialog.open();
-        $content.append(renderJsonTree(output ?? {}));
-    }
-
-    /**
-     * Step-by-step debug: executes the step at `index` server-side (or everything left, with
-     * `runAll`) against the client-held context, then shows the state modal. Closing that modal
-     * without choosing (Cancel/Escape/backdrop) aborts the session — already-executed writers
-     * have queued their writes, that cannot be undone.
-     */
-    private stepDebug(input: Record<string, any>, index: number, context: Record<string, any> | null, runAll = false): void {
-        const $button = this.$el.find('[data-role="debug-step"]');
-        $button.prop('disabled', true);
-        const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
-        $button.prepend($spinner);
-
-        this.apiFetch(routing.generate('aaxis_ontology_flow_debug_step'), 'POST', {
-            flowId: this.flow && this.flow.id ? this.flow.id : null,
-            steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, config: s.config || null})),
-            links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
-            input, index, context, runAll
-        }).then(res => {
-            if (!res.ok || !res.data || !res.data.success) {
-                throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
+            if (this.debugSession === session) {
+                session.error = err.message || __('aaxis.ontology.flow_editor.debug_error');
             }
-            this.showStepState(res.data, input);
-        }).catch((err: Error) => {
-            messenger.notificationFlashMessage('error', err.message || __('aaxis.ontology.flow_editor.debug_error'));
         }).finally(() => {
             $spinner.remove();
-            $button.prop('disabled', false);
+            if (this.debugSession === session) {
+                session.busy = false;
+                this.buildDebugger();
+            }
         });
     }
 
     /**
-     * The after-step state modal: the context tree plus Cancel | Run all | Next step — or just
-     * Close once the last step ran (that view IS the final result).
+     * Evaluates the sidebar's DWL expression against the session's current variables; the result
+     * (or the engine's error) opens in a modal.
      */
-    private showStepState(state: any, input: Record<string, any>): void {
-        const done = Boolean(state.done);
-        const title = done
-            ? __('aaxis.ontology.flow_editor.debug_result_title')
-            : `${__('aaxis.ontology.flow_editor.debug_step_title')} — ${state.step.name} (${state.index + 1}/${state.total})`;
-        const dialog = new Dialog({title, width: '640px'});
-        const $content = dialog.open();
-        $content.append(renderJsonTree(state.context ?? {}));
-
-        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
-        if (done) {
-            const $close = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.close')});
-            $close.on('click', () => dialog.close());
-            $actions.append($close);
-        } else {
-            const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
-            const $runAll = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.debug_run_all')});
-            const $next = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.debug_next_step')});
-            $cancel.on('click', () => dialog.close());
-            $runAll.on('click', () => {
-                dialog.close();
-                this.stepDebug(input, state.index + 1, state.context, true);
-            });
-            $next.on('click', () => {
-                dialog.close();
-                this.stepDebug(input, state.index + 1, state.context, false);
-            });
-            $actions.append($cancel, $runAll, $next);
+    private evaluateDebugExpression(): void {
+        const session = this.debugSession;
+        const ui = this.debugUi;
+        if (!session || !ui || session.context === null) {
+            return;
         }
-        $content.append($actions);
+        const expression = ui.evalField.value().trim();
+        if (expression === '') {
+            return;
+        }
+        ui.$evalRun.prop('disabled', true);
+        this.apiFetch(routing.generate('aaxis_ontology_flow_debug_eval'), 'POST', {
+            expression,
+            contextKey: session.contextKey
+        }).then(res => {
+            const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.debug_eval_label'), width: '640px'});
+            const $content = dialog.open();
+            if (!res.ok || !res.data || !res.data.success) {
+                $content.append($('<p/>', {
+                    'class': 'aaxis-debug-eval-error',
+                    text: (res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error')
+                }));
+                return;
+            }
+            $content.append(renderJsonTree(res.data.output ?? null));
+        }).catch(() => {
+            messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.debug_error'));
+        }).finally(() => {
+            if (this.debugUi === ui) {
+                ui.$evalRun.prop('disabled', !(this.debugSession && this.debugSession.context !== null && !this.debugSession.busy));
+            }
+        });
+    }
+
+    /** Highlights the tile whose step just executed (null clears the marking). */
+    private markActiveDebugStep(stepId: string | null): void {
+        this.steps.forEach(s => s.el.classList.remove('is-debug-active'));
+        if (stepId !== null) {
+            const active = this.steps.find(s => s.id === stepId);
+            if (active) {
+                active.el.classList.add('is-debug-active');
+            }
+        }
+    }
+
+    private closeDebugSession(): void {
+        this.markActiveDebugStep(null);
+        this.$el.find('[data-role="debugger"]').prop('hidden', true).empty();
+        this.debugSession = null;
+        this.debugUi = null;
+        this.syncDebugButtons();
+        // The viewport regained the sidebar's width — the clamp keeps the toolbox consistent.
+        this.clampToolboxIntoView();
     }
 
     // --- Persistence -----------------------------------------------------------
@@ -2670,6 +3131,49 @@ class OntologyFlowEditorComponent extends BaseComponent {
         return match ? decodeURIComponent(match[1]) : '';
     }
 
+    // --- Settings catalogs (fetched once, kept in memory) ------------------------
+
+    /**
+     * Systems + entities for the step settings panel. Cached for the editor session: the panel is
+     * opened repeatedly and the data barely changes while a flow is being drawn.
+     *
+     * A FAILED request is not cached — the field is reset so the next open retries, instead of the
+     * panel being permanently broken by one hiccup. The caller keeps its own `.catch` for the
+     * user-facing message.
+     */
+    private entityCatalog(): Promise<any> {
+        this.catalogEntities ??= fetch(routing.generate('aaxis_ontology_entity_list'), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .catch((err: any) => {
+                this.catalogEntities = null;
+                throw err;
+            });
+
+        return this.catalogEntities;
+    }
+
+    /** Connectors for the reader/writer panel. Same caching contract as {@see entityCatalog}. */
+    private connectorCatalog(): Promise<any> {
+        this.catalogConnectors ??= fetch(routing.generate('aaxis_ontology_connector_list'), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .catch((err: any) => {
+                this.catalogConnectors = null;
+                throw err;
+            });
+
+        return this.catalogConnectors;
+    }
+
+    /**
+     * Warms both catalogs right after the editor loads, so even the FIRST settings panel opens
+     * without waiting on the network. Fire and forget: a failure here just leaves the cache empty
+     * and the real error surfaces (and retries) when a panel is actually opened.
+     */
+    private prefetchCatalogs(): void {
+        this.entityCatalog().catch(() => undefined);
+        this.connectorCatalog().catch(() => undefined);
+    }
+
     private apiFetch(url: string, method: string, body?: any): Promise<{ok: boolean; data: any}> {
         const opts: any = {
             method,
@@ -2688,7 +3192,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         this.$el.off('.aaxisFlowEditor');
         if (this.ghostDrag) {
-            this.ghostDrag.el.remove();
+            // el is null while a toolbox drag is armed but has not passed the drag threshold.
+            this.ghostDrag.el?.remove();
             this.ghostDrag = null;
         }
         if (this.linkDrag) {

@@ -44,7 +44,7 @@ class DwlTransformer
         $env = new Environment();
         StandardLibrary::register($env);
         // The whole binding set is also reachable as ONE object — the only way to scripts for
-        // keys that are not valid DWL identifiers, e.g. context["flow-uuid"]. Defined first so
+        // keys that are not valid DWL identifiers, e.g. hyphenated destinations via context["some-key"]. Defined first so
         // an actual "context" binding (a step destination named so) still wins.
         $env->define('context', $this->toValue($bindings));
         foreach ($bindings as $name => $value) {

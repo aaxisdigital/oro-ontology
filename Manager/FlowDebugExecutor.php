@@ -27,14 +27,14 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  *    token path and attaches the returned access_token; the step's operation/body are honoured);
  *    sftp/file_system connectors emit a placeholder note;
  *  - dwl_transform: runs the step's DataWeave script with the whole context as variables (also
- *    reachable as one `context` object, e.g. context["flow-uuid"]);
+ *    reachable as one `context` object, e.g. context["flowUuid"]);
  *  - writer/entity: performs the real upsert SYNCHRONOUSLY (same validation and PG function as
  *    the Data View "Add Data", but no queue), stamped with the flow being debugged (Manual only
  *    when the flow was never saved) and the execution uuid — the receipt carries the actual
  *    outcome ({uuid, count, upsert, changedIds}) and the event row completes on the spot;
  *  - everything else: no-op pass-through for now.
  *
- * Every TOP-LEVEL execution mints ONE uuid up front, seeded into the context as "flow-uuid": all
+ * Every TOP-LEVEL execution mints ONE uuid up front, seeded into the context as `flowUuid`: all
  * writes of the run share it, so their events/records group under a single identity. Sub-flows
  * never mint their own — their caller passes its uuid down (execute()'s $executionUuid).
  */
@@ -70,14 +70,20 @@ class FlowDebugExecutor
         $this->touchLastExecuted($flow);
 
         // One uuid identifies the WHOLE execution: every writer stamps its upsert with it (all
-        // events/records of a run group under it), and steps can read it from the context —
-        // DWL scripts via context["flow-uuid"] (a hyphen is not a valid DWL identifier).
+        // events/records of a run group under it), and steps can read it from the context as
+        // the flowUuid variable (a valid DWL identifier).
         // Minted only for a top-level run: a sub-flow inherits its caller's uuid via the param.
         $executionUuid ??= $this->dataApi->generateUuid();
 
         $context = $this->initialContext($order[0], $input, $executionUuid);
-        foreach ($order as $step) {
-            $this->executeStep($step, $context, $flow, $executionUuid);
+        try {
+            foreach ($order as $step) {
+                $this->executeStep($step, $context, $flow, $executionUuid);
+            }
+        } finally {
+            // finally, not a happy-path call: a failed run must still release the "running" state
+            // or the flow would be blocked from ever being scheduled again.
+            $this->touchLastFinished($flow);
         }
 
         return $context;
@@ -86,7 +92,7 @@ class FlowDebugExecutor
     /**
      * Step-by-step debug: executes the step at $index of the execution order (or from it to the
      * end when $runToEnd), starting from the CLIENT-HELD context accumulated by the previous
-     * steps. Index 0 seeds a fresh context — minting the run's flow-uuid — and ignores $context;
+     * steps. Index 0 seeds a fresh context — minting the run's flowUuid — and ignores $context;
      * later indexes require the passed context to still carry that uuid (writers keep stamping
      * it). Returns the new context plus progress metadata for the stepper UI.
      *
@@ -113,22 +119,30 @@ class FlowDebugExecutor
             $context = $this->initialContext($order[0], $input, $executionUuid);
         } else {
             $context = \is_array($context) ? $context : [];
-            $executionUuid = (string) ($context['flow-uuid'] ?? '');
+            $executionUuid = (string) ($context['flowUuid'] ?? '');
             if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $executionUuid)) {
-                throw new \RuntimeException('The debug context lost its flow-uuid — restart the debug session.');
+                throw new \RuntimeException('The debug context lost its flowUuid — restart the debug session.');
             }
         }
 
         $cursor = $index;
-        do {
-            $executed = $order[$cursor];
-            $this->executeStep($executed, $context, $flow, $executionUuid);
-            $cursor++;
-        } while ($runToEnd && $cursor < $total);
+        try {
+            do {
+                $executed = $order[$cursor];
+                $this->executeStep($executed, $context, $flow, $executionUuid);
+                $cursor++;
+            } while ($runToEnd && $cursor < $total);
+        } finally {
+            // Each call returns control to the user, so nothing is in flight BETWEEN debug steps —
+            // stamping every call (not just the last) keeps a paused debug session from looking
+            // like a run in progress and blocking the scheduler.
+            $this->touchLastFinished($flow);
+        }
 
         return [
             'context' => $context,
-            'step' => ['name' => $executed['name'], 'type' => $executed['type']],
+            // The id lets the editor highlight the tile that just executed.
+            'step' => ['id' => $executed['id'], 'name' => $executed['name'], 'type' => $executed['type']],
             'index' => $cursor - 1,
             'total' => $total,
             'done' => $cursor >= $total,
@@ -201,6 +215,22 @@ class FlowDebugExecutor
     }
 
     /**
+     * Stamps the flow's last_finished with "now" — called when a run ENDS, successfully or not
+     * (see the `finally` blocks). While last_finished trails last_executed the flow counts as
+     * running, which is what stops a second instance from being scheduled on top of it.
+     */
+    private function touchLastFinished(?OntologyFlow $flow): void
+    {
+        if ($flow === null || $flow->getId() === null) {
+            return;
+        }
+        $flow->setLastFinished(new \DateTime('now', new \DateTimeZone('UTC')));
+        $em = $this->doctrine->getManagerForClass(OntologyFlow::class);
+        $em->persist($flow);
+        $em->flush();
+    }
+
+    /**
      * The run's starting context: the execution uuid plus the trigger's event payload.
      *
      * @param array{type: string} $trigger
@@ -210,7 +240,7 @@ class FlowDebugExecutor
      */
     private function initialContext(array $trigger, array $input, string $executionUuid): array
     {
-        $context = ['flow-uuid' => $executionUuid];
+        $context = ['flowUuid' => $executionUuid];
         if ($trigger['type'] === 'entity_change' && \array_key_exists('payload', $input)) {
             $context['payload'] = $input['payload'];
         }

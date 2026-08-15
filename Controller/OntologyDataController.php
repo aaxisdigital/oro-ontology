@@ -27,7 +27,8 @@ use Symfony\Component\Routing\Attribute\Route;
  */
 class OntologyDataController extends AbstractController
 {
-    #[Route(path: '/data-view', name: 'aaxis_ontology_data_view')]
+    // expose: the Entities grid links here (?entity=…) via routing.generate() in TypeScript.
+    #[Route(path: '/data-view', name: 'aaxis_ontology_data_view', options: ['expose' => true])]
     #[Template('@AaxisOntology/Data/index.html.twig')]
     #[Acl(id: 'aaxis_ontology_data_view', type: 'entity', class: OntologyData::class, permission: 'VIEW')]
     public function indexAction(): array

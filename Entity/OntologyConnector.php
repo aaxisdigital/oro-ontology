@@ -17,6 +17,8 @@ use Oro\Bundle\EntityConfigBundle\Metadata\Attribute\Config;
  * - sftp:        {server, port, user, auth: none|password|key, password?, key?}
  * - rest_api:    {server, port?, headers{}, auth: none|headers|oauth,
  *                 auth_headers{}?, oauth: {path, headers{}, body{}}?}
+ * - database:    shape TBD — selectable, but its Configure form is not defined yet
+ * - bucket:      shape TBD — selectable, but its Configure form is not defined yet
  *
  * Secret values inside the config (passwords, keys, Authorization headers, ...) are stored
  * in clear but NEVER rendered — every read path masks them with the ******** sentinel and
@@ -38,8 +40,16 @@ class OntologyConnector
     public const string TYPE_SFTP = 'sftp';
     public const string TYPE_REST_API = 'rest_api';
     public const string TYPE_FILE_SYSTEM = 'file_system';
+    public const string TYPE_DATABASE = 'database';
+    public const string TYPE_BUCKET = 'bucket';
 
-    public const array TYPES = [self::TYPE_SFTP, self::TYPE_REST_API, self::TYPE_FILE_SYSTEM];
+    public const array TYPES = [
+        self::TYPE_SFTP,
+        self::TYPE_REST_API,
+        self::TYPE_FILE_SYSTEM,
+        self::TYPE_DATABASE,
+        self::TYPE_BUCKET,
+    ];
 
     #[ORM\Id]
     #[ORM\Column(name: 'id', type: Types::INTEGER)]

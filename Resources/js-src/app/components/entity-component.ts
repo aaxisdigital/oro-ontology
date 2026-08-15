@@ -60,20 +60,36 @@ class OntologyEntityComponent extends BaseComponent {
     private oroEntities: SelectOption[] | null = null;
     /** Cache of an OroCommerce entity class -> its selectable fields. */
     private oroFieldsByEntity: Record<string, OroField[]> = {};
+    /**
+     * `?system=` seeds the grid filter once; later refreshes must not re-impose it. Declared with
+     * `!` and assigned in initialize() — a field initializer would run AFTER the base constructor
+     * has already called initialize() (see CommonBundle/CLAUDE.md).
+     */
+    private systemFilterApplied!: boolean;
 
     initialize(options: OntologyEntityOptions): void {
         this.$el = options._sourceElement;
         this.opts = options;
+        this.systemFilterApplied = false;
 
         // The DWL playground is read-only (it evaluates, never writes), so viewing the page is
         // enough — and it leads the action list, before the edit/delete icons.
         const actions: GridAction[] = [
-            {key: 'dwl', label: __('aaxis.ontology.dwl.action'), badge: 'dwl'}
+            {key: 'dwl', label: __('aaxis.ontology.dwl.action'), badge: 'dwl'},
+            {key: 'data', label: __('aaxis.ontology.entity_manager.view_data'), icon: 'fa-table'}
         ];
         if (options.canUpdate) {
             actions.push({key: 'edit', label: __('aaxis.common.grid.edit'), icon: 'fa-pencil'});
         }
         if (options.canDelete) {
+            // Erasing records keeps the entity — sits between edit and delete, and is disabled when
+            // there is nothing to erase.
+            actions.push({
+                key: 'purge', label: __('aaxis.ontology.entity_manager.purge_title'), icon: 'fa-eraser',
+                variant: 'danger',
+                disabled: (row: EntityRecord) => !row.recordCount,
+                disabledTitle: __('aaxis.ontology.entity_manager.purge_empty')
+            });
             actions.push({key: 'delete', label: __('aaxis.common.grid.delete'), icon: 'fa-trash-o', variant: 'danger'});
         }
 
@@ -130,9 +146,27 @@ class OntologyEntityComponent extends BaseComponent {
                 });
                 this.datatypes = data.datatypes || [];
                 this.grid.setRows(data.entities || []);
+                this.applySystemFromUrl();
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.entity_manager.load_error')))
             .finally(() => this.setBusy(false));
+    }
+
+    /**
+     * Honours `?system=<name>` (the Systems page's "View entities" action links here) by
+     * pre-applying it as the systemName column's filter. Applied once, after the first load, so a
+     * Refresh doesn't re-impose a filter the user cleared — same contract as the Data View's
+     * `?entity=`.
+     */
+    private applySystemFromUrl(): void {
+        if (this.systemFilterApplied) {
+            return;
+        }
+        this.systemFilterApplied = true;
+        const system = new URLSearchParams(window.location.search).get('system');
+        if (system !== null && system.trim() !== '') {
+            this.grid.setFilter('systemName', {operator: 'equals', value: system.trim()});
+        }
     }
 
     private renderAttributesCell(row: EntityRecord): any {
@@ -146,7 +180,84 @@ class OntologyEntityComponent extends BaseComponent {
             this.remove(row);
         } else if (action === 'dwl') {
             this.openDwlPlayground(row);
+        } else if (action === 'data') {
+            this.openDataView(row);
+        } else if (action === 'purge') {
+            this.confirmPurge(row);
         }
+    }
+
+    /**
+     * Confirms erasing every stored record of an entity. Deliberately worded like the delete-entity
+     * confirmation — it is equally irreversible — while making clear the ENTITY itself stays.
+     */
+    private confirmPurge(entity: EntityRecord): void {
+        const dialog = new Dialog({title: __('aaxis.ontology.entity_manager.purge_title'), width: '520px'});
+        const $content = dialog.open();
+
+        const $body = $('<div/>', {'class': 'aaxis-ontology-confirm'});
+        $body.append($('<p/>', {
+            'class': 'aaxis-ontology-confirm__q',
+            text: __('aaxis.ontology.entity_manager.confirm_purge', {
+                name: entity.displayName || entity.name
+            })
+        }));
+        $body.append($('<p/>', {
+            'class': 'aaxis-ontology-confirm__danger',
+            text: __('aaxis.ontology.entity_manager.purge_data_warning', {
+                count: String(entity.recordCount || 0)
+            })
+        }));
+        $body.append($('<p/>', {text: __('aaxis.ontology.entity_manager.purge_keeps_entity')}));
+
+        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('Cancel')});
+        const $confirm = $('<button/>', {
+            type: 'button', 'class': 'btn aaxis-ontology-confirm__delete',
+            text: __('aaxis.ontology.entity_manager.purge_confirm')
+        });
+        $actions.append($cancel, $confirm);
+        $body.append($actions);
+        $content.append($body);
+
+        $cancel.on('click', () => dialog.close());
+        $confirm.on('click', () => {
+            $confirm.prop('disabled', true);
+            this.doPurge(entity, () => dialog.close());
+        });
+    }
+
+    private doPurge(entity: EntityRecord, done: () => void): void {
+        this.setBusy(true);
+        this.apiFetch(routing.generate('aaxis_ontology_entity_purge_records', {id: entity.id}), 'DELETE')
+            .then(res => {
+                if (!res.ok || !res.data || res.data.success !== true) {
+                    messenger.notificationFlashMessage(
+                        'error',
+                        (res.data && res.data.message) || __('aaxis.ontology.entity_manager.purge_error')
+                    );
+                    return;
+                }
+                messenger.notificationFlashMessage('success', __('aaxis.ontology.entity_manager.purged', {
+                    count: String(res.data.deleted ?? 0)
+                }));
+                this.load();
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.entity_manager.purge_error')))
+            .finally(() => {
+                this.setBusy(false);
+                done();
+            });
+    }
+
+    /**
+     * Opens the Data View pre-filtered to this entity. The name (not the id) is passed because that
+     * is what the Data View grid's `entity` column holds — the page turns it into a column filter.
+     */
+    private openDataView(row: EntityRecord): void {
+        const url = routing.generate('aaxis_ontology_data_view')
+            + '?entity=' + encodeURIComponent(String(row.name || ''));
+        window.location.assign(url);
     }
 
     /** Opens the DataWeave playground over this entity's stored records. */

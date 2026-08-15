@@ -48,6 +48,9 @@ interface VersionEntry {
  * Data View page built on the reusable DataGrid widget, with an "Add Data" form.
  */
 class OntologyDataViewComponent extends BaseComponent {
+    /** Counter used to give each versions dialog its own datalist id. */
+    private static dialogSeq = 0;
+
     private $el!: any;
     private grid!: DataGrid;
     private systems: SystemRef[] = [];
@@ -64,9 +67,16 @@ class OntologyDataViewComponent extends BaseComponent {
     private $addPayload: any = null;
     private $addPayloadError: any = null;
     private $addSubmit: any = null;
+    /**
+     * `?entity=` seeds the grid filter once; later refreshes must not re-impose it.
+     * Declared with `!` and assigned in initialize() — a field initializer would run AFTER the base
+     * constructor has already called initialize() (see CommonBundle/CLAUDE.md).
+     */
+    private entityFilterApplied!: boolean;
 
     initialize(options: OntologyDataViewOptions): void {
         this.$el = options._sourceElement;
+        this.entityFilterApplied = false;
 
         this.grid = new DataGrid({
             columns: [
@@ -157,20 +167,57 @@ class OntologyDataViewComponent extends BaseComponent {
         // search toolbar and copy button stay visible while only the JSON view scrolls.
         $content.addClass('aaxis-json-dialog');
 
-        // Version combobox (decreasing order, "version - updated at - uuid").
-        const $select = $('<select/>', {'class': 'form-control aaxis-json-version__select', 'data-role': 'version'});
-        versions.forEach((v, index) => {
-            const label = [
-                'v' + v.version,
-                this.renderDate(v.updatedAt),
-                v.uuid || ''
-            ].filter(part => part !== '').join(' — ') + (v.current ? '  (' + __('aaxis.ontology.data_view.version_current') + ')' : '');
-            $select.append($('<option/>', {value: String(index), text: label}));
+        // Version picker. Deliberately an editable box holding ONLY the current selection instead
+        // of a list of every version: the option list would grow with the record's history, while
+        // jumping is done by typing a version number or a uuid (looked up below) or by dragging the
+        // slider. The two controls mirror each other.
+        const $select = $('<input/>', {
+            type: 'text', 'class': 'form-control aaxis-json-version__select', 'data-role': 'version',
+            autocomplete: 'off', spellcheck: false,
+            title: __('aaxis.ontology.data_view.version_search_hint'),
+            placeholder: __('aaxis.ontology.data_view.version_search_placeholder')
+        });
+        const $versionError = $('<span/>', {'class': 'aaxis-json-version__error', role: 'alert'});
+        // "/ 12" — how many versions exist, so the box reads as "this one out of that many".
+        const $versionCount = $('<span/>', {
+            'class': 'aaxis-json-version__count',
+            text: '/ ' + versions.length
         });
         const $selectField = $('<div/>', {'class': 'aaxis-json-version'}).append(
             $('<label/>', {'class': 'aaxis-json-version__label', text: __('aaxis.ontology.data_view.version')}),
-            $select
+            $select,
+            $versionCount,
+            $versionError
         );
+
+        // Slider: one stop per version, oldest on the left so dragging right moves forward in time.
+        // Its value is the distance from the OLDEST version; `versions` is newest-first, so the two
+        // are mirror images of each other (see toIndex/toSlider). Tick marks (one per version) make
+        // the number of versions readable at a glance; it is a POSITION picker, not a progress bar,
+        // so the track is not filled up to the thumb.
+        const lastIndex = versions.length - 1;
+        // Unique per open: a datalist is referenced by id, so a stale one from a previous dialog
+        // must never be the one the browser resolves.
+        const stopsId = 'aaxis-json-version-stops-' + (++OntologyDataViewComponent.dialogSeq);
+        const $slider = $('<input/>', {
+            type: 'range', 'class': 'aaxis-json-version__slider', min: 0, max: lastIndex, step: 1,
+            list: stopsId,
+            'aria-label': __('aaxis.ontology.data_view.version_slider')
+        });
+        const $stops = $('<datalist/>', {id: stopsId});
+        versions.forEach((_v, i) => $stops.append($('<option/>', {value: String(i)})));
+        // Tick spacing is per record (one mark per version), so the stylesheet reads it from here.
+        if (lastIndex > 0) {
+            $slider.css('--tick-gap', (100 / lastIndex) + '%');
+        }
+        const $sliderField = $('<div/>', {'class': 'aaxis-json-slider'}).append(
+            $('<span/>', {'class': 'aaxis-json-slider__end', text: 'v' + (versions[lastIndex].version ?? '')}),
+            $slider,
+            $stops,
+            $('<span/>', {'class': 'aaxis-json-slider__end', text: 'v' + (versions[0].version ?? '')})
+        );
+        const toIndex = (sliderValue: number): number => lastIndex - sliderValue;
+        const toSlider = (index: number): number => lastIndex - index;
 
         // Search toolbar (same behaviour as the payload preview).
         const $search = $('<input/>', {
@@ -186,8 +233,19 @@ class OntologyDataViewComponent extends BaseComponent {
             type: 'button', 'class': 'aaxis-json-search__nav', title: __('aaxis.ontology.data_view.search_next'),
             'aria-label': __('aaxis.ontology.data_view.search_next')
         }).append($('<span/>', {'class': 'fa fa-chevron-down', 'aria-hidden': 'true'}));
-        const $searchGroup = $('<div/>', {'class': 'aaxis-json-search'}).append($search, $count, $prev, $next);
-        const $toolbar = $('<div/>', {'class': 'aaxis-json-toolbar'}).append($searchGroup);
+        // Full view ⇄ diff only. Sits before the search box, since it decides WHAT is searchable.
+        const $diffToggle = $('<input/>', {type: 'checkbox', 'class': 'aaxis-json-mode__check'});
+        const $mode = $('<label/>', {
+            'class': 'aaxis-json-mode', title: __('aaxis.ontology.data_view.diff_only_hint')
+        }).append(
+            $diffToggle,
+            $('<span/>', {'class': 'aaxis-json-mode__track', 'aria-hidden': 'true'})
+                .append($('<span/>', {'class': 'aaxis-json-mode__thumb'})),
+            $('<span/>', {'class': 'aaxis-json-mode__label', text: __('aaxis.ontology.data_view.diff_only')})
+        );
+
+        const $searchGroup = $('<div/>', {'class': 'aaxis-json-search'})
+            .append($mode, $search, $count, $prev, $next);
 
         const $pre = $('<pre/>', {'class': 'aaxis-json-view'});
 
@@ -195,9 +253,17 @@ class OntologyDataViewComponent extends BaseComponent {
             $('<span/>', {'class': 'fa fa-clipboard', 'aria-hidden': 'true'}),
             $('<span/>', {text: ' ' + __('aaxis.ontology.data_view.copy')})
         );
-        const $footer = $('<div/>', {'class': 'aaxis-json-footer'}).append($copy);
+        // Search and Copy share the bottom row: both act on the JSON above them, so they belong
+        // together under it rather than split across the top and bottom of the dialog.
+        const $footer = $('<div/>', {'class': 'aaxis-json-footer aaxis-json-footer--tools'})
+            .append($searchGroup, $copy);
 
-        $content.append($selectField, $toolbar, $pre, $footer);
+        // A single-version record has nothing to navigate between — no slider at all.
+        $content.append($selectField);
+        if (versions.length > 1) {
+            $content.append($sliderField);
+        }
+        $content.append($pre, $footer);
 
         // --- Rendering + search state ---------------------------------------
         let baseHtml = '';
@@ -230,16 +296,47 @@ class OntologyDataViewComponent extends BaseComponent {
             }
         };
 
+        // The selection lives here (not in the input's value) because the input is free text the
+        // user may be mid-way through typing.
+        let selectedIndex = 0;
+
+        /** Label shown in the box for a version: "v3 — 12/05/2026 14:22 — <uuid>  (current)". */
+        const versionLabel = (v: VersionEntry): string => [
+            'v' + v.version,
+            this.renderDate(v.updatedAt),
+            v.uuid || ''
+        ].filter(part => part !== '').join(' — ')
+            + (v.current ? '  (' + __('aaxis.ontology.data_view.version_current') + ')' : '');
+
+        /** A muted one-liner in the JSON pane (nothing to diff / nothing changed). */
+        const note = (text: string): string =>
+            '<span class="aaxis-json-note">' + this.escapeHtml(text) + '</span>';
+
         const renderSelected = (): void => {
-            const idx = Number($select.val()) || 0;
+            const idx = selectedIndex;
             const selected = versions[idx];
             const selectedPayload = selected.payload || {};
+            const diffOnly = $diffToggle.is(':checked');
             plainText = JSON.stringify(selectedPayload, null, 2);
             // In the DESC-ordered list, the immediately previous (older) version is the next index.
             const previous = versions[idx + 1];
+
             if (!previous) {
-                // Oldest version: no previous to compare against, so no markers.
-                baseHtml = this.highlightJson(plainText);
+                // Oldest version: no previous to compare against, so no markers — and nothing a
+                // diff-only view could show.
+                baseHtml = diffOnly
+                    ? note(__('aaxis.ontology.data_view.diff_no_previous'))
+                    : this.highlightJson(plainText);
+            } else if (diffOnly) {
+                const pruned = this.pruneToDiff(selectedPayload, previous.payload || {});
+                if (pruned === null) {
+                    baseHtml = note(__('aaxis.ontology.data_view.diff_no_changes'));
+                    plainText = '';
+                } else {
+                    baseHtml = this.renderVersionDiffHtml(pruned.sel, pruned.prev);
+                    // Copy follows what is on screen.
+                    plainText = JSON.stringify(pruned.sel, null, 2);
+                }
             } else {
                 baseHtml = this.renderVersionDiffHtml(selectedPayload, previous.payload || {});
             }
@@ -247,7 +344,76 @@ class OntologyDataViewComponent extends BaseComponent {
             runSearch();
         };
 
-        $select.on('change', () => renderSelected());
+        /** Single entry point for changing version: keeps box, slider and JSON in lockstep. */
+        const select = (index: number): void => {
+            selectedIndex = Math.min(Math.max(index, 0), lastIndex);
+            $select.val(versionLabel(versions[selectedIndex]));
+            $slider.val(String(toSlider(selectedIndex)));
+            $versionError.text('');
+            renderSelected();
+        };
+
+        /**
+         * Resolves what the user typed to a version: a bare number matches the version number
+         * (a leading "v" is tolerated), anything else is matched against the uuid — full or a
+         * unique prefix, so pasting a partial id works. Returns -1 when nothing matches.
+         */
+        const findVersion = (raw: string): number => {
+            const query = raw.trim().toLowerCase();
+            if (query === '') {
+                return -1;
+            }
+            const asNumber = query.replace(/^v/, '');
+            if (/^\d+$/.test(asNumber)) {
+                const byNumber = versions.findIndex(v => String(v.version) === asNumber);
+                if (byNumber >= 0) {
+                    return byNumber;
+                }
+            }
+            const exact = versions.findIndex(v => (v.uuid || '').toLowerCase() === query);
+            if (exact >= 0) {
+                return exact;
+            }
+            const partial = versions.filter(v => (v.uuid || '').toLowerCase().startsWith(query));
+
+            return partial.length === 1 ? versions.indexOf(partial[0]) : -1;
+        };
+
+        const commitVersionSearch = (): void => {
+            const raw = String($select.val() || '');
+            // Unchanged text (the label we put there) is not a search — just restore it.
+            if (raw === versionLabel(versions[selectedIndex])) {
+                return;
+            }
+            const found = findVersion(raw);
+            if (found >= 0) {
+                select(found);
+            } else {
+                $versionError.text(__('aaxis.ontology.data_view.version_not_found'));
+            }
+        };
+
+        $select.on('keydown', (e: any) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                commitVersionSearch();
+            }
+        });
+        // Leaving the box without a match would strand a half-typed query on screen — put the
+        // current version's label back so the box always reflects what is displayed.
+        $select.on('blur', () => {
+            const raw = String($select.val() || '');
+            if (raw !== versionLabel(versions[selectedIndex])) {
+                commitVersionSearch();
+                if ($versionError.text() !== '') {
+                    $select.val(versionLabel(versions[selectedIndex]));
+                }
+            }
+        });
+        $select.on('focus', () => $select.trigger('select'));
+        $slider.on('input', () => select(toIndex(Number($slider.val()))));
+        $diffToggle.on('change', () => renderSelected());
+
         $search.on('input', () => runSearch());
         $search.on('keydown', (e: any) => {
             if (e.key === 'Enter') {
@@ -259,7 +425,7 @@ class OntologyDataViewComponent extends BaseComponent {
         $next.on('click', () => setCurrent(current_match + 1));
         $copy.on('click', () => this.copyToClipboard(plainText));
 
-        renderSelected();
+        select(0);
     }
 
     /**
@@ -270,6 +436,55 @@ class OntologyDataViewComponent extends BaseComponent {
      */
     private renderVersionDiffHtml(selected: any, previous: any): string {
         return this.renderValueDiff(selected, previous, 0);
+    }
+
+    /**
+     * Reduces a pair of snapshots to only what differs, so "diff only" can reuse the normal diff
+     * renderer and still emit VALID json (filtering the rendered lines would cut multi-line
+     * highlight spans in half).
+     *
+     * Objects are pruned key by key, recursively. Arrays and scalars are kept WHOLE when they
+     * differ — pruning array elements would renumber the indexes and misrepresent the data.
+     * Returns null when the two snapshots are identical.
+     */
+    private pruneToDiff(sel: any, prev: any): {sel: any; prev: any} | null {
+        if (JSON.stringify(sel) === JSON.stringify(prev)) {
+            return null;
+        }
+        if (!this.isPlainObject(sel) || !this.isPlainObject(prev)) {
+            return {sel, prev};
+        }
+
+        const outSel: Record<string, any> = {};
+        const outPrev: Record<string, any> = {};
+        const keys: string[] = Object.keys(sel);
+        Object.keys(prev).forEach(key => {
+            if (!keys.includes(key)) {
+                keys.push(key);
+            }
+        });
+
+        keys.forEach(key => {
+            // hasOwnProperty via call, not Object.hasOwn: the build targets ES2020.
+            const hasSel = Object.prototype.hasOwnProperty.call(sel, key);
+            const hasPrev = Object.prototype.hasOwnProperty.call(prev, key);
+            if (hasSel && hasPrev) {
+                const branch = this.pruneToDiff(sel[key], prev[key]);
+                if (branch !== null) {
+                    outSel[key] = branch.sel;
+                    outPrev[key] = branch.prev;
+                }
+                return;
+            }
+            // Added (renders highlighted) or removed (renders struck through).
+            if (hasSel) {
+                outSel[key] = sel[key];
+            } else {
+                outPrev[key] = prev[key];
+            }
+        });
+
+        return {sel: outSel, prev: outPrev};
     }
 
     /**
@@ -784,9 +999,27 @@ class OntologyDataViewComponent extends BaseComponent {
                 this.systems = data.systems || [];
                 this.entities = data.entities || [];
                 this.grid.setRows(data.records || []);
+                this.applyEntityFromUrl();
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.data_view.load_error')))
             .finally(() => this.setBusy(false));
+    }
+
+    /**
+     * Honours `?entity=<name>` (the Entities page's "View data" action links here) by pre-applying
+     * it as the entity column's filter, so the deep link lands on that entity's records with the
+     * filter visible and clearable like any other. Applied once, after the first load — it seeds the
+     * view rather than pinning it, so Refresh doesn't re-impose a filter the user cleared.
+     */
+    private applyEntityFromUrl(): void {
+        if (this.entityFilterApplied) {
+            return;
+        }
+        this.entityFilterApplied = true;
+        const entity = new URLSearchParams(window.location.search).get('entity');
+        if (entity !== null && entity.trim() !== '') {
+            this.grid.setFilter('entity', {operator: 'equals', value: entity.trim()});
+        }
     }
 
     private renderDate(value: string | null): string {
