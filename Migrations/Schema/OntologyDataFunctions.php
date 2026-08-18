@@ -246,6 +246,14 @@ SQL;
     /**
      * Validates an inbound Ontology data flow message and upserts the records into aaxis_ontology_data,
      * archiving the previous values of changed keys into aaxis_ontology_data_history.
+     *
+     * VERSION CONTINUITY: a record's version numbering continues after whatever its history table
+     * already holds — a fresh INSERT starts at max(history)+1, and an UPDATE archives at
+     * GREATEST(live, max(history)+1). A clean record chain behaves exactly as before (insert = 1,
+     * archive = live, live + 1); the GREATEST only bites when history from a PREVIOUS generation of
+     * the same unique id survived a delete/reload (the pre-v1_10 purge kept history rows), which
+     * used to violate the (entity_id, unique_id, version) unique index and silently abort the
+     * whole batch from inside the async consumer.
      */
     public static function dataUpsert(): string
     {
@@ -275,6 +283,8 @@ DECLARE
     v_diff jsonb;
     v_history_diff jsonb;
     v_new_payload jsonb;
+    v_max_history int;
+    v_archive_version int;
 BEGIN
     v_flow_raw   := p_input -> 'flow_id';
     v_uuid       := p_input ->> 'uuid';
@@ -351,12 +361,20 @@ BEGIN
         FROM aaxis_ontology_data d
         WHERE d.entity_id = v_entity_id AND d.unique_id = v_uid;
 
-        IF NOT FOUND THEN
+        -- Version continuity: numbering always continues after this unique id's surviving history
+        -- (0 when there is none), so a re-created record can never re-issue an archived version.
+        -- NOTE: this SELECT resets FOUND, so record existence is checked via v_existing_id
+        -- (SELECT INTO nulls its targets when the data row above did not match).
+        SELECT COALESCE(MAX(h.version), 0) INTO v_max_history
+        FROM aaxis_ontology_data_history h
+        WHERE h.entity_id = v_entity_id AND h.unique_id = v_uid;
+
+        IF v_existing_id IS NULL THEN
             INSERT INTO aaxis_ontology_data (entity_id, unique_id, uuid, version, payload, updated_at)
-            VALUES (v_entity_id, v_uid, v_uuid, 1, v_item, v_updated_at);
+            VALUES (v_entity_id, v_uid, v_uuid, v_max_history + 1, v_item, v_updated_at);
 
             v_changes := v_changes || jsonb_build_object(
-                v_uid, jsonb_build_object('uuid', v_uuid, 'payload', v_item, 'version', 1)
+                v_uid, jsonb_build_object('uuid', v_uuid, 'payload', v_item, 'version', v_max_history + 1)
             );
         ELSIF v_existing_payload @> v_item THEN
             v_changes := v_changes || jsonb_build_object(v_uid, 'null'::jsonb);
@@ -364,8 +382,10 @@ BEGIN
             v_diff := aaxis_ontology_jsonb_diff(v_existing_payload, v_item);
             v_history_diff := aaxis_ontology_jsonb_diff_previous(v_existing_payload, v_item);
 
+            v_archive_version := GREATEST(v_existing_version, v_max_history + 1);
+
             INSERT INTO aaxis_ontology_data_history (entity_id, unique_id, uuid, version, payload, updated_at)
-            VALUES (v_entity_id, v_uid, v_existing_uuid, v_existing_version, v_history_diff, v_existing_updated_at);
+            VALUES (v_entity_id, v_uid, v_existing_uuid, v_archive_version, v_history_diff, v_existing_updated_at);
 
             v_new_payload := aaxis_ontology_jsonb_deep_merge(v_existing_payload, v_item);
 
@@ -373,11 +393,11 @@ BEGIN
             SET payload = v_new_payload,
                 uuid = v_uuid,
                 updated_at = v_updated_at,
-                version = v_existing_version + 1
+                version = v_archive_version + 1
             WHERE id = v_existing_id;
 
             v_changes := v_changes || jsonb_build_object(
-                v_uid, jsonb_build_object('uuid', v_uuid, 'payload', v_diff, 'version', v_existing_version + 1)
+                v_uid, jsonb_build_object('uuid', v_uuid, 'payload', v_diff, 'version', v_archive_version + 1)
             );
         END IF;
     END LOOP;

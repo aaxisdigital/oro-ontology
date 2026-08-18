@@ -59,7 +59,10 @@ class FlowStepValidator
     }
 
     /**
-     * Every problem with an already-normalized step list, as translated messages (empty = valid).
+     * Every problem with an already-normalized step list, as translated messages (empty = valid) —
+     * structural problems plus every per-step one. This FULL bar still gates imports and RUNS
+     * ({@see FlowDebugExecutor}); saving is gentler ({@see structuralErrors}): incomplete steps may
+     * be stored, they just render red in the editor and keep the flow from running.
      *
      * @param array<int, array<string, mixed>> $steps
      *
@@ -67,30 +70,54 @@ class FlowStepValidator
      */
     public function validate(array $steps): array
     {
-        $errors = [];
+        return array_merge($this->structuralErrors($steps), array_values($this->stepErrors($steps)));
+    }
 
+    /**
+     * The problems that BLOCK a save: only what would corrupt the definition itself (duplicate
+     * step names — links and configs address steps by name downstream).
+     *
+     * @param array<int, array<string, mixed>> $steps
+     *
+     * @return array<int, string>
+     */
+    public function structuralErrors(array $steps): array
+    {
         $stepNames = array_map(static fn (array $s) => mb_strtolower((string) $s['name']), $steps);
-        if (\count($stepNames) !== \count(array_unique($stepNames))) {
-            $errors[] = $this->trans('step_names_unique');
-        }
 
-        // A step's config is optional (unconfigured steps may be saved mid-design), but a PRESENT
-        // config must be complete and valid for its type.
+        return \count($stepNames) !== \count(array_unique($stepNames))
+            ? [$this->trans('step_names_unique')]
+            : [];
+    }
+
+    /**
+     * Per-step problems, keyed by STEP NAME (first problem per step): an incomplete/invalid config,
+     * an invalid cron expression or unparseable DWL. A step's config is optional (unconfigured
+     * steps may be saved mid-design), but a PRESENT config must be complete and valid for its type.
+     *
+     * @param array<int, array<string, mixed>> $steps
+     *
+     * @return array<string, string>
+     */
+    public function stepErrors(array $steps): array
+    {
+        $errors = [];
         foreach ($steps as $step) {
+            $name = (string) $step['name'];
             $expression = $step['config']['expression'] ?? null;
             if ($step['type'] === 'cron' && $expression !== null
                 && !CronExpression::isValidExpression((string) $expression)
             ) {
-                $errors[] = $this->trans('invalid_cron', ['{{ name }}' => $step['name']]);
+                $errors[$name] ??= $this->trans('invalid_cron', ['{{ name }}' => $name]);
             }
             if (!$this->isStepConfigValid($step)) {
-                $errors[] = $this->trans('invalid_step_config', ['{{ name }}' => $step['name']]);
+                $errors[$name] ??= $this->trans('invalid_step_config', ['{{ name }}' => $name]);
             }
             foreach ($this->stepDwlSnippets($step) as $snippet) {
                 $dwlError = $this->dwl->validate($snippet);
                 if ($dwlError !== null) {
-                    $errors[] = $this->trans('invalid_dwl', [
-                        '{{ name }}' => $step['name'],
+                    $errors[$name] ??= $this->trans('invalid_dwl', [
+                        '{{ name }}' => $name,
                         '{{ error }}' => $dwlError,
                     ]);
                 }
@@ -98,6 +125,19 @@ class FlowStepValidator
         }
 
         return $errors;
+    }
+
+    /**
+     * The names of the steps whose configuration keeps the flow from RUNNING — what the editor
+     * paints with a red border.
+     *
+     * @param array<int, array<string, mixed>> $steps
+     *
+     * @return array<int, string>
+     */
+    public function invalidStepNames(array $steps): array
+    {
+        return array_keys($this->stepErrors($steps));
     }
 
     private function stepDwlSnippets(array $step): array
@@ -110,15 +150,26 @@ class FlowStepValidator
         if ($step['type'] === 'dwl_transform' && \is_string($config['code'] ?? null) && trim($config['code']) !== '') {
             $snippets[] = $config['code'];
         }
-        if (\in_array($step['type'], ['reader', 'writer'], true) && ($config['body_dwl'] ?? false) === true
+        if ($step['type'] === 'invoke' && ($config['body_dwl'] ?? false) === true
             && \is_string($config['body_content'] ?? null) && trim($config['body_content']) !== ''
         ) {
             $snippets[] = $config['body_content'];
         }
-        if ($step['type'] === 'writer' && ($config['content_dwl'] ?? false) === true
+        if (\in_array($step['type'], ['entity_write', 'file_write'], true) && ($config['content_dwl'] ?? false) === true
             && \is_string($config['content'] ?? null) && trim($config['content']) !== ''
         ) {
             $snippets[] = $config['content'];
+        }
+        // File Operations: the path (all five) and the rename's new name are DWL-capable too.
+        if (str_starts_with($step['type'], 'file_') && ($config['path_dwl'] ?? false) === true
+            && \is_string($config['path'] ?? null) && trim($config['path']) !== ''
+        ) {
+            $snippets[] = $config['path'];
+        }
+        if ($step['type'] === 'file_rename' && ($config['new_name_dwl'] ?? false) === true
+            && \is_string($config['new_name'] ?? null) && trim($config['new_name']) !== ''
+        ) {
+            $snippets[] = $config['new_name'];
         }
         if ($step['type'] === 'choice' && \is_string($config['expression'] ?? null) && trim($config['expression']) !== '') {
             $snippets[] = $config['expression'];
@@ -160,6 +211,29 @@ class FlowStepValidator
             && $enumOk('body', ['empty', 'json', 'text', 'xml'])
             && $boolOk('body_dwl');
 
+        // The entity READ rules — shared by the generic reader's entity variant and the typed
+        // entity_read step (identical config, minus the reader discriminator).
+        $entityReadOk = static fn (): bool =>
+            $filled('system') && $filled('entity')
+            && $enumOk('mode', ['all', 'by_id', 'by_attribute'])
+            && (($config['mode'] ?? 'all') !== 'by_id' || $filled('record_id'))
+            // "By attribute" carries the attribute to compare and the value to match.
+            && (($config['mode'] ?? 'all') !== 'by_attribute'
+                || ($filled('attribute') && $filled('attr_value')))
+            // "All" extras, each optional: order_by attribute (+ direction) and limit.
+            && (!isset($config['order_by']) || \is_string($config['order_by']))
+            && $enumOk('order_dir', ['asc', 'desc'])
+            && $enumOk('limit', [1, 10, 100, 1000]);
+
+        // The entity WRITE rules — shared by the generic writer's entity variant and entity_write.
+        $entityWriteOk = static fn (): bool =>
+            $filled('system') && $filled('entity') && $filled('content') && $boolOk('content_dwl');
+
+        // File Operations share a connector + DWL-capable path core.
+        $fileOpOk = static fn (): bool =>
+            is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
+            && $filled('path') && $boolOk('path_dwl');
+
         return match ($step['type']) {
             // Schedule: interval (value + unit) or cron (expression; also the LEGACY shape, which
             // carries no mode). Expression syntax is checked separately with Cron\CronExpression.
@@ -174,33 +248,14 @@ class FlowStepValidator
             // stepDwlSnippets); the branch links live in the design, not here.
             'choice' => $filled('expression'),
             'dwl_transform' => $filled('code') && $destinationOk(),
-            'reader' => $destinationOk()
-                && match ($config['reader'] ?? null) {
-                    'entity' => $filled('system') && $filled('entity')
-                        && $enumOk('mode', ['all', 'by_id', 'by_attribute'])
-                        && (($config['mode'] ?? 'all') !== 'by_id' || $filled('record_id'))
-                        // "By attribute" carries the attribute to compare and the value to match.
-                        && (($config['mode'] ?? 'all') !== 'by_attribute'
-                            || ($filled('attribute') && $filled('attr_value')))
-                        // "All" extras, each optional: order_by attribute (+ direction) and limit.
-                        && (!isset($config['order_by']) || \is_string($config['order_by']))
-                        && $enumOk('order_dir', ['asc', 'desc'])
-                        && $enumOk('limit', [1, 10, 100, 1000]),
-                    'connector' => $connectorOk(),
-                    default => false,
-                },
-            'writer' => $destinationOk()
-                && match ($config['writer'] ?? null) {
-                    'entity' => $filled('system') && $filled('entity') && $filled('content') && $boolOk('content_dwl'),
-                    // A connector writer carries what to write: rest_api ones put it in the request
-                    // body (operation/body/body_content), file/sftp/bucket ones in `content`. The
-                    // connector's TYPE lives in the database and this validator stays DB-free, so
-                    // the shape decides: no `operation` means it is not a rest config, and then
-                    // `content` is what the step writes and must be there.
-                    'connector' => $connectorOk() && $boolOk('content_dwl')
-                        && (isset($config['operation']) || $filled('content')),
-                    default => false,
-                },
+            'entity_read' => $destinationOk() && $entityReadOk(),
+            'entity_write' => $destinationOk() && $entityWriteOk(),
+            // "HTTP Request": a rest_api connector call — connector/operation/path/body shape, the
+            // response stored under the destination.
+            'invoke' => $destinationOk() && $connectorOk(),
+            'file_read', 'file_list', 'file_delete' => $destinationOk() && $fileOpOk(),
+            'file_write' => $destinationOk() && $fileOpOk() && $filled('content') && $boolOk('content_dwl'),
+            'file_rename' => $destinationOk() && $fileOpOk() && $filled('new_name') && $boolOk('new_name_dwl'),
             default => true,
         };
     }

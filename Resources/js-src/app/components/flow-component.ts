@@ -3,7 +3,7 @@ import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
-import DataGrid, {GridAction} from 'aaxiscommon/js/app/widgets/data-grid';
+import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 
 interface OntologyFlowOptions {
@@ -53,6 +53,15 @@ class OntologyFlowComponent extends BaseComponent {
                 // builds a user flow).
                 disabled: (row: FlowRecord) => row.type === 'native',
                 disabledTitle: __('aaxis.ontology.flow_view.export_builtin_disabled')
+            },
+            {
+                key: 'delete',
+                label: __('aaxis.common.grid.delete'),
+                icon: 'fa-trash-o',
+                variant: 'danger',
+                // The built-ins carry the Add Data / REST API write paths — not deletable.
+                disabled: (row: FlowRecord) => row.type === 'native',
+                disabledTitle: __('aaxis.ontology.flow_view.delete_builtin_disabled')
             }
         ];
 
@@ -86,7 +95,7 @@ class OntologyFlowComponent extends BaseComponent {
             gridKey: 'ontology-flow-view',
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-flow-view'}),
             emptyText: __('aaxis.ontology.flow_view.empty'),
-            onAction: (action, row) => this.onAction(action, row as FlowRecord)
+            onAction: (action, row, event) => this.onAction(action, row as FlowRecord, event)
         });
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
@@ -100,7 +109,7 @@ class OntologyFlowComponent extends BaseComponent {
         });
         this.$el.on('click.aaxisOntologyFlow', '[data-role="add"]', (e: any) => {
             e.preventDefault();
-            window.location.href = routing.generate('aaxis_ontology_flow_editor');
+            navigateTo(routing.generate('aaxis_ontology_flow_editor'), (e.originalEvent || e) as MouseEvent);
         });
         this.$el.on('click.aaxisOntologyFlow', '[data-role="import"]', (e: any) => {
             e.preventDefault();
@@ -110,13 +119,71 @@ class OntologyFlowComponent extends BaseComponent {
         this.load();
     }
 
-    private onAction(action: string, row: FlowRecord): void {
+    private onAction(action: string, row: FlowRecord, event?: MouseEvent): void {
         if (action === 'edit' && row.type !== 'native') {
-            window.location.href = routing.generate('aaxis_ontology_flow_editor', {id: row.id});
+            navigateTo(routing.generate('aaxis_ontology_flow_editor', {id: row.id}), event);
         } else if (action === 'export' && row.type !== 'native') {
             // The grid dispatches disabled actions too, so re-check here (as 'edit' does).
             this.exportFlow(row);
+        } else if (action === 'delete' && row.type !== 'native') {
+            this.confirmDelete(row);
         }
+    }
+
+    /** Delete with confirmation. Events the flow recorded stay (they are history, not the flow). */
+    private confirmDelete(row: FlowRecord): void {
+        const dialog = new Dialog({title: __('aaxis.ontology.flow_view.delete_title'), width: '520px'});
+        const $content = dialog.open();
+
+        const $body = $('<div/>', {'class': 'aaxis-ontology-confirm'});
+        $body.append($('<p/>', {
+            'class': 'aaxis-ontology-confirm__q',
+            text: __('aaxis.ontology.flow_view.confirm_delete', {name: row.name})
+        }));
+        $body.append($('<p/>', {
+            'class': 'aaxis-ontology-confirm__danger',
+            text: __('aaxis.ontology.flow_view.delete_warning')
+        }));
+
+        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('Cancel')});
+        const $confirm = $('<button/>', {type: 'button', 'class': 'btn aaxis-ontology-confirm__delete', text: __('aaxis.common.grid.delete')});
+        $actions.append($cancel, $confirm);
+        $body.append($actions);
+        $content.append($body);
+
+        $cancel.on('click', () => dialog.close());
+        $confirm.on('click', () => {
+            $confirm.prop('disabled', true);
+            this.doDelete(row, () => dialog.close());
+        });
+    }
+
+    private doDelete(row: FlowRecord, done: () => void): void {
+        this.setBusy(true);
+        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
+        const match = window.document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+        fetch(routing.generate('aaxis_ontology_flow_delete', {id: row.id}), {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: {'X-CSRF-Header': match ? decodeURIComponent(match[1]) : ''}
+        }).then(r => r.json().then(d => ({ok: r.ok, data: d})))
+            .then(res => {
+                if (!res.ok || !res.data || !(res.data.successful || res.data.success)) {
+                    messenger.notificationFlashMessage(
+                        'error',
+                        (res.data && res.data.message) || __('aaxis.ontology.flow_view.delete_error')
+                    );
+                    return;
+                }
+                messenger.notificationFlashMessage('success', __('aaxis.ontology.flow_view.deleted'));
+                this.load();
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_view.delete_error')))
+            .finally(() => {
+                this.setBusy(false);
+                done();
+            });
     }
 
     /** Downloads the flow as a portable JSON document (connector ids become name/type refs). */

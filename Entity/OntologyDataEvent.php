@@ -58,6 +58,13 @@ class OntologyDataEvent
     #[ORM\Column(name: 'finished_at', type: Types::DATETIME_MUTABLE, nullable: true)]
     private ?\DateTimeInterface $finishedAt = null;
 
+    /**
+     * How the run FAILED, when it did — null on success. The run's status is derived, never
+     * stored: finished_at null = running, finished with error null = success, else failure.
+     */
+    #[ORM\Column(name: 'error', type: Types::TEXT, nullable: true)]
+    private ?string $error = null;
+
     public function getId(): ?int
     {
         return $this->id;
@@ -155,6 +162,18 @@ class OntologyDataEvent
     public function setFinishedAt(?\DateTimeInterface $finishedAt): self
     {
         $this->finishedAt = $finishedAt;
+
+        return $this;
+    }
+
+    public function getError(): ?string
+    {
+        return $this->error;
+    }
+
+    public function setError(?string $error): self
+    {
+        $this->error = $error;
 
         return $this;
     }

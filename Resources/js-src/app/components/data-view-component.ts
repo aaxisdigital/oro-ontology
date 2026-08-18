@@ -335,11 +335,9 @@ class OntologyDataViewComponent extends BaseComponent {
             const previous = versions[idx + 1];
 
             if (!previous) {
-                // Oldest version: no previous to compare against, so no markers — and nothing a
-                // diff-only view could show.
-                baseHtml = diffOnly
-                    ? note(__('aaxis.ontology.data_view.diff_no_previous'))
-                    : this.highlightJson(plainText);
+                // Oldest version: EVERYTHING is new, so both modes show the complete payload —
+                // without change markers (yellow-highlighting the whole document would be noise).
+                baseHtml = this.highlightJson(plainText);
             } else if (diffOnly) {
                 const pruned = this.pruneToDiff(selectedPayload, previous.payload || {});
                 if (pruned === null) {
@@ -456,13 +454,38 @@ class OntologyDataViewComponent extends BaseComponent {
      * renderer and still emit VALID json (filtering the rendered lines would cut multi-line
      * highlight spans in half).
      *
-     * Objects are pruned key by key, recursively. Arrays and scalars are kept WHOLE when they
-     * differ — pruning array elements would renumber the indexes and misrepresent the data.
+     * Objects are pruned key by key and ARRAYS element by element, both recursively — a change
+     * deep inside one array element keeps only that element, pruned to its changed attributes
+     * (kept pairs stay index-aligned between the two sides, so the diff renderer matches them up).
+     * The trade-off: a diff-only array is COMPACTED, so element positions are not the payload's —
+     * the full view is where positions are exact. Scalars (and type mismatches) are kept whole.
      * Returns null when the two snapshots are identical.
      */
     private pruneToDiff(sel: any, prev: any): {sel: any; prev: any} | null {
         if (JSON.stringify(sel) === JSON.stringify(prev)) {
             return null;
+        }
+        if (Array.isArray(sel) && Array.isArray(prev)) {
+            const outSelList: any[] = [];
+            const outPrevList: any[] = [];
+            const length = Math.max(sel.length, prev.length);
+            for (let i = 0; i < length; i++) {
+                if (i < sel.length && i < prev.length) {
+                    const branch = this.pruneToDiff(sel[i], prev[i]);
+                    if (branch !== null) {
+                        outSelList.push(branch.sel);
+                        outPrevList.push(branch.prev);
+                    }
+                    continue;
+                }
+                // A trailing element only one side has: added (highlighted) or removed (struck).
+                if (i < sel.length) {
+                    outSelList.push(sel[i]);
+                } else {
+                    outPrevList.push(prev[i]);
+                }
+            }
+            return {sel: outSelList, prev: outPrevList};
         }
         if (!this.isPlainObject(sel) || !this.isPlainObject(prev)) {
             return {sel, prev};

@@ -212,6 +212,7 @@ class OntologyDataApiManager
 
         $eventId = $this->events->open($flow->getId(), $uuid, $entity->getId(), $uniqueIds, $startedAt);
         $changed = [];
+        $error = null;
         try {
             $raw = $connection->fetchOne('SELECT aaxis_ontology_data_upsert(CAST(? AS jsonb))', [$input]);
             $response = json_decode((string) $raw, true);
@@ -221,10 +222,15 @@ class OntologyDataApiManager
             if ($outcome['errors'] !== null) {
                 throw OntologyApiException::invalidPayload(implode('; ', $outcome['errors']));
             }
+        } catch (\Throwable $e) {
+            // Recorded on the event row (the Events page derives Error status from it), then
+            // rethrown for the caller — the flow step receipt keeps failing loudly.
+            $error = $e->getMessage();
+            throw $e;
         } finally {
             // Closed however this ends — rejected batch or a database failure included — so an
             // event never stays open (an open event now reads as "still running").
-            $this->events->close($eventId, $changed);
+            $this->events->close($eventId, $changed, $error);
         }
 
         return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
@@ -250,10 +256,14 @@ class OntologyDataApiManager
         $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $eventId = $this->events->open($flow->getId(), $uuid, $entity->getId(), $uniqueIds, $startedAt);
         $changed = [];
+        $error = null;
         try {
             $changed = $this->oroWriter->update($entity, $uniqueIds, $payloads);
+        } catch (\Throwable $e) {
+            $error = $e->getMessage();
+            throw $e;
         } finally {
-            $this->events->close($eventId, $changed);
+            $this->events->close($eventId, $changed, $error);
         }
 
         return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];

@@ -233,6 +233,8 @@ interface StepMeta {
 interface PlacedStep extends FlowStep {
     id: string;
     el: HTMLElement;
+    /** The stored config is incomplete/invalid — the tile renders red and the flow cannot run. */
+    invalid?: boolean;
 }
 
 /**
@@ -404,8 +406,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         this.buildWires();
         this.restore();
+        this.applyInvalidStepNames((this.flow && (this.flow as any).invalidSteps) || []);
+        this.restoreToolboxState();
         // Sync the toggle's active state with however the restore left the toolbox.
-        this.setToolboxVisible(!this.toolbox().hidden);
+        this.setToolboxVisible(!this.toolbox().hidden, false);
         this.markSaved();
         // Warm the settings catalogs in the background so the first panel opens instantly too.
         this.prefetchCatalogs();
@@ -467,6 +471,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (e.originalEvent.button === 0) {
                 this.startGhostDrag(e.originalEvent as PointerEvent, String($(e.currentTarget).data('stepType')));
             }
+        });
+        // Toolbox sections expand/collapse via the +/- at the right of their title.
+        this.$el.on('click.aaxisFlowEditor', '[data-role="toolbox-section-toggle"]', (e: any) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const $section = $(e.currentTarget).closest('.aaxis-flow-editor__toolbox-section');
+            const collapsed = $section.toggleClass('is-collapsed').hasClass('is-collapsed');
+            $(e.currentTarget).find('.fa')
+                .toggleClass('fa-minus', !collapsed)
+                .toggleClass('fa-plus', collapsed);
+            this.clampToolboxIntoView(); // the content height changed
         });
         // Dragging the arrow head of an existing wire re-routes that wire.
         this.$el.on('pointerdown.aaxisFlowEditor', '[data-role="wire-end"]', (e: any) => {
@@ -995,7 +1010,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         return d;
     }
 
-    private setToolboxVisible(visible: boolean): void {
+    private setToolboxVisible(visible: boolean, persist = true): void {
         this.toolbox().hidden = !visible;
         if (visible) {
             // A position saved/dragged on a larger window can sit entirely off-canvas after a
@@ -1003,8 +1018,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.clampToolboxIntoView();
         }
         this.$el.find('[data-role="toolbox-toggle"]').toggleClass('is-active', visible);
-        // Toolbox visibility is part of the persisted design → counts as a pending change.
-        this.syncDirty();
+        // Visibility is a workspace preference (NOT flow state) — shared across flows. Only USER
+        // actions persist (persist=false for the init sync, which must not overwrite a stored
+        // position that did not fit this window).
+        if (persist) {
+            this.saveToolboxState();
+        }
     }
 
     /**
@@ -1071,6 +1090,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
     /** Clamps the toolbox's explicit position into the current canvas (no-op at the CSS default spot). */
     private clampToolboxIntoView(): void {
         const el = this.toolbox();
+        // Never taller than the working area (48 = the default spot's 24px top + bottom margins):
+        // the section list scrolls inside __toolbox-body instead, or the user collapses sections.
+        el.style.maxHeight = `${Math.max(120, this.canvasViewport().clientHeight - 48)}px`;
         if (el.hidden || el.style.left === '') {
             return; // hidden (not measurable) or never moved — the default top-right spot is visible
         }
@@ -1083,6 +1105,63 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const maxTop = Math.max(minTop, minTop + viewport.clientHeight - el.offsetHeight);
         el.style.left = `${Math.min(Math.max(minLeft, parseInt(el.style.left, 10) || 0), maxLeft)}px`;
         el.style.top = `${Math.min(Math.max(minTop, parseInt(el.style.top, 10) || 0), maxTop)}px`;
+    }
+
+    /** localStorage key of the toolbox workspace preference — ONE spot shared by every flow. */
+    private static readonly TOOLBOX_STORE_KEY = 'aaxis.ontology.flowEditor.toolbox';
+
+    /** Persists the toolbox position/visibility as the user's workspace preference. */
+    private saveToolboxState(): void {
+        const el = this.toolbox();
+        const state: Record<string, any> = {visible: !el.hidden};
+        const x = parseInt(el.style.left, 10);
+        const y = parseInt(el.style.top, 10);
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+            state.x = x;
+            state.y = y;
+        }
+        try {
+            window.localStorage.setItem(OntologyFlowEditorComponent.TOOLBOX_STORE_KEY, JSON.stringify(state));
+        } catch (e) {
+            // Storage unavailable (privacy mode) — the toolbox just uses its defaults next time.
+        }
+    }
+
+    /**
+     * Applies the stored workspace preference: visibility always; the position only when the
+     * stored spot still fits FULLY inside the current viewport — a spot saved on a bigger window
+     * (or none at all) falls back to the default show/hide placement instead of being clipped.
+     */
+    private restoreToolboxState(): void {
+        let state: any = null;
+        try {
+            state = JSON.parse(window.localStorage.getItem(OntologyFlowEditorComponent.TOOLBOX_STORE_KEY) || 'null');
+        } catch (e) {
+            state = null;
+        }
+        if (typeof state !== 'object' || state === null) {
+            return;
+        }
+        if (state.visible === false) {
+            // Hidden toolboxes keep no explicit spot — showing it again uses the default position.
+            this.toolbox().hidden = true;
+            return;
+        }
+        if (!Number.isFinite(state.x) || !Number.isFinite(state.y)) {
+            return;
+        }
+        const el = this.toolbox();
+        this.clampToolboxIntoView(); // sets the height cap first, so the fit check measures reality
+        const viewport = this.canvasViewport();
+        const minLeft = viewport.offsetLeft;
+        const minTop = viewport.offsetTop;
+        const fits = state.x >= minLeft && state.x <= minLeft + viewport.clientWidth - el.offsetWidth
+            && state.y >= minTop && state.y <= minTop + viewport.clientHeight - el.offsetHeight;
+        if (fits) {
+            el.style.left = `${state.x}px`;
+            el.style.top = `${state.y}px`;
+            el.style.right = 'auto';
+        }
     }
 
     // --- Persisted editor state (the `design` column) -----------------------------
@@ -1117,21 +1196,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     /** The full canvas state persisted alongside the logical steps. */
     private currentDesign(): any {
-        const toolbox = this.toolbox();
-        // Prefer the style-set position: a hidden (display: none) element reports 0/0 offsets,
-        // which would teleport the toolbox to the corner on the next restore.
-        const styleX = parseInt(toolbox.style.left, 10);
-        const styleY = parseInt(toolbox.style.top, 10);
+        // NOTE: the toolbox is deliberately NOT part of the design — its position/visibility are
+        // the USER's workspace preference, shared across every flow via localStorage
+        // ({@see saveToolboxState}); old designs may still carry a `toolbox` key, which is ignored.
         return {
             version: DESIGN_VERSION,
             steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null})),
             links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
-            start: this.startId,
-            toolbox: {
-                x: Number.isFinite(styleX) ? styleX : toolbox.offsetLeft,
-                y: Number.isFinite(styleY) ? styleY : toolbox.offsetTop,
-                visible: !toolbox.hidden
-            }
+            start: this.startId
         };
     }
 
@@ -1200,12 +1272,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
             usedPorts.add(`${link.from}:${link.fromPort}`);
             usedInputs.add(link.to);
         }
-        const toolbox = design.toolbox;
-        if (toolbox !== undefined && (typeof toolbox !== 'object' || toolbox === null
-            || !Number.isFinite(toolbox.x) || !Number.isFinite(toolbox.y) || typeof toolbox.visible !== 'boolean')
-        ) {
-            return false;
-        }
         // Optional sub-flow entry marker: must reference an existing non-trigger step with no
         // incoming link, and can only exist while the design holds no trigger at all.
         const start = design.start === undefined || design.start === null ? null : design.start;
@@ -1220,19 +1286,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.links = links.map((l: any) => ({from: l.from, fromPort: l.fromPort, to: l.to}));
         this.startId = start;
         this.redrawLinks();
-        if (toolbox) {
-            this.setToolboxVisible(toolbox.visible);
-            // Restore the position only when visible (a hidden toolbox keeps its default CSS spot
-            // and reappears there on toggle), clamped into the CURRENT canvas — a spot saved on a
-            // wider window would otherwise land outside and be clipped invisible.
-            if (toolbox.visible) {
-                const el = this.toolbox();
-                el.style.left = `${Math.max(0, toolbox.x)}px`;
-                el.style.top = `${Math.max(0, toolbox.y)}px`;
-                el.style.right = 'auto';
-                this.clampToolboxIntoView();
-            }
-        }
+        // Old designs may carry a `toolbox` key — ignored: the toolbox is a per-user workspace
+        // preference restored from localStorage ({@see restoreToolboxState}), not flow state.
         return true;
     }
 
@@ -1382,10 +1437,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Type-specific configuration blocks; each returns error() + merge() for the submit, and
         // optionally a `ready` promise while its catalog data (systems/connectors…) still loads.
         const sections: {error: () => string; merge: (config: Record<string, any>) => Record<string, any>; ready?: Promise<any>}[] = [];
-        if (step.type === 'reader' || step.type === 'writer') {
-            // Reader/Writer own the name placement (first fixed row: Name | Type | Destination).
+        if (step.type === 'entity_read' || step.type === 'entity_write') {
             $top.prop('hidden', false);
-            sections.push(this.ioSection(step.type, $top, $body, $side, $panel[0], step.config || {}, $input, reposition));
+            sections.push(this.entityIoSection(
+                step.type === 'entity_read' ? 'reader' : 'writer',
+                $top, $body, $panel[0], step.config || {}, $input, reposition
+            ));
+        } else if (step.type === 'invoke') {
+            $top.prop('hidden', false);
+            sections.push(this.httpRequestSection($top, $body, $panel[0], step.config || {}, $input, reposition));
+        } else if (step.type.indexOf('file_') === 0) {
+            $top.prop('hidden', false);
+            sections.push(this.fileOpSection(step.type, $top, $body, $panel[0], step.config || {}, $input));
         } else if (step.type === 'dwl_transform') {
             $top.prop('hidden', false);
             sections.push(this.dwlSection($top, $body, $panel[0], step.config || {}, $input));
@@ -1465,16 +1528,22 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 $error.text(__('aaxis.ontology.flow_editor.step_name_exists'));
                 return;
             }
+            // Section problems (missing/incomplete fields) do NOT block the confirm anymore:
+            // the config is stored as-is, the TILE turns red and the flow cannot run until fixed
+            // (the server re-checks the same rules on every run attempt). Only structural name
+            // problems above still block.
+            let sectionError = '';
             for (const section of sections) {
                 const message = section.error();
                 if (message !== '') {
-                    $error.text(message);
-                    return;
+                    sectionError = message;
+                    break;
                 }
             }
             const config = sections.reduce((acc, section) => section.merge(acc), {} as Record<string, any>);
             step.config = Object.keys(config).length ? config : null;
             this.renameStep(step, name);
+            this.markStepInvalid(step, sectionError !== '');
             this.syncDirty();
             close();
         };
@@ -1667,328 +1736,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
-     * Reader/Writer shared section: fixed first row (Name | Type | Destination), then the
-     * variant fields. Entity variant: system+entity on one row, then (reader) load "all"/"by id"
-     * or (writer) the Content — the context key whose value gets written. Connector variant is
-     * identical for both: picker, then rest_api-only operation | path | body (+ body content in
-     * the right column); sftp/file_system only the path.
-     */
-    private ioSection(kind: 'reader' | 'writer', $top: any, $body: any, $side: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        const isMine = initial[kind] !== undefined;
-        const variant = isMine ? String(initial[kind] || '') : '';
-        const $type = $('<select/>', {'class': 'form-control'});
-        $type.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-        $type.append($('<option/>', {value: 'entity', text: __('aaxis.ontology.flow_editor.reader_type_entity'), selected: variant === 'entity'}));
-        $type.append($('<option/>', {value: 'connector', text: __('aaxis.ontology.flow_editor.reader_type_connector'), selected: variant === 'connector'}));
-        const $destination = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: String(initial.destination || 'payload')
-        });
-        // Fixed, always-visible first row.
-        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
-            this.settingsCol('step_name_label', $nameInput, 1.2),
-            this.settingsCol(kind === 'reader' ? 'reader_type_label' : 'writer_type_label', $type),
-            this.settingsCol('destination_label', $destination)
-        ));
-
-        // Entity variant: system + entity on one row, then the kind-specific row. Entity changes
-        // refresh the reader's Order By options (assigned below, reader only).
-        let onEntityChange: () => void = () => undefined;
-        const $entityBlock = $('<div/>');
-        $body.append($entityBlock);
-        const entityPair = this.systemEntitySection($entityBlock, variant === 'entity' ? initial : {}, true, () => onEntityChange());
-
-        // reader: load-mode (+ id / attribute+value); writer: the Content to write — a context
-        // key, or a DWL expression when its toggle is ON (always a textarea so toggling changes
-        // no visuals).
-        const $mode = $('<select/>', {'class': 'form-control'});
-        const $recordId = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255});
-        let $recordIdCol: any = null;
-        // "By attribute" inputs: the attribute to compare (the entity's readable attributes) and
-        // the value to match.
-        const $searchAttr = $('<select/>', {'class': 'form-control'});
-        const $searchValue = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255});
-        let $searchAttrCol: any = null;
-        let $searchValueCol: any = null;
-        const content = createDwlField({
-            label: __('aaxis.ontology.flow_editor.writer_content_label'),
-            value: variant === 'entity' ? String(initial.content || 'payload') : 'payload',
-            dwl: variant === 'entity' && initial.content_dwl === true,
-            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
-        });
-        // "All" extras: Order By (the selected entity's attributes) + direction + limit.
-        const $orderBy = $('<select/>', {'class': 'form-control'});
-        const $orderDir = $('<select/>', {'class': 'form-control'});
-        const $limit = $('<select/>', {'class': 'form-control'});
-        let $orderByCol: any = null;
-        let $orderDirCol: any = null;
-        let $limitCol: any = null;
-        if (kind === 'reader') {
-            $mode.append($('<option/>', {value: 'all', text: __('aaxis.ontology.flow_editor.reader_mode_all')}));
-            $mode.append($('<option/>', {
-                value: 'by_id', text: __('aaxis.ontology.flow_editor.reader_mode_by_id'),
-                selected: variant === 'entity' && initial.mode === 'by_id'
-            }));
-            $mode.append($('<option/>', {
-                value: 'by_attribute', text: __('aaxis.ontology.flow_editor.reader_mode_by_attribute'),
-                selected: variant === 'entity' && initial.mode === 'by_attribute'
-            }));
-            $recordId.val(variant === 'entity' ? String(initial.record_id || '') : '');
-            $recordIdCol = this.settingsCol('reader_record_id_label', $recordId, 1.4);
-            $searchValue.val(variant === 'entity' ? String(initial.attr_value || '') : '');
-            $searchAttrCol = this.settingsCol('reader_attribute_label', $searchAttr, 1.3);
-            $searchValueCol = this.settingsCol('reader_attr_value_label', $searchValue, 1.4);
-
-            ['asc', 'desc'].forEach(dir => $orderDir.append($('<option/>', {
-                value: dir, text: dir.toUpperCase(),
-                selected: (variant === 'entity' ? String(initial.order_dir || 'asc') : 'asc') === dir
-            })));
-            const currentLimit = variant === 'entity' && initial.limit ? String(initial.limit) : '';
-            $limit.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_limit_none'), selected: currentLimit === ''}));
-            ['1', '10', '100', '1000'].forEach(value => $limit.append($('<option/>', {value, text: value, selected: value === currentLimit})));
-
-            $orderByCol = this.settingsCol('reader_order_by_label', $orderBy, 1.3);
-            $orderDirCol = this.settingsCol('reader_order_dir_label', $orderDir, 0.8);
-            $limitCol = this.settingsCol('reader_limit_label', $limit, 0.9);
-            $entityBlock.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'})
-                .append(
-                    this.settingsCol('reader_mode_label', $mode, 0.9),
-                    $recordIdCol, $searchAttrCol, $searchValueCol, $orderByCol, $orderDirCol, $limitCol
-                ));
-
-            // Order By / search-attribute options follow the SELECTED entity; the saved values
-            // survive the first fill.
-            let pendingOrderBy = variant === 'entity' ? String(initial.order_by || '') : '';
-            let pendingSearchAttr = variant === 'entity' ? String(initial.attribute || '') : '';
-            onEntityChange = (): void => {
-                const attributes = entityPair.attributes();
-                const currentOrder = String($orderBy.val() || '') || pendingOrderBy;
-                pendingOrderBy = '';
-                $orderBy.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_order_by_none')}));
-                attributes.forEach(attribute => $orderBy.append($('<option/>', {
-                    value: attribute.name, text: attribute.name, selected: attribute.name === currentOrder
-                })));
-                const currentAttr = String($searchAttr.val() || '') || pendingSearchAttr;
-                pendingSearchAttr = '';
-                $searchAttr.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-                attributes.forEach(attribute => $searchAttr.append($('<option/>', {
-                    value: attribute.name, text: attribute.name, selected: attribute.name === currentAttr
-                })));
-                syncBlocks();
-            };
-            $orderBy.on('change', () => syncBlocks());
-        } else {
-            $entityBlock.append(content.$el);
-        }
-
-        // Connector variant: the connector, then per-connector-type fields.
-        const $connectorBlock = $('<div/>');
-        const $connector = $('<select/>', {'class': 'form-control', disabled: true});
-        $connector.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
-        const $operation = $('<select/>', {'class': 'form-control'});
-        ['get', 'put', 'post', 'patch', 'delete'].forEach(op => {
-            $operation.append($('<option/>', {
-                value: op, text: op.toUpperCase(),
-                selected: variant === 'connector' && initial.operation === op
-            }));
-        });
-        const $bodyType = $('<select/>', {'class': 'form-control'});
-        ['empty', 'json', 'text', 'xml'].forEach(b => {
-            $bodyType.append($('<option/>', {
-                value: b, text: __(`aaxis.ontology.flow_editor.body_${b}`),
-                selected: variant === 'connector' && initial.body === b
-            }));
-        });
-        const $path = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 255,
-            value: variant === 'connector' ? String(initial.path || '') : ''
-        });
-        const $operationCol = this.settingsCol('operation_label', $operation);
-        const $pathCol = this.settingsCol('path_label', $path, 1.4);
-        const $bodyCol = this.settingsCol('body_label', $bodyType);
-        const $fieldsRow = $('<div/>', {'class': 'aaxis-flow-editor__settings-row', hidden: true});
-        $fieldsRow.append($operationCol, $pathCol, $bodyCol);
-        $connectorBlock.append(this.settingsLabel('connector_label'), $connector, $fieldsRow);
-        $body.append($connectorBlock);
-
-        // id -> connector type, so the row adapts to the chosen connector (rest_api vs sftp/fs).
-        const connectorTypes: Record<string, string> = {};
-        const connectorsReady = this.connectorCatalog()
-            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
-                const current = variant === 'connector' ? String(initial.connector || '') : '';
-                $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-                (data.records || []).forEach(c => {
-                    connectorTypes[String(c.id)] = c.type;
-                    $connector.append($('<option/>', {
-                        value: String(c.id),
-                        text: `${c.name} (${c.type}${c.systemName ? ' \u00b7 ' + c.systemName : ''})`,
-                        selected: String(c.id) === current
-                    }));
-                });
-                $connector.prop('disabled', false);
-                syncBlocks();
-            })
-            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
-
-        // Body content lives in the right column, below the fixed first row.
-        const bodyContent = createDwlField({
-            label: __('aaxis.ontology.flow_editor.body_content_label'),
-            value: variant === 'connector' ? String(initial.body_content || '') : '',
-            dwl: variant === 'connector' && initial.body_dwl === true,
-            editorClass: 'aaxis-flow-editor__settings-textarea'
-        });
-        $side.append(bodyContent.$el);
-
-        // What a WRITER hands to a file/sftp/bucket connector: those have no request body to carry
-        // it, so the content is its own full-width row under the path. rest_api writers use the
-        // Body content field on the right instead.
-        const connectorContent = createDwlField({
-            label: __('aaxis.ontology.flow_editor.writer_content_label'),
-            value: variant === 'connector' ? String(initial.content || '') : '',
-            dwl: variant === 'connector' && initial.content_dwl === true,
-            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
-        });
-        if (kind === 'writer') {
-            $connectorBlock.append(connectorContent.$el);
-        }
-
-        const connectorType = (): string => connectorTypes[String($connector.val() || '')] || '';
-        const isRest = (): boolean => connectorType() === 'rest_api';
-        /** Connectors that write whole payloads rather than request bodies. */
-        const writesContent = (): boolean =>
-            ['file_system', 'sftp', 'bucket'].indexOf(connectorType()) >= 0;
-        const contentVisible = (): boolean =>
-            kind === 'writer' && String($type.val() || '') === 'connector'
-            && String($connector.val() || '') !== '' && writesContent();
-        const syncBlocks = (): void => {
-            const type = String($type.val() || '');
-            $entityBlock.toggle(type === 'entity');
-            $connectorBlock.toggle(type === 'connector');
-            if ($recordIdCol) {
-                const mode = String($mode.val());
-                $recordIdCol.toggle(mode === 'by_id');
-                $searchAttrCol.toggle(mode === 'by_attribute');
-                $searchValueCol.toggle(mode === 'by_attribute');
-                // The "All" extras; the direction only matters once an Order By is chosen.
-                $orderByCol.toggle(mode === 'all');
-                $orderDirCol.toggle(mode === 'all' && String($orderBy.val() || '') !== '');
-                $limitCol.toggle(mode === 'all');
-            }
-            // Connector fields appear only once a connector is chosen; operation/body are
-            // rest_api-only (sftp/file_system need just the path).
-            const hasConnector = String($connector.val() || '') !== '';
-            $fieldsRow.prop('hidden', !hasConnector);
-            $operationCol.toggle(isRest());
-            $bodyCol.toggle(isRest());
-            if (kind === 'writer') {
-                connectorContent.$el.toggle(contentVisible());
-            }
-            const sideVisible = type === 'connector' && hasConnector && isRest() && String($bodyType.val()) !== 'empty';
-            $side.prop('hidden', !sideVisible);
-            panel.classList.toggle('is-wide', sideVisible);
-            // Any of the toggles changes the panel size — keep the WHOLE popup on-screen.
-            reposition();
-        };
-        $type.on('change', syncBlocks);
-        $bodyType.on('change', syncBlocks);
-        $connector.on('change', syncBlocks);
-        $mode.on('change', syncBlocks);
-        syncBlocks();
-
-        return {
-            error: () => {
-                const type = String($type.val() || '');
-                if (type === '') {
-                    return __('aaxis.ontology.flow_editor.reader_type_required');
-                }
-                if (type === 'entity') {
-                    const pairError = entityPair.error();
-                    if (pairError !== '') {
-                        return pairError;
-                    }
-                    if (kind === 'reader' && String($mode.val()) === 'by_id' && String($recordId.val() || '').trim() === '') {
-                        return __('aaxis.ontology.flow_editor.reader_record_id_required');
-                    }
-                    if (kind === 'reader' && String($mode.val()) === 'by_attribute') {
-                        if (String($searchAttr.val() || '') === '') {
-                            return __('aaxis.ontology.flow_editor.reader_attribute_required');
-                        }
-                        if (String($searchValue.val() || '').trim() === '') {
-                            return __('aaxis.ontology.flow_editor.reader_attr_value_required');
-                        }
-                    }
-                    if (kind === 'writer' && content.value().trim() === '') {
-                        return __('aaxis.ontology.flow_editor.writer_content_required');
-                    }
-                } else {
-                    if (String($connector.val() || '') === '') {
-                        return __('aaxis.ontology.flow_editor.reader_connector_required');
-                    }
-                    if (String($path.val() || '').trim() === '') {
-                        return __('aaxis.ontology.flow_editor.reader_path_required');
-                    }
-                    // A file/sftp/bucket writer has nothing to write without it.
-                    if (contentVisible() && connectorContent.value().trim() === '') {
-                        return __('aaxis.ontology.flow_editor.writer_content_required');
-                    }
-                }
-                const destinationError = this.destinationError($destination);
-                if (destinationError) {
-                    return destinationError;
-                }
-                return '';
-            },
-            merge: config => {
-                const type = String($type.val());
-                const base: Record<string, any> = {...config, [kind]: type, destination: String($destination.val() || '').trim()};
-                if (type === 'entity') {
-                    const withPair = entityPair.merge(base);
-                    if (kind === 'reader') {
-                        withPair.mode = String($mode.val());
-                        if (withPair.mode === 'by_id') {
-                            withPair.record_id = String($recordId.val() || '').trim();
-                        } else if (withPair.mode === 'by_attribute') {
-                            withPair.attribute = String($searchAttr.val() || '');
-                            withPair.attr_value = String($searchValue.val() || '').trim();
-                        } else {
-                            const orderBy = String($orderBy.val() || '');
-                            if (orderBy !== '') {
-                                withPair.order_by = orderBy;
-                                withPair.order_dir = String($orderDir.val());
-                            }
-                            const limit = String($limit.val() || '');
-                            if (limit !== '') {
-                                withPair.limit = Number(limit);
-                            }
-                        }
-                    } else {
-                        withPair.content = content.value().trim();
-                        withPair.content_dwl = content.isDwl();
-                    }
-                    return withPair;
-                }
-                base.connector = String($connector.val());
-                base.path = String($path.val() || '').trim();
-                if (contentVisible()) {
-                    base.content = connectorContent.value().trim();
-                    base.content_dwl = connectorContent.isDwl();
-                }
-                if (isRest()) {
-                    base.operation = String($operation.val());
-                    base.body = String($bodyType.val());
-                    if (base.body !== 'empty') {
-                        base.body_content = bodyContent.value();
-                        base.body_dwl = bodyContent.isDwl();
-                    }
-                }
-                return base;
-            },
-            // Both catalogs (systems/entities + connectors) must be in before the panel unlocks.
-            ready: Promise.allSettled([entityPair.ready, connectorsReady])
-        };
-    }
-
-    /**
      * DWL transform: fixed first row (Name | Destination) and a wide code textarea. The script
      * sees every key of the debug context (payload, prior destinations…) as a variable; its
      * result lands under the destination. Syntax is validated server-side on save.
@@ -2058,6 +1805,371 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 ? __('aaxis.ontology.flow_editor.choice_expression_required')
                 : '',
             merge: config => ({...config, expression: expression.value()})
+        };
+    }
+
+    /**
+     * Entity Read / Entity Write — the typed successors of the generic reader/writer's ENTITY
+     * variant: same fields and config keys, no type selector. First fixed row: Name | Destination;
+     * then System | Entity; readers add the Load row (All / By id / By attribute + the "All"
+     * extras), writers the Content field (context key, or a DWL expression via its toggle).
+     */
+    private entityIoSection(kind: 'reader' | 'writer', $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+        const $destination = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 128,
+            value: String(initial.destination || 'payload')
+        });
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.2),
+            this.settingsCol('destination_label', $destination)
+        ));
+
+        let onEntityChange: () => void = () => undefined;
+        const entityPair = this.systemEntitySection($body, initial, true, () => onEntityChange());
+
+        // Reader: the Load row (mode + its per-mode fields). Same controls as the generic reader.
+        const $mode = $('<select/>', {'class': 'form-control'});
+        const $recordId = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255, value: String(initial.record_id || '')});
+        const $searchAttr = $('<select/>', {'class': 'form-control'});
+        const $searchValue = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255, value: String(initial.attr_value || '')});
+        const $orderBy = $('<select/>', {'class': 'form-control'});
+        const $orderDir = $('<select/>', {'class': 'form-control'});
+        const $limit = $('<select/>', {'class': 'form-control'});
+        let $recordIdCol: any = null;
+        let $searchAttrCol: any = null;
+        let $searchValueCol: any = null;
+        let $orderByCol: any = null;
+        let $orderDirCol: any = null;
+        let $limitCol: any = null;
+
+        // Writer: the Content to write — a context key, or a DWL expression when its toggle is ON.
+        const content = createDwlField({
+            label: __('aaxis.ontology.flow_editor.writer_content_label'),
+            value: String(initial.content || 'payload'),
+            dwl: initial.content_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+
+        const syncModeRow = (): void => {
+            const mode = String($mode.val());
+            $recordIdCol.toggle(mode === 'by_id');
+            $searchAttrCol.toggle(mode === 'by_attribute');
+            $searchValueCol.toggle(mode === 'by_attribute');
+            $orderByCol.toggle(mode === 'all');
+            $orderDirCol.toggle(mode === 'all' && String($orderBy.val() || '') !== '');
+            $limitCol.toggle(mode === 'all');
+            reposition();
+        };
+
+        if (kind === 'reader') {
+            [['all', 'reader_mode_all'], ['by_id', 'reader_mode_by_id'], ['by_attribute', 'reader_mode_by_attribute']]
+                .forEach(([value, key]) => $mode.append($('<option/>', {
+                    value, text: __(`aaxis.ontology.flow_editor.${key}`),
+                    selected: String(initial.mode || 'all') === value
+                })));
+            ['asc', 'desc'].forEach(dir => $orderDir.append($('<option/>', {
+                value: dir, text: dir.toUpperCase(), selected: String(initial.order_dir || 'asc') === dir
+            })));
+            const currentLimit = initial.limit ? String(initial.limit) : '';
+            $limit.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_limit_none'), selected: currentLimit === ''}));
+            ['1', '10', '100', '1000'].forEach(value => $limit.append($('<option/>', {value, text: value, selected: value === currentLimit})));
+
+            $recordIdCol = this.settingsCol('reader_record_id_label', $recordId, 1.4);
+            $searchAttrCol = this.settingsCol('reader_attribute_label', $searchAttr, 1.3);
+            $searchValueCol = this.settingsCol('reader_attr_value_label', $searchValue, 1.4);
+            $orderByCol = this.settingsCol('reader_order_by_label', $orderBy, 1.3);
+            $orderDirCol = this.settingsCol('reader_order_dir_label', $orderDir, 0.8);
+            $limitCol = this.settingsCol('reader_limit_label', $limit, 0.9);
+            $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+                this.settingsCol('reader_mode_label', $mode, 0.9),
+                $recordIdCol, $searchAttrCol, $searchValueCol, $orderByCol, $orderDirCol, $limitCol
+            ));
+
+            // Order By / search-attribute options follow the SELECTED entity; saved values survive
+            // the first fill.
+            let pendingOrderBy = String(initial.order_by || '');
+            let pendingSearchAttr = String(initial.attribute || '');
+            onEntityChange = (): void => {
+                const attributes = entityPair.attributes();
+                const currentOrder = String($orderBy.val() || '') || pendingOrderBy;
+                pendingOrderBy = '';
+                $orderBy.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_order_by_none')}));
+                attributes.forEach(attribute => $orderBy.append($('<option/>', {
+                    value: attribute.name, text: attribute.name, selected: attribute.name === currentOrder
+                })));
+                const currentAttr = String($searchAttr.val() || '') || pendingSearchAttr;
+                pendingSearchAttr = '';
+                $searchAttr.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
+                attributes.forEach(attribute => $searchAttr.append($('<option/>', {
+                    value: attribute.name, text: attribute.name, selected: attribute.name === currentAttr
+                })));
+                syncModeRow();
+            };
+            $mode.on('change', syncModeRow);
+            $orderBy.on('change', syncModeRow);
+            syncModeRow();
+        } else {
+            $body.append(content.$el);
+        }
+
+        return {
+            error: () => {
+                const pairError = entityPair.error();
+                if (pairError !== '') {
+                    return pairError;
+                }
+                if (kind === 'reader' && String($mode.val()) === 'by_id' && String($recordId.val() || '').trim() === '') {
+                    return __('aaxis.ontology.flow_editor.reader_record_id_required');
+                }
+                if (kind === 'reader' && String($mode.val()) === 'by_attribute') {
+                    if (String($searchAttr.val() || '') === '') {
+                        return __('aaxis.ontology.flow_editor.reader_attribute_required');
+                    }
+                    if (String($searchValue.val() || '').trim() === '') {
+                        return __('aaxis.ontology.flow_editor.reader_attr_value_required');
+                    }
+                }
+                if (kind === 'writer' && content.value().trim() === '') {
+                    return __('aaxis.ontology.flow_editor.writer_content_required');
+                }
+                return this.destinationError($destination);
+            },
+            merge: config => {
+                const withPair = entityPair.merge({...config, destination: String($destination.val() || '').trim()});
+                if (kind === 'reader') {
+                    withPair.mode = String($mode.val());
+                    if (withPair.mode === 'by_id') {
+                        withPair.record_id = String($recordId.val() || '').trim();
+                    } else if (withPair.mode === 'by_attribute') {
+                        withPair.attribute = String($searchAttr.val() || '');
+                        withPair.attr_value = String($searchValue.val() || '').trim();
+                    } else {
+                        const orderBy = String($orderBy.val() || '');
+                        if (orderBy !== '') {
+                            withPair.order_by = orderBy;
+                            withPair.order_dir = String($orderDir.val());
+                        }
+                        const limit = String($limit.val() || '');
+                        if (limit !== '') {
+                            withPair.limit = Number(limit);
+                        }
+                    }
+                } else {
+                    withPair.content = content.value().trim();
+                    withPair.content_dwl = content.isDwl();
+                }
+                return withPair;
+            },
+            ready: entityPair.ready
+        };
+    }
+
+    /**
+     * HTTP Request (type `invoke`): a rest_api connector call, the response stored under the
+     * destination. Row 1: Name | Connector (rest_api only) | Destination; row 2: Operation | Path
+     * | Body; row 3: the Body content DWL field — always visible, enabled only while the Body
+     * selection is not Empty.
+     */
+    private httpRequestSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+        const $connector = $('<select/>', {'class': 'form-control', disabled: true});
+        $connector.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        const $destination = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 128,
+            value: String(initial.destination || 'payload')
+        });
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.2),
+            this.settingsCol('connector_label', $connector, 1.4),
+            this.settingsCol('destination_label', $destination)
+        ));
+
+        const $operation = $('<select/>', {'class': 'form-control'});
+        ['get', 'put', 'post', 'patch', 'delete'].forEach(op => $operation.append($('<option/>', {
+            value: op, text: op.toUpperCase(), selected: initial.operation === op
+        })));
+        const $bodyType = $('<select/>', {'class': 'form-control'});
+        ['empty', 'json', 'text', 'xml'].forEach(b => $bodyType.append($('<option/>', {
+            value: b, text: __(`aaxis.ontology.flow_editor.body_${b}`), selected: initial.body === b
+        })));
+        const $path = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 255,
+            value: String(initial.path || '')
+        });
+        $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('operation_label', $operation),
+            this.settingsCol('path_label', $path, 1.6),
+            this.settingsCol('body_label', $bodyType)
+        ));
+
+        const bodyContent = createDwlField({
+            label: __('aaxis.ontology.flow_editor.body_content_label'),
+            value: String(initial.body_content || ''),
+            dwl: initial.body_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea'
+        });
+        $body.append(bodyContent.$el);
+        panel.classList.add('is-wide');
+
+        // rest_api connectors only — this step IS an HTTP call.
+        const connectorsReady = this.connectorCatalog()
+            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
+                const current = String(initial.connector || '');
+                $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
+                (data.records || []).filter(c => c.type === 'rest_api').forEach(c => {
+                    $connector.append($('<option/>', {
+                        value: String(c.id),
+                        text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
+                        selected: String(c.id) === current
+                    }));
+                });
+                $connector.prop('disabled', false);
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
+
+        // The Body content stays in place whatever the Body selection — it is merely disabled
+        // (dimmed, textarea + DWL switch inert) while the request carries no body.
+        const syncBodyContent = (): void => {
+            const enabled = String($bodyType.val()) !== 'empty';
+            bodyContent.$el.toggleClass('aaxis-dwl-field--disabled', !enabled);
+            bodyContent.$textarea.prop('disabled', !enabled);
+            bodyContent.$el.find('input[type="checkbox"]').prop('disabled', !enabled);
+            reposition();
+        };
+        $bodyType.on('change', syncBodyContent);
+        syncBodyContent();
+
+        return {
+            error: () => {
+                if (String($connector.val() || '') === '') {
+                    return __('aaxis.ontology.flow_editor.reader_connector_required');
+                }
+                if (String($path.val() || '').trim() === '') {
+                    return __('aaxis.ontology.flow_editor.reader_path_required');
+                }
+                return this.destinationError($destination);
+            },
+            merge: config => {
+                const merged: Record<string, any> = {
+                    ...config,
+                    connector: String($connector.val()),
+                    operation: String($operation.val()),
+                    path: String($path.val() || '').trim(),
+                    body: String($bodyType.val()),
+                    destination: String($destination.val() || '').trim()
+                };
+                if (merged.body !== 'empty') {
+                    merged.body_content = bodyContent.value();
+                    merged.body_dwl = bodyContent.isDwl();
+                }
+                return merged;
+            },
+            ready: connectorsReady
+        };
+    }
+
+    /**
+     * File Operations (file_read / file_write / file_list / file_delete / file_rename): one
+     * file-based connector (file_system/sftp/bucket), a DWL-capable Path, and per-type extras —
+     * Write File adds the Content field, Rename the New name. Row 1: Name | Connector |
+     * Destination; row 2: the Path field; row 3 (write/rename only): the extra field.
+     */
+    private fileOpSection(type: string, $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+        const $connector = $('<select/>', {'class': 'form-control', disabled: true});
+        $connector.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        const $destination = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 128,
+            value: String(initial.destination || 'payload')
+        });
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.2),
+            this.settingsCol('connector_label', $connector, 1.4),
+            this.settingsCol('destination_label', $destination)
+        ));
+
+        // File-based connectors only — these steps talk to a storage.
+        const connectorsReady = this.connectorCatalog()
+            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
+                const current = String(initial.connector || '');
+                $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
+                (data.records || [])
+                    .filter(c => ['file_system', 'sftp', 'bucket'].indexOf(c.type) >= 0)
+                    .forEach(c => {
+                        $connector.append($('<option/>', {
+                            value: String(c.id),
+                            text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
+                            selected: String(c.id) === current
+                        }));
+                    });
+                $connector.prop('disabled', false);
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
+
+        const path = createDwlField({
+            label: __('aaxis.ontology.flow_editor.file_path_label'),
+            value: String(initial.path || ''),
+            dwl: initial.path_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+        $body.append(path.$el);
+
+        // Row 3: Write File carries the Content to write (context key or DWL, like every writer);
+        // Rename the New name (bare name = same folder, with "/" = a full path, i.e. a move).
+        let content: ReturnType<typeof createDwlField> | null = null;
+        let newName: ReturnType<typeof createDwlField> | null = null;
+        if (type === 'file_write') {
+            content = createDwlField({
+                label: __('aaxis.ontology.flow_editor.writer_content_label'),
+                value: String(initial.content || 'payload'),
+                dwl: initial.content_dwl === true,
+                editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+            });
+            $body.append(content.$el);
+        } else if (type === 'file_rename') {
+            newName = createDwlField({
+                label: __('aaxis.ontology.flow_editor.file_new_name_label'),
+                value: String(initial.new_name || ''),
+                dwl: initial.new_name_dwl === true,
+                editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+            });
+            $body.append(newName.$el);
+        }
+        panel.classList.add('is-wide');
+
+        return {
+            error: () => {
+                if (String($connector.val() || '') === '') {
+                    return __('aaxis.ontology.flow_editor.reader_connector_required');
+                }
+                if (path.value().trim() === '') {
+                    return __('aaxis.ontology.flow_editor.reader_path_required');
+                }
+                if (content && content.value().trim() === '') {
+                    return __('aaxis.ontology.flow_editor.writer_content_required');
+                }
+                if (newName && newName.value().trim() === '') {
+                    return __('aaxis.ontology.flow_editor.file_new_name_required');
+                }
+                return this.destinationError($destination);
+            },
+            merge: config => {
+                const merged: Record<string, any> = {
+                    ...config,
+                    connector: String($connector.val()),
+                    path: path.value().trim(),
+                    path_dwl: path.isDwl(),
+                    destination: String($destination.val() || '').trim()
+                };
+                if (content) {
+                    merged.content = content.value().trim();
+                    merged.content_dwl = content.isDwl();
+                }
+                if (newName) {
+                    merged.new_name = newName.value().trim();
+                    merged.new_name_dwl = newName.isDwl();
+                }
+                return merged;
+            },
+            ready: connectorsReady
         };
     }
 
@@ -2226,6 +2338,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private pointerUp(e: PointerEvent): void {
         if (this.panelDrag?.pointerId === e.pointerId) {
             this.panelDrag = null;
+            this.saveToolboxState(); // the settled spot becomes the shared workspace preference
         } else if (this.ghostDrag?.pointerId === e.pointerId) {
             this.dropGhost(e);
         } else if (this.stepDrag?.pointerId === e.pointerId) {
@@ -2938,8 +3051,25 @@ class OntologyFlowEditorComponent extends BaseComponent {
      */
     private syncDebugButtons(): void {
         const enabled = this.$el.find('[data-role="flow-enabled"]').is(':checked');
-        this.$el.find('[data-role="debug"], [data-role="debug-step"]')
-            .prop('disabled', !enabled || this.debugSession !== null);
+        // A flow with red (incomplete/invalid) steps cannot run — the server enforces the same
+        // gate on every entry point, this just keeps the buttons honest.
+        const invalid = this.steps.some(s => s.invalid === true);
+        const $buttons = this.$el.find('[data-role="debug"], [data-role="debug-step"]');
+        $buttons.prop('disabled', !enabled || invalid || this.debugSession !== null);
+        $buttons.attr('title', invalid ? __('aaxis.ontology.flow_editor.invalid_steps_blocked') : null);
+    }
+
+    /** Marks/unmarks one tile as having an incomplete/invalid config (red border). */
+    private markStepInvalid(step: PlacedStep, invalid: boolean): void {
+        step.invalid = invalid;
+        step.el.classList.toggle('is-config-invalid', invalid);
+        this.syncDebugButtons();
+    }
+
+    /** Applies the server-computed list of invalid step NAMES (page load and every save). */
+    private applyInvalidStepNames(names: string[]): void {
+        const set = new Set((names || []).map(n => String(n)));
+        this.steps.forEach(s => this.markStepInvalid(s, set.has(s.name)));
     }
 
     /**
@@ -2950,6 +3080,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * writes already performed by executed writers cannot be undone.
      */
     private startDebugSession(mode: 'step' | 'run', input: Record<string, any>): void {
+        this.clearDebugMarks(); // a fresh session starts from an unmarked canvas
         this.debugSession = {
             mode,
             input,
@@ -3113,6 +3244,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 return; // the session was cancelled while the request ran
             }
             if (!res.ok || !res.data || !res.data.success) {
+                // A failed step paints the canvas too: everything that ran stays amber, the
+                // failing tile turns red (the sidebar shows the error text).
+                this.markExecutedDebugSteps((res.data && res.data.executedIds) || []);
+                if (res.data && res.data.failedStepId) {
+                    this.markFailedDebugStep(String(res.data.failedStepId));
+                }
                 throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
             }
             session.context = res.data.context ?? {};
@@ -3121,7 +3258,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             session.total = Number(res.data.total);
             session.done = Boolean(res.data.done);
             session.statusLabel = `${res.data.step.name} (${session.index + 1}/${session.total})`;
-            this.markActiveDebugStep(String(res.data.step.id || ''));
+            this.markExecutedDebugSteps(res.data.executedIds || [String(res.data.step.id || '')]);
         }).catch((err: Error) => {
             if (this.debugSession === session) {
                 session.error = err.message || __('aaxis.ontology.flow_editor.debug_error');
@@ -3159,11 +3296,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 return;
             }
             if (!res.ok || !res.data || !res.data.success) {
+                this.markExecutedDebugSteps((res.data && res.data.executedIds) || []);
+                if (res.data && res.data.failedStepId) {
+                    this.markFailedDebugStep(String(res.data.failedStepId));
+                }
                 throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
             }
             session.context = res.data.output ?? {};
             session.contextKey = res.data.contextKey || null;
             session.done = true;
+            this.markExecutedDebugSteps(res.data.executedIds || []);
         }).catch((err: Error) => {
             if (this.debugSession === session) {
                 session.error = err.message || __('aaxis.ontology.flow_editor.debug_error');
@@ -3215,19 +3357,31 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-    /** Highlights the tile whose step just executed (null clears the marking). */
-    private markActiveDebugStep(stepId: string | null): void {
-        this.steps.forEach(s => s.el.classList.remove('is-debug-active'));
-        if (stepId !== null) {
-            const active = this.steps.find(s => s.id === stepId);
-            if (active) {
-                active.el.classList.add('is-debug-active');
+    /** Marks tiles as EXECUTED (amber) — marks accumulate over the session, never move away. */
+    private markExecutedDebugSteps(stepIds: string[]): void {
+        stepIds.forEach(id => {
+            const step = this.steps.find(s => s.id === String(id));
+            if (step) {
+                step.el.classList.add('is-debug-active');
             }
+        });
+    }
+
+    /** Marks the tile whose step FAILED (reddish) — the sidebar carries the error text itself. */
+    private markFailedDebugStep(stepId: string): void {
+        const step = this.steps.find(s => s.id === String(stepId));
+        if (step) {
+            step.el.classList.add('is-debug-failed');
         }
     }
 
+    /** Clears every executed/failed mark (session start and close). */
+    private clearDebugMarks(): void {
+        this.steps.forEach(s => s.el.classList.remove('is-debug-active', 'is-debug-failed'));
+    }
+
     private closeDebugSession(): void {
-        this.markActiveDebugStep(null);
+        this.clearDebugMarks();
         this.$el.find('[data-role="debugger"]').prop('hidden', true).empty();
         this.debugSession = null;
         this.debugUi = null;
@@ -3265,6 +3419,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
             const created = this.flow === null;
             this.flow = res.data.flow as FlowRecord;
+            this.applyInvalidStepNames((res.data.flow && res.data.flow.invalidSteps) || []);
             if (created && this.flow && this.flow.id) {
                 // Refreshing after the first save must reopen THIS flow, not a fresh editor.
                 window.history.replaceState(null, '', routing.generate('aaxis_ontology_flow_editor', {id: this.flow.id}));

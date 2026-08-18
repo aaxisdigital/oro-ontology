@@ -96,6 +96,7 @@
                                 <span class="fa fa-times" aria-hidden="true"></span>
                             </button>
                         </div>
+                        <div class="aaxis-flow-editor__toolbox-body" data-role="toolbox-body">
                         {% set sections = [
                             {key: 'triggers', category: 'trigger', items: [
                                 {key: 'cron', icon: 'fa-clock-o'},
@@ -108,15 +109,28 @@
                                 {key: 'sub_flow', icon: 'fa-sitemap'}
                             ]},
                             {key: 'operations', category: 'operation', items: [
-                                {key: 'reader', icon: 'fa-download'},
-                                {key: 'writer', icon: 'fa-upload'},
+                                {key: 'entity_read', icon: 'fa-download'},
+                                {key: 'entity_write', icon: 'fa-upload'},
                                 {key: 'invoke', icon: 'fa-bolt'}
+                            ]},
+                            {key: 'file_operations', category: 'operation', items: [
+                                {key: 'file_read', icon: 'fa-file-text-o'},
+                                {key: 'file_write', icon: 'fa-pencil-square-o'},
+                                {key: 'file_list', icon: 'fa-folder-open-o'},
+                                {key: 'file_delete', icon: 'fa-trash-o'},
+                                {key: 'file_rename', icon: 'fa-i-cursor'}
                             ]}
                         ] %}
                         {% for section in sections %}
                             <div class="aaxis-flow-editor__toolbox-section">
                                 <div class="aaxis-flow-editor__toolbox-section-title">
                                     {{ ('aaxis.ontology.flow_editor.toolbox.section.' ~ section.key)|trans }}
+                                    <button type="button" class="aaxis-flow-editor__toolbox-section-toggle"
+                                            data-role="toolbox-section-toggle"
+                                            title="{{ 'aaxis.ontology.flow_editor.toolbox.collapse'|trans }}"
+                                            aria-label="{{ 'aaxis.ontology.flow_editor.toolbox.collapse'|trans }}">
+                                        <span class="fa fa-minus" aria-hidden="true"></span>
+                                    </button>
                                 </div>
                                 {% for item in section.items %}
                                     <div class="aaxis-flow-editor__toolbox-item"
@@ -130,6 +144,7 @@
                                 {% endfor %}
                             </div>
                         {% endfor %}
+                        </div>
                     </div>
                 </div>
             </div>

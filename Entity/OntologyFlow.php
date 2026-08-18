@@ -53,7 +53,12 @@ class OntologyFlow
     public const array STEP_TYPES = [
         'cron', 'endpoint', 'entity_change',           // triggers
         'dwl_transform', 'choice', 'sub_flow',         // actions ("choice" acts as an if)
-        'reader', 'writer', 'invoke',                  // operations
+        // Operations. entity_read/entity_write are the typed successors of the REMOVED generic
+        // reader/writer (v1_10's ConvertLegacyReaderWriterSteps rewrote stored flows); `invoke`
+        // is the "HTTP Request" step (rest_api connectors only).
+        'invoke', 'entity_read', 'entity_write',
+        // File Operations (file_system/sftp/bucket connectors, DWL-capable paths).
+        'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename',
     ];
 
     #[ORM\Id]

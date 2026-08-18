@@ -240,6 +240,7 @@ aaxis:
             name_required: 'Please enter a name.'
             name_unique: 'A flow with this name already exists.'
             edit_builtin_forbidden: 'This is a built-in flow and cannot be edited.'
+            delete_builtin_forbidden: 'This is a built-in flow and cannot be deleted.'
             step_names_unique: 'Step names must be unique within the flow.'
             invalid_cron: 'Step "{{ name }}" has an invalid cron expression.'
             invalid_step_config: 'Step "{{ name }}" has an incomplete or invalid configuration.'
@@ -276,10 +277,12 @@ aaxis:
             toolbox:
                 title: 'Toolbox'
                 hide: 'Hide toolbox'
+                collapse: 'Expand / collapse this section'
                 section:
                     triggers: 'Triggers'
                     actions: 'Actions'
                     operations: 'Operations'
+                    file_operations: 'File Operations'
                 item:
                     cron: 'Schedule'
                     endpoint: 'Endpoint'
@@ -287,9 +290,14 @@ aaxis:
                     dwl_transform: 'DWL transform'
                     choice: 'Choice'
                     sub_flow: 'Sub-flow'
-                    reader: 'Reader'
-                    writer: 'Writer'
-                    invoke: 'Invoke'
+                    entity_read: 'Entity Read'
+                    entity_write: 'Entity Write'
+                    invoke: 'HTTP Request'
+                    file_read: 'Read File'
+                    file_write: 'Write File'
+                    file_list: 'List Folder'
+                    file_delete: 'Delete'
+                    file_rename: 'Rename'
         flow_view:
             add_button: 'Add Flow'
             import_button: 'Import Flow'

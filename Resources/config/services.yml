@@ -51,6 +51,7 @@ services:
             - '@http_client'
             - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
             - '@Aaxis\Bundle\OntologyBundle\Manager\FileConnectorTransfer'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator'
 
     # The rules a flow's steps must clear to be stored — shared by the editor's save endpoint and
     # the importer, so an imported flow is exactly as valid as a hand-built one.

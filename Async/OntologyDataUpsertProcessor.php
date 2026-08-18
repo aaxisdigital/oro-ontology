@@ -54,6 +54,7 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
 
         $eventId = null;
         $changed = [];
+        $error = null;
         try {
             $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
 
@@ -66,7 +67,7 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
                 throw new \InvalidArgumentException('uuid must be a string, got ' . get_debug_type($uuid));
             }
 
-            // Open the inbound event (everything but changed_ids and finished_at).
+            // Open the inbound event (everything but changed_ids, finished_at and error).
             $eventId = $this->events->open(
                 $flowId,
                 $uuid,
@@ -80,7 +81,9 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
             $changed = $outcome['changed'];
 
             if ($outcome['errors'] !== null) {
-                // Log the errors as a json message with an "errors" key.
+                // A rejected batch: the reasons land on the event row (the Events page shows them)
+                // and in the log.
+                $error = implode('; ', $outcome['errors']);
                 $this->logger->error((string) json_encode(['errors' => $outcome['errors']]));
             }
 
@@ -89,6 +92,10 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
 
             return self::ACK;
         } catch (\Throwable $e) {
+            // A crash (a database failure included) is a failed run like any other: the message
+            // reaches the event row too, not just the log — otherwise the Events page shows a
+            // finished, unchanged event indistinguishable from a no-op success.
+            $error = $e->getMessage();
             $this->logger->error('aaxis_ontology_data_upsert: failed to process message.', ['exception' => $e]);
 
             return self::REJECT;
@@ -97,7 +104,7 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
             // event never stays open (an open event now reads as "still running").
             if ($eventId !== null) {
                 try {
-                    $this->events->close($eventId, $changed);
+                    $this->events->close($eventId, $changed, $error);
                 } catch (\Throwable $closeError) {
                     $this->logger->error(
                         'aaxis_ontology_data_upsert: could not close the event.',

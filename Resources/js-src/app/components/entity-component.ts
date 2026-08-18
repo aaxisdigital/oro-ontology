@@ -3,7 +3,7 @@ import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
-import DataGrid, {GridAction} from 'aaxiscommon/js/app/widgets/data-grid';
+import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FieldChangeContext, FormField, SelectOption} from 'aaxiscommon/js/app/widgets/record-form-modal';
 import DwlPlayground from '../widgets/dwl-playground';
@@ -117,7 +117,7 @@ class OntologyEntityComponent extends BaseComponent {
             gridKey: 'ontology-entity',
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-entity'}),
             emptyText: __('aaxis.ontology.entity_manager.empty'),
-            onAction: (action, row) => this.onAction(action, row as EntityRecord)
+            onAction: (action, row, event) => this.onAction(action, row as EntityRecord, event)
         });
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
@@ -173,7 +173,7 @@ class OntologyEntityComponent extends BaseComponent {
         return $('<span/>', {'class': 'aaxis-attr-cell', text: String(row.attributeCount || 0)});
     }
 
-    private onAction(action: string, row: EntityRecord): void {
+    private onAction(action: string, row: EntityRecord, event?: MouseEvent): void {
         if (action === 'edit') {
             this.openForm(row);
         } else if (action === 'delete') {
@@ -181,7 +181,7 @@ class OntologyEntityComponent extends BaseComponent {
         } else if (action === 'dwl') {
             this.openDwlPlayground(row);
         } else if (action === 'data') {
-            this.openDataView(row);
+            this.openDataView(row, event);
         } else if (action === 'purge') {
             this.confirmPurge(row);
         }
@@ -254,10 +254,10 @@ class OntologyEntityComponent extends BaseComponent {
      * Opens the Data View pre-filtered to this entity. The name (not the id) is passed because that
      * is what the Data View grid's `entity` column holds — the page turns it into a column filter.
      */
-    private openDataView(row: EntityRecord): void {
+    private openDataView(row: EntityRecord, event?: MouseEvent): void {
         const url = routing.generate('aaxis_ontology_data_view')
             + '?entity=' + encodeURIComponent(String(row.name || ''));
-        window.location.assign(url);
+        navigateTo(url, event); // cmd/ctrl+click opens the filtered Data View in a new tab
     }
 
     /** Opens the DataWeave playground over this entity's stored records. */

@@ -386,10 +386,14 @@ final class Parser
                 continue;
             }
 
-            // Member access: .property
+            // Member access: .property — the key may also be QUOTED (.'some key' / ."some key"),
+            // which DataWeave allows for keys that are not valid identifiers (or just quoted, as
+            // in `$.'type'`).
             if ($token->type === TokenType::Dot) {
                 $this->advance();
-                if ($this->check(TokenType::Identifier) || $this->isKeywordToken($this->current())) {
+                if ($this->check(TokenType::Identifier) || $this->isKeywordToken($this->current())
+                    || $this->check(TokenType::String)
+                ) {
                     $prop = $this->advance()->value;
                     $left = new MemberAccess($left, $prop, $token->line, $token->column);
                     continue;
@@ -399,17 +403,21 @@ final class Parser
             // Descendant selector: ..property (recursively collects all matching values)
             if ($token->type === TokenType::DotDot) {
                 $this->advance();
-                if ($this->check(TokenType::Identifier) || $this->isKeywordToken($this->current())) {
+                if ($this->check(TokenType::Identifier) || $this->isKeywordToken($this->current())
+                    || $this->check(TokenType::String)
+                ) {
                     $prop = $this->advance()->value;
                     $left = new DescendantSelector($left, $prop, $token->line, $token->column);
                     continue;
                 }
             }
 
-            // Multi-value selector: .*property
+            // Multi-value selector: .*property (quoted keys allowed, like the plain selector)
             if ($token->type === TokenType::DotStar) {
                 $this->advance();
-                $prop = $this->consume(TokenType::Identifier)->value;
+                $prop = $this->check(TokenType::String)
+                    ? $this->advance()->value
+                    : $this->consume(TokenType::Identifier)->value;
                 $left = new MultiValueSelector($left, $prop, $token->line, $token->column);
                 continue;
             }

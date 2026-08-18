@@ -8,6 +8,7 @@ use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
 use Doctrine\Persistence\ManagerRegistry;
@@ -23,28 +24,26 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  *    output (port 0), falsy on the RED one (port 1; optional — no link just ends the flow). The
  *    verdict is recorded in the context under the reserved `choiceResults` key (step id => bool),
  *    which is also what re-derives the already-walked path in step-through debug;
- *  - reader/entity: real data via {@see OntologyDataApiManager} (`all` = EVERY record — flow
- *    reads are not page-capped — optionally ordered by one attribute and/or limited by the step's
- *    own config; `by_id` = one record's payload — a MISSING record yields null, not an error;
+ *  - entity_read: real data via {@see OntologyDataApiManager} (`all` = EVERY record — flow reads
+ *    are not page-capped — optionally ordered by one attribute and/or limited by the step's own
+ *    config; `by_id` = one record's payload — a MISSING record yields null, not an error;
  *    `by_attribute` = the LIST of records whose attribute equals the value, [] when none match).
  *    Internal-system entities read from the OroCommerce entity itself ({@see OroEntityReader});
- *  - reader/connector: rest_api connectors execute for real (URL from the connector's
- *    server/port + the step's path; connector headers + auth headers; auth=oauth first POSTs the
- *    token path and attaches the returned access_token; the step's operation/body are honoured);
- *    file_system/sftp/bucket connectors read for real via {@see FileConnectorTransfer} — a FOLDER
- *    path yields a list of items, a FILE path its content, and an I/O failure an
- *    `{isError: true, ...}` payload instead of aborting the run; database connectors emit a
- *    placeholder note;
+ *  - invoke ("HTTP Request"): the rest_api connector call executes for real (URL from the
+ *    connector's server/port + the step's path; connector headers + auth headers; auth=oauth
+ *    first POSTs the token path and attaches the returned access_token; the step's
+ *    operation/body are honoured);
  *  - dwl_transform: runs the step's DataWeave script with the whole context as variables (also
  *    reachable as one `context` object, e.g. context["flowUuid"]);
- *  - writer/entity: performs the real upsert SYNCHRONOUSLY (same validation and PG function as
+ *  - entity_write: performs the real upsert SYNCHRONOUSLY (same validation and PG function as
  *    the Data View "Add Data", but no queue), stamped with the flow being debugged (Manual only
  *    when the flow was never saved) and the execution uuid — the receipt carries the actual
  *    outcome ({uuid, count, upsert, changedIds}) and the event row completes on the spot;
- *  - writer/connector: file_system/sftp/bucket write for real via {@see FileConnectorTransfer} —
- *    the step's content (a context key, or its DWL expression) is written to the step's path and
- *    the receipt is `{isError, message, path, bytes}`; rest_api/database emit a placeholder note;
- *  - everything else: no-op pass-through for now.
+ *  - file_read/file_write/file_list/file_delete/file_rename: the file-based connector operations,
+ *    all real via {@see FileConnectorTransfer} (DWL-capable paths; I/O failures come back as
+ *    `{isError: true, ...}` payloads instead of aborting the run);
+ *  - everything else: no-op pass-through for now. (The legacy generic reader/writer types were
+ *    REMOVED — v1_10's ConvertLegacyReaderWriterSteps rewrote stored flows to the types above.)
  *
  * Every TOP-LEVEL execution mints ONE uuid up front, seeded into the context as `flowUuid`: all
  * writes of the run share it, so their events/records group under a single identity. Sub-flows
@@ -52,6 +51,9 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  */
 class FlowDebugExecutor
 {
+    /** @var array<int, string> step ids the LAST run executed successfully, in order */
+    private array $lastExecutedIds = [];
+
     private const int TIMEOUT = 30;
 
     public function __construct(
@@ -60,7 +62,25 @@ class FlowDebugExecutor
         private readonly HttpClientInterface $httpClient,
         private readonly DwlTransformer $dwl,
         private readonly FileConnectorTransfer $files,
+        private readonly FlowStepValidator $stepValidator,
     ) {
+    }
+
+    /**
+     * The RUN gate: incomplete/invalid steps are SAVEABLE (the editor marks them red), but a flow
+     * carrying any must not execute — not from the UI, not from a trigger. Sitting in the executor,
+     * the gate covers every entry point (debug, Run Now, the scheduler, future triggers) at once.
+     *
+     * @param array<int, array{id: string, type: string, name: string, config: array<string, mixed>|null}> $steps
+     *
+     * @throws \RuntimeException naming the first problem
+     */
+    private function assertRunnable(array $steps): void
+    {
+        $problems = $this->stepValidator->validate($steps);
+        if ($problems !== []) {
+            throw new \RuntimeException($problems[0]);
+        }
     }
 
     /**
@@ -79,6 +99,7 @@ class FlowDebugExecutor
      */
     public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null): array
     {
+        $this->assertRunnable($steps);
         $order = $this->executionOrder($steps, $links);
         $this->touchLastExecuted($flow);
 
@@ -89,13 +110,14 @@ class FlowDebugExecutor
         $executionUuid ??= $this->dataApi->generateUuid();
 
         $context = $this->initialContext($order[0], $input, $executionUuid);
+        $this->lastExecutedIds = [];
         try {
             // The order is re-derived after every choice: its verdict (just recorded in the
             // context) extends the walk with the branch it picked — or ends it, when the picked
             // port has no link.
             for ($cursor = 0; $cursor < \count($order); $cursor++) {
                 $step = $order[$cursor];
-                $this->executeStep($step, $context, $flow, $executionUuid);
+                $this->executeStepTracked($step, $context, $flow, $executionUuid);
                 if ($step['type'] === 'choice') {
                     $order = $this->executionOrder($steps, $links, self::choiceResults($context));
                 }
@@ -107,6 +129,34 @@ class FlowDebugExecutor
         }
 
         return $context;
+    }
+
+    /**
+     * The ids of the steps the LAST execute()/executeFrom() call ran successfully, in order — what
+     * the editor paints amber. On failure the trail travels inside {@see FlowStepFailure} too.
+     *
+     * @return array<int, string>
+     */
+    public function lastExecutedIds(): array
+    {
+        return $this->lastExecutedIds;
+    }
+
+    /**
+     * Runs one step, keeping the executed trail: a success appends the step's id, a failure wraps
+     * the error into a {@see FlowStepFailure} carrying the failing id + the trail so far.
+     *
+     * @param array{id: string, type: string, name: string, config: array<string, mixed>|null} $step
+     * @param array<string, mixed>                                                             $context
+     */
+    private function executeStepTracked(array $step, array &$context, ?OntologyFlow $flow, string $executionUuid): void
+    {
+        try {
+            $this->executeStep($step, $context, $flow, $executionUuid);
+        } catch (\RuntimeException $e) {
+            throw new FlowStepFailure($e->getMessage(), $step['id'], $this->lastExecutedIds, $e);
+        }
+        $this->lastExecutedIds[] = $step['id'];
     }
 
     /**
@@ -130,6 +180,7 @@ class FlowDebugExecutor
         // Branch-aware: the verdicts recorded by the choice steps ALREADY executed (carried by the
         // debug context) rebuild exactly the path walked so far, so the client's plain index stays
         // a valid cursor into it. `total` grows as later choices resolve their branch.
+        $this->assertRunnable($steps);
         $order = $this->executionOrder($steps, $links, self::choiceResults($context ?? []));
         $total = \count($order);
         if ($index < 0 || $index >= $total) {
@@ -149,10 +200,11 @@ class FlowDebugExecutor
         }
 
         $cursor = $index;
+        $this->lastExecutedIds = [];
         try {
             do {
                 $executed = $order[$cursor];
-                $this->executeStep($executed, $context, $flow, $executionUuid);
+                $this->executeStepTracked($executed, $context, $flow, $executionUuid);
                 if ($executed['type'] === 'choice') {
                     $order = $this->executionOrder($steps, $links, self::choiceResults($context));
                     $total = \count($order);
@@ -334,7 +386,12 @@ class FlowDebugExecutor
             return;
         }
 
-        if (!\in_array($step['type'], ['reader', 'dwl_transform', 'writer'], true)) {
+        $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
+        if (!\in_array(
+            $step['type'],
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke'], $fileOps),
+            true
+        )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
         }
 
@@ -347,31 +404,36 @@ class FlowDebugExecutor
             throw new \RuntimeException(sprintf('Step "%s" has no destination.', $step['name']));
         }
 
-        if ($step['type'] === 'dwl_transform') {
-            // The WHOLE current context is visible to the script (payload, prior destinations…).
-            try {
-                $context[$destination] = $this->dwl->transform((string) ($config['code'] ?? ''), $context);
-            } catch (\Throwable $e) {
-                throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
-            }
+        if (\in_array($step['type'], $fileOps, true)) {
+            $context[$destination] = $this->fileOperation($step['type'], $step['name'], $config, $context);
 
             return;
         }
 
-        if ($step['type'] === 'writer') {
-            if (($config['writer'] ?? null) === 'entity') {
-                $context[$destination] = $this->writeEntity($step['name'], $config, $context, $flow, $executionUuid);
-            } else {
-                $context[$destination] = $this->writeConnector($step['name'], $config, $context);
-            }
-
-            return;
-        }
-
-        if (($config['reader'] ?? null) === 'entity') {
+        // The typed successors of the generic reader/writer (same config, no discriminator), and
+        // "HTTP Request" (`invoke`) — a rest_api connector call, the response under the destination.
+        if ($step['type'] === 'entity_read') {
             $context[$destination] = $this->readEntity($step['name'], $config);
-        } else {
+
+            return;
+        }
+        if ($step['type'] === 'entity_write') {
+            $context[$destination] = $this->writeEntity($step['name'], $config, $context, $flow, $executionUuid);
+
+            return;
+        }
+        if ($step['type'] === 'invoke') {
             $context[$destination] = $this->readConnector($step['name'], $config, $context);
+
+            return;
+        }
+
+        // dwl_transform: the WHOLE current context is visible to the script (payload, prior
+        // destinations…).
+        try {
+            $context[$destination] = $this->dwl->transform((string) ($config['code'] ?? ''), $context);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
         }
     }
 
@@ -486,21 +548,17 @@ class FlowDebugExecutor
         ];
     }
 
+
     /**
-     * Writes the step's content through a file-based connector (file_system / sftp / bucket). The
-     * content is resolved exactly like the entity writer's — a context key, or a DWL expression
-     * when `content_dwl` is on — and stringified: strings verbatim, anything else JSON-encoded.
-     *
-     * The receipt is `{isError: false, message, path, bytes}`, or `{isError: true, message,
-     * exception?}` when the storage refused the write. Connector types that cannot write yet
-     * (rest_api, database) keep their placeholder note.
+     * The File Operations steps: one file-based connector (file_system/sftp/bucket), a DWL-capable
+     * path, and per-type extras — file_write's Content (context key or DWL, like every writer) and
+     * file_rename's New name. The transfer's result contract applies: I/O failures come back as
+     * `{isError: true, ...}` payloads the flow can branch on, never as aborts.
      *
      * @param array<string, mixed> $config
      * @param array<string, mixed> $context
-     *
-     * @return array<string, mixed>
      */
-    private function writeConnector(string $stepName, array $config, array $context): array
+    private function fileOperation(string $type, string $stepName, array $config, array $context): mixed
     {
         /** @var OntologyConnector|null $connector */
         $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
@@ -508,17 +566,69 @@ class FlowDebugExecutor
             throw new \RuntimeException(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
         }
         if (!$this->files->supports((string) $connector->getType())) {
-            return ['_debug' => sprintf('"%s" connector writers are not executed in debug yet.', (string) $connector->getType())];
+            throw new \RuntimeException(sprintf(
+                'Step "%s": a "%s" connector is not file-based.',
+                $stepName,
+                (string) $connector->getType()
+            ));
         }
 
-        $value = $this->resolveContent($stepName, $config, $context);
-        $content = \is_string($value) ? $value : (string) json_encode($value);
+        $path = $this->resolveDwlText($stepName, 'path', (string) ($config['path'] ?? ''), ($config['path_dwl'] ?? false) === true, $context);
 
         try {
-            return $this->files->write($connector, (string) ($config['path'] ?? ''), $content);
+            switch ($type) {
+                case 'file_read':
+                case 'file_list':
+                    return $this->files->read($connector, $path);
+                case 'file_write':
+                    $value = $this->resolveContent($stepName, $config, $context);
+
+                    return $this->files->write($connector, $path, \is_string($value) ? $value : (string) json_encode($value));
+                case 'file_delete':
+                    return $this->files->delete($connector, $path);
+                default: // file_rename
+                    $newName = $this->resolveDwlText(
+                        $stepName,
+                        'new name',
+                        (string) ($config['new_name'] ?? ''),
+                        ($config['new_name_dwl'] ?? false) === true,
+                        $context
+                    );
+
+                    return $this->files->rename($connector, $path, $newName);
+            }
         } catch (\RuntimeException $e) {
             throw new \RuntimeException(sprintf('Step "%s": %s.', $stepName, $e->getMessage()), 0, $e);
         }
+    }
+
+    /**
+     * A text config value that may be a DWL expression: with the toggle ON the expression runs
+     * against the context and must yield a non-empty scalar; OFF is the literal text (unlike a
+     * writer's Content, which names a context key — a path/name is typed in place).
+     *
+     * @param array<string, mixed> $context
+     */
+    private function resolveDwlText(string $stepName, string $what, string $raw, bool $isDwl, array $context): string
+    {
+        if (!$isDwl) {
+            return trim($raw);
+        }
+        try {
+            $value = $this->dwl->transform($raw, $context);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+        }
+        if (!\is_scalar($value) || trim((string) $value) === '') {
+            throw new \RuntimeException(sprintf(
+                'Step "%s": the %s expression must produce a non-empty text, got %s.',
+                $stepName,
+                $what,
+                get_debug_type($value)
+            ));
+        }
+
+        return trim((string) $value);
     }
 
     /**

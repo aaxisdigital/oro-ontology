@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_9';
+        return 'v1_10';
     }
 
     #[\Override]
@@ -143,6 +143,9 @@ class AaxisOntologyBundleInstaller implements Installation
         $table->addColumn('changed_ids', 'simple_array', ['notnull' => false]);
         $table->addColumn('started_at', 'datetime', ['notnull' => false]);
         $table->addColumn('finished_at', 'datetime', ['notnull' => false]);
+        // How the run FAILED (null on success) — the Events page derives Running/Success/Error
+        // from finished_at + this.
+        $table->addColumn('error', 'text', ['notnull' => false]);
         $table->setPrimaryKey(['id']);
         $table->addIndex(['flow_id'], 'aaxis_ontology_data_events_flow_idx');
         $table->addIndex(['entity_id'], 'aaxis_ontology_data_events_entity_idx');

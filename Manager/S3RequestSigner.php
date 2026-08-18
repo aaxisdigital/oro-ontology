@@ -33,11 +33,13 @@ class S3RequestSigner
     /**
      * Builds the authentication headers for a request.
      *
-     * @param string                $method      HTTP verb (GET, PUT, HEAD, ...)
-     * @param string                $host        host header value, see {@see hostHeader()}
-     * @param string                $path        path starting with '/' (raw, not URL-encoded)
-     * @param array<string, string> $query       query parameters, unencoded
-     * @param string|null           $payloadHash SHA-256 of the body; null signs an empty body
+     * @param string                $method       HTTP verb (GET, PUT, HEAD, ...)
+     * @param string                $host         host header value, see {@see hostHeader()}
+     * @param string                $path         path starting with '/' (raw, not URL-encoded)
+     * @param array<string, string> $query        query parameters, unencoded
+     * @param string|null           $payloadHash  SHA-256 of the body; null signs an empty body
+     * @param array<string, string> $extraHeaders extra headers to SIGN and send (e.g.
+     *                                            x-amz-copy-source); values sent verbatim
      *
      * @return array<string, string> headers to add to the request (Host excluded — the HTTP
      *                               client derives it from the URL)
@@ -51,21 +53,31 @@ class S3RequestSigner
         string $secretKey,
         string $region,
         ?string $payloadHash = null,
-        ?\DateTimeImmutable $now = null
+        ?\DateTimeImmutable $now = null,
+        array $extraHeaders = []
     ): array {
         $now ??= new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $amzDate = $now->format('Ymd\THis\Z');
         $dateStamp = $now->format('Ymd');
         $payloadHash ??= hash('sha256', '');
 
-        // Canonical headers are the minimum set: host + the two x-amz headers that are always sent.
-        $canonicalHeaders = sprintf(
-            "host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n",
-            $host,
-            $payloadHash,
-            $amzDate
-        );
-        $signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+        // Canonical headers: host + the two always-sent x-amz headers + any extras, sorted by
+        // lowercase name as SigV4 requires (the fixed trio happens to be pre-sorted; extras like
+        // x-amz-copy-source land in between).
+        $toSign = [
+            'host' => $host,
+            'x-amz-content-sha256' => $payloadHash,
+            'x-amz-date' => $amzDate,
+        ];
+        foreach ($extraHeaders as $name => $value) {
+            $toSign[strtolower(trim((string) $name))] = trim((string) $value);
+        }
+        ksort($toSign, SORT_STRING);
+        $canonicalHeaders = '';
+        foreach ($toSign as $name => $value) {
+            $canonicalHeaders .= $name . ':' . $value . "\n";
+        }
+        $signedHeaders = implode(';', array_keys($toSign));
 
         // The blank line between the headers and the signed-header list comes from
         // $canonicalHeaders already ending in "\n" plus the join — both are required.
@@ -88,7 +100,7 @@ class S3RequestSigner
 
         $signature = hash_hmac('sha256', $stringToSign, $this->signingKey($secretKey, $dateStamp, $region));
 
-        return [
+        $headers = [
             'x-amz-date' => $amzDate,
             'x-amz-content-sha256' => $payloadHash,
             'Authorization' => sprintf(
@@ -100,6 +112,12 @@ class S3RequestSigner
                 $signature
             ),
         ];
+        // The signed extras must be SENT exactly as signed.
+        foreach ($extraHeaders as $name => $value) {
+            $headers[strtolower(trim((string) $name))] = trim((string) $value);
+        }
+
+        return $headers;
     }
 
     /**

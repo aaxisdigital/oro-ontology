@@ -3,7 +3,7 @@ import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
-import DataGrid, {GridAction} from 'aaxiscommon/js/app/widgets/data-grid';
+import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal from 'aaxiscommon/js/app/widgets/record-form-modal';
 interface OntologySystemOptions {
@@ -66,7 +66,7 @@ class OntologySystemComponent extends BaseComponent {
             gridKey: 'ontology-system',
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-system'}),
             emptyText: __('aaxis.ontology.system_manager.empty'),
-            onAction: (action, row) => this.onAction(action, row as SystemRecord)
+            onAction: (action, row, event) => this.onAction(action, row as SystemRecord, event)
         });
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
@@ -92,13 +92,13 @@ class OntologySystemComponent extends BaseComponent {
             .finally(() => this.setBusy(false));
     }
 
-    private onAction(action: string, row: SystemRecord): void {
+    private onAction(action: string, row: SystemRecord, event?: MouseEvent): void {
         if (action === 'edit') {
             this.openForm(row);
         } else if (action === 'delete') {
             this.remove(row);
         } else if (action === 'entities') {
-            this.openEntities(row);
+            this.openEntities(row, event);
         }
     }
 
@@ -106,10 +106,10 @@ class OntologySystemComponent extends BaseComponent {
      * Opens the Entities page pre-filtered to this system. The name (not the id) is passed because
      * that is what the Entities grid's `systemName` column holds.
      */
-    private openEntities(row: SystemRecord): void {
+    private openEntities(row: SystemRecord, event?: MouseEvent): void {
         const url = routing.generate('aaxis_ontology_entities')
             + '?system=' + encodeURIComponent(String(row.name || ''));
-        window.location.assign(url);
+        navigateTo(url, event); // cmd/ctrl+click opens the filtered Entities page in a new tab
     }
 
     private onAdd(): void {

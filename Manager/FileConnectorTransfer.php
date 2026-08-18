@@ -116,6 +116,97 @@ class FileConnectorTransfer
         }
     }
 
+    /**
+     * Deletes ONE file (never a folder — refusing beats recursing). A missing path is a failure
+     * payload on every storage — object storage would happily "delete" a key that never existed,
+     * so the object's existence is checked first to keep the three types honest alike.
+     *
+     * @return array<string, mixed> `{isError: false, message, path}` or an isError payload
+     *
+     * @throws \RuntimeException when the connector itself is unusable (see the class docblock)
+     */
+    public function delete(OntologyConnector $connector, string $path): array
+    {
+        $config = $connector->getConfig() ?? [];
+        $path = $this->normalizeStepPath($path);
+
+        try {
+            if ($path === '' || str_ends_with($path, '/')) {
+                throw new ConnectorTransferFailure(sprintf('"%s" is a folder path — delete needs a file path.', $path));
+            }
+
+            match ($connector->getType()) {
+                OntologyConnector::TYPE_FILE_SYSTEM => $this->deleteLocal($config, $path),
+                OntologyConnector::TYPE_SFTP => $this->deleteSftp($config, $path),
+                default => $this->deleteBucket($config, $path),
+            };
+
+            return ['isError' => false, 'message' => sprintf('Deleted "%s".', $path), 'path' => $path];
+        } catch (ConnectorTransferFailure $e) {
+            return $this->failure($e);
+        }
+    }
+
+    /**
+     * Renames/moves ONE file. $newName without a "/" renames within the source's folder; with one
+     * it is a full path against the connector's base, i.e. a move. An existing target is a failure
+     * on every storage (a silent overwrite hides data loss). Object storage has no rename — the
+     * object is copied (x-amz-copy-source) and the source deleted.
+     *
+     * @return array<string, mixed> `{isError: false, message, path: <new>, from: <old>}` or an
+     *                              isError payload
+     *
+     * @throws \RuntimeException when the connector itself is unusable (see the class docblock)
+     */
+    public function rename(OntologyConnector $connector, string $path, string $newName): array
+    {
+        $config = $connector->getConfig() ?? [];
+        $path = $this->normalizeStepPath($path);
+        $target = $this->renameTarget($path, $newName);
+
+        try {
+            if ($path === '' || str_ends_with($path, '/')) {
+                throw new ConnectorTransferFailure(sprintf('"%s" is a folder path — rename needs a file path.', $path));
+            }
+            if ($target === '' || str_ends_with($target, '/')) {
+                throw new ConnectorTransferFailure(sprintf('"%s" is not a valid new name.', $newName));
+            }
+            if ($target === $path) {
+                throw new ConnectorTransferFailure(sprintf('"%s" already is the current name.', $newName));
+            }
+
+            match ($connector->getType()) {
+                OntologyConnector::TYPE_FILE_SYSTEM => $this->renameLocal($config, $path, $target),
+                OntologyConnector::TYPE_SFTP => $this->renameSftp($config, $path, $target),
+                default => $this->renameBucket($config, $path, $target),
+            };
+
+            return [
+                'isError' => false,
+                'message' => sprintf('Renamed "%s" to "%s".', $path, $target),
+                'path' => $target,
+                'from' => $path,
+            ];
+        } catch (ConnectorTransferFailure $e) {
+            return $this->failure($e);
+        }
+    }
+
+    /**
+     * The rename target path: a bare name replaces the source's leaf, a name containing "/" is a
+     * full path against the connector base (= a move).
+     */
+    private function renameTarget(string $path, string $newName): string
+    {
+        $newName = trim(str_replace('\\', '/', $newName));
+        if (str_contains($newName, '/')) {
+            return $this->normalizeStepPath($newName);
+        }
+        $slash = strrpos($path, '/');
+
+        return $slash === false ? $newName : substr($path, 0, $slash + 1) . $newName;
+    }
+
     // --- file_system ------------------------------------------------------------
 
     /**
@@ -194,7 +285,151 @@ class FileConnectorTransfer
             throw new ConnectorTransferFailure(sprintf('Path "%s" could not be written.', $path));
         }
 
-        return $this->receipt($path, (int) $bytes);
+        // file_system writes land on the APPLICATION SERVER's filesystem (in a container, the
+        // container's) — the receipt spells out the resolved absolute target so nobody hunts for
+        // the file on the wrong machine.
+        return $this->receipt($path, (int) $bytes) + ['absolutePath' => $target];
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function deleteLocal(array $config, string $path): void
+    {
+        $target = $this->localTarget($config, $path);
+        if (is_dir($target)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" is a folder — delete needs a file path.', $path));
+        }
+        if (!is_file($target)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" does not exist.', $path));
+        }
+        if (!@unlink($target)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" could not be deleted.', $path));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function renameLocal(array $config, string $path, string $newPath): void
+    {
+        $source = $this->localTarget($config, $path);
+        $target = $this->localTarget($config, $newPath);
+        if (is_dir($source)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" is a folder — rename needs a file path.', $path));
+        }
+        if (!is_file($source)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" does not exist.', $path));
+        }
+        if (file_exists($target)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" already exists.', $newPath));
+        }
+        if (!is_dir(\dirname($target))) {
+            throw new ConnectorTransferFailure(sprintf('The folder for "%s" does not exist.', $newPath));
+        }
+        if (!@rename($source, $target)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" could not be renamed.', $path));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function deleteSftp(array $config, string $path): void
+    {
+        $sftp = $this->sftpSession($config);
+        if ($sftp->is_dir($path)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" is a folder — delete needs a file path.', $path));
+        }
+        if (!$sftp->file_exists($path)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" does not exist.', $path));
+        }
+        if (!$sftp->delete($path, false)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" could not be deleted: %s', $path, $sftp->getLastSFTPError() ?: 'unknown error'));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function renameSftp(array $config, string $path, string $newPath): void
+    {
+        $sftp = $this->sftpSession($config);
+        if ($sftp->is_dir($path)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" is a folder — rename needs a file path.', $path));
+        }
+        if (!$sftp->file_exists($path)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" does not exist.', $path));
+        }
+        if ($sftp->file_exists($newPath)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" already exists.', $newPath));
+        }
+        if (!$sftp->rename($path, $newPath)) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" could not be renamed: %s', $path, $sftp->getLastSFTPError() ?: 'unknown error'));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function deleteBucket(array $config, string $path): void
+    {
+        $endpoint = $this->bucketEndpoint($config);
+        // Object storage "deletes" a key that never existed without complaint — check first so a
+        // typo reports like it does on the other storages.
+        $this->assertBucketObjectExists($endpoint, $path);
+
+        [$status, $body] = $this->bucketRequest($endpoint, 'DELETE', $path, [], null);
+        if ($status >= 400) {
+            throw new ConnectorTransferFailure($this->bucketHttpMessage($status, $path, $body));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private function renameBucket(array $config, string $path, string $newPath): void
+    {
+        $endpoint = $this->bucketEndpoint($config);
+        $this->assertBucketObjectExists($endpoint, $path);
+        [$status] = $this->bucketRequest($endpoint, 'HEAD', $newPath, [], null);
+        if ($status < 400) {
+            throw new ConnectorTransferFailure(sprintf('Path "%s" already exists.', $newPath));
+        }
+
+        // No rename in object storage: server-side copy, then delete the source.
+        $copySource = '/' . $endpoint['bucket'] . '/' . $path;
+        [$status, $body] = $this->bucketRequest($endpoint, 'PUT', $newPath, [], null, [
+            'x-amz-copy-source' => $this->signer->encodePath($copySource),
+        ]);
+        // A copy can FAIL with a 200 carrying an <Error> body (S3 quirk) — status alone is not enough.
+        if ($status >= 400 || (string) ($this->parseXml($body)?->getName() ?? '') === 'Error') {
+            throw new ConnectorTransferFailure($this->bucketHttpMessage(max($status, 400), $path, $body));
+        }
+
+        [$status, $body] = $this->bucketRequest($endpoint, 'DELETE', $path, [], null);
+        if ($status >= 400) {
+            throw new ConnectorTransferFailure(sprintf(
+                'Copied to "%s" but the source "%s" could not be deleted: %s',
+                $newPath,
+                $path,
+                $this->bucketHttpMessage($status, $path, $body)
+            ));
+        }
+    }
+
+    /**
+     * @param array{scheme: string, host: string, bucket: string, region: string, accessKey: string, secretKey: string} $endpoint
+     */
+    private function assertBucketObjectExists(array $endpoint, string $path): void
+    {
+        [$status] = $this->bucketRequest($endpoint, 'HEAD', $path, [], null);
+        if ($status === 404) {
+            throw new ConnectorTransferFailure(sprintf('Object "%s" does not exist in bucket "%s".', $path, $endpoint['bucket']));
+        }
+        if ($status >= 400) {
+            throw new ConnectorTransferFailure($this->bucketHttpMessage($status, $path, ''));
+        }
     }
 
     /**
@@ -464,10 +699,11 @@ class FileConnectorTransfer
      *
      * @param array{scheme: string, host: string, bucket: string, region: string, accessKey: string, secretKey: string} $endpoint
      * @param array<string, string> $query
+     * @param array<string, string> $extraHeaders extra SIGNED headers (e.g. x-amz-copy-source)
      *
      * @return array{0: int, 1: string}
      */
-    private function bucketRequest(array $endpoint, string $method, string $key, array $query, ?string $body): array
+    private function bucketRequest(array $endpoint, string $method, string $key, array $query, ?string $body, array $extraHeaders = []): array
     {
         $path = '/' . $endpoint['bucket'] . ($key === '' ? '' : '/' . $key);
         $headers = $this->signer->headers(
@@ -478,7 +714,9 @@ class FileConnectorTransfer
             $endpoint['accessKey'],
             $endpoint['secretKey'],
             $endpoint['region'],
-            $body === null ? null : hash('sha256', $body)
+            $body === null ? null : hash('sha256', $body),
+            null,
+            $extraHeaders
         );
 
         $encodedQuery = $this->signer->encodeQuery($query);

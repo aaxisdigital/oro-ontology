@@ -266,6 +266,7 @@ class Evaluator
             '--' => $this->removeAll($left, $right),
             '==' => Value::boolean($this->isEqual($left, $right)),
             '!=' => Value::boolean(!$this->isEqual($left, $right)),
+            '~=' => Value::boolean($this->isSimilar($left, $right)),
             '>' => Value::boolean(Value::compare($left, $right) > 0),
             '>=' => Value::boolean(Value::compare($left, $right) >= 0),
             '<' => Value::boolean(Value::compare($left, $right) < 0),
@@ -287,6 +288,31 @@ class Evaluator
             return $shifted;
         }
         return Value::string($this->toString($left) . $this->toString($right));
+    }
+
+    /**
+     * The `~=` similarity: equal IGNORING type — DataWeave coerces one side to the other before
+     * comparing, so "1" ~= 1, "1.0" ~= 1 and "true" ~= true all hold. Strict equality short-cuts;
+     * numbers against numeric strings compare numerically (so "1.0" matches 1); everything else
+     * scalar compares by string form. Structures and nulls are only ever equal to themselves.
+     */
+    private function isSimilar(Value $left, Value $right): bool
+    {
+        if ($this->isEqual($left, $right)) {
+            return true;
+        }
+        $structural = [ValueType::Array, ValueType::Object, ValueType::Function, ValueType::Null];
+        if (in_array($left->type, $structural, true) || in_array($right->type, $structural, true)) {
+            return false;
+        }
+        if ($left->type === ValueType::Number || $right->type === ValueType::Number) {
+            $l = trim($this->toString($left));
+            $r = trim($this->toString($right));
+
+            return is_numeric($l) && is_numeric($r) && (float) $l === (float) $r;
+        }
+
+        return $this->toString($left) === $this->toString($right);
     }
 
     private function subtract(Value $left, Value $right): Value

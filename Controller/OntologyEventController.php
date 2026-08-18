@@ -69,6 +69,13 @@ class OntologyEventController extends AbstractController
         $uniqueIds = array_values(array_filter($event->getUniqueIds() ?? [], static fn ($id) => $id !== ''));
         $changedIds = array_values(array_filter($event->getChangedIds() ?? [], static fn ($id) => $id !== ''));
 
+        // Derived, never stored: still running / finished clean / finished with an error. The raw
+        // word is what the grid's Status column filters and sorts on; the error text rides along.
+        $status = 'running';
+        if ($event->getFinishedAt() !== null) {
+            $status = $event->getError() === null ? 'success' : 'error';
+        }
+
         return [
             'id' => $event->getId(),
             'flowId' => $event->getFlowId(),
@@ -82,6 +89,8 @@ class OntologyEventController extends AbstractController
             'changedIdsCount' => \count($changedIds),
             'startedAt' => $event->getStartedAt()?->format(\DateTimeInterface::ATOM),
             'finishedAt' => $event->getFinishedAt()?->format(\DateTimeInterface::ATOM),
+            'status' => $status,
+            'error' => $event->getError(),
         ];
     }
 

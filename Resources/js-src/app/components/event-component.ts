@@ -22,6 +22,8 @@ interface EventRecord {
     changedIdsCount: number;
     startedAt: string | null;
     finishedAt: string | null;
+    status: 'running' | 'success' | 'error';
+    error: string | null;
 }
 
 /**
@@ -31,6 +33,7 @@ interface EventRecord {
 class OntologyEventComponent extends BaseComponent {
     private $el!: any;
     private grid!: DataGrid;
+    private uuidFilterApplied = false;
 
     initialize(options: OntologyEventOptions): void {
         this.$el = options._sourceElement;
@@ -55,6 +58,11 @@ class OntologyEventComponent extends BaseComponent {
                     sortable: false,
                     render: (row: EventRecord) => this.renderIds(row.changedIds, row.changedIdsCount),
                     copyValue: (row: EventRecord) => row.changedIds || ''
+                },
+                {
+                    key: 'status', label: __('aaxis.ontology.event_view.status'), type: 'text',
+                    render: (row: EventRecord) => this.renderStatus(row),
+                    copyValue: (row: EventRecord) => row.error || row.status
                 },
                 {
                     key: 'startedAt', label: __('aaxis.ontology.event_view.started_at'), type: 'datetime',
@@ -89,9 +97,25 @@ class OntologyEventComponent extends BaseComponent {
             .then(r => r.json())
             .then((data: {records: EventRecord[]}) => {
                 this.grid.setRows(data.records || []);
+                this.applyUuidFromUrl();
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.event_view.load_error')))
             .finally(() => this.setBusy(false));
+    }
+
+    /**
+     * A `?uuid=` in the URL pre-filters the grid — the address a cmd/ctrl+clicked filter icon
+     * opens in a new tab ({@see renderUuid}). First load only, like the Entities page's `?system=`.
+     */
+    private applyUuidFromUrl(): void {
+        if (this.uuidFilterApplied) {
+            return;
+        }
+        this.uuidFilterApplied = true;
+        const uuid = new URLSearchParams(window.location.search).get('uuid');
+        if (uuid !== null && uuid.trim() !== '') {
+            this.grid.setFilter('uuid', {operator: 'equals', value: uuid.trim()});
+        }
     }
 
     /**
@@ -133,9 +157,38 @@ class OntologyEventComponent extends BaseComponent {
         $filter.on('click', (e: any) => {
             e.preventDefault();
             e.stopPropagation();
+            // cmd/ctrl+click opens the SAME filtered view in a new tab (via `?uuid=`),
+            // a plain click filters this grid in place.
+            const raw = (e.originalEvent || e) as MouseEvent;
+            if (raw.metaKey || raw.ctrlKey) {
+                window.open(
+                    routing.generate('aaxis_ontology_events') + '?uuid=' + encodeURIComponent(uuid),
+                    '_blank',
+                    'noopener'
+                );
+                return;
+            }
             this.grid.setFilter('uuid', {operator: 'equals', value: uuid});
         });
         $wrap.append($filter);
+        return $wrap;
+    }
+
+    /**
+     * Status badge derived server-side from finished_at + error: Running (still open), Success
+     * (finished clean) or Error — where the badge is followed by the description, with the full
+     * text as the tooltip (and as the copied value via `copyValue`).
+     */
+    private renderStatus(row: EventRecord): any {
+        const $wrap = $('<span/>', {'class': 'aaxis-event-status aaxis-event-status--' + row.status});
+        $wrap.append($('<span/>', {
+            'class': 'aaxis-event-status__badge',
+            text: __(`aaxis.ontology.event_view.status_${row.status}`)
+        }));
+        if (row.status === 'error' && row.error) {
+            $wrap.attr('title', row.error.length > 2000 ? `${row.error.slice(0, 2000)}…` : row.error);
+            $wrap.append($('<span/>', {'class': 'aaxis-event-status__message', text: row.error}));
+        }
         return $wrap;
     }
 

@@ -7,6 +7,7 @@ namespace Aaxis\Bundle\OntologyBundle\Controller;
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowImportException;
+use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowPortability;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator;
@@ -17,7 +18,6 @@ use Oro\Bundle\SecurityBundle\Attribute\Acl;
 use Oro\Bundle\SecurityBundle\Attribute\AclAncestor;
 use Oro\Bundle\SecurityBundle\Attribute\CsrfProtection;
 use Symfony\Bridge\Twig\Attribute\Template;
-use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
@@ -36,7 +36,7 @@ use Symfony\Contracts\Translation\TranslatorInterface;
  * (type = native) are read-only. A user flow's type is recomputed from its steps on every
  * save: `flow` when a trigger step is present, `subflow` otherwise.
  */
-class OntologyFlowController extends AbstractController
+class OntologyFlowController extends AbstractOntologyController
 {
     #[Route(path: '/flows', name: 'aaxis_ontology_flows')]
     #[Template('@AaxisOntology/Flow/index.html.twig')]
@@ -124,6 +124,26 @@ class OntologyFlowController extends AbstractController
         }
 
         return $this->save($entity, $request);
+    }
+
+    /**
+     * Deletes a flow. Built-ins (type = native) are refused — the Data View "Add Data" path and
+     * the REST API depend on them. Events the flow recorded keep their rows (flow_id has no FK;
+     * the Events page then shows the id without a name).
+     */
+    #[Route(path: '/flows/delete/{id}', name: 'aaxis_ontology_flow_delete', requirements: ['id' => '\d+'], options: ['expose' => true], methods: ['DELETE'])]
+    #[Acl(id: 'aaxis_ontology_flow_delete', type: 'entity', class: OntologyFlow::class, permission: 'DELETE')]
+    #[CsrfProtection]
+    public function deleteAction(OntologyFlow $entity): JsonResponse
+    {
+        if ($entity->isNative()) {
+            return new JsonResponse([
+                'success' => false,
+                'message' => $this->trans('aaxis.ontology.flow_manager.delete_builtin_forbidden'),
+            ], 422);
+        }
+
+        return $this->deleteEntity($entity);
     }
 
     /**
@@ -237,14 +257,28 @@ class OntologyFlowController extends AbstractController
         }
         [$steps, $links, $input, $flow] = $parsed;
 
+        $executor = $this->container->get(FlowDebugExecutor::class);
         try {
-            $output = $this->container->get(FlowDebugExecutor::class)->execute($steps, $links, $input, $flow);
+            $output = $executor->execute($steps, $links, $input, $flow);
+        } catch (FlowStepFailure $e) {
+            // The editor paints the trail: executed tiles amber, the failing one red.
+            return new JsonResponse([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'failedStepId' => $e->stepId,
+                'executedIds' => $e->executedIds,
+            ], 422);
         } catch (\RuntimeException $e) {
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }
 
         // The final context is stored too, so the debugger sidebar's evaluator works after a run.
-        return new JsonResponse(['success' => true, 'output' => $output, 'contextKey' => $this->storeDebugContext($output)]);
+        return new JsonResponse([
+            'success' => true,
+            'output' => $output,
+            'executedIds' => $executor->lastExecutedIds(),
+            'contextKey' => $this->storeDebugContext($output),
+        ]);
     }
 
     /**
@@ -286,14 +320,26 @@ class OntologyFlowController extends AbstractController
             }
         }
 
+        $executor = $this->container->get(FlowDebugExecutor::class);
         try {
-            $result = $this->container->get(FlowDebugExecutor::class)
+            $result = $executor
                 ->executeFrom($steps, $links, $input, $index, $context, $flow, ($payload['runAll'] ?? false) === true);
+        } catch (FlowStepFailure $e) {
+            return new JsonResponse([
+                'success' => false,
+                'message' => $e->getMessage(),
+                'failedStepId' => $e->stepId,
+                'executedIds' => $e->executedIds,
+            ], 422);
         } catch (\RuntimeException $e) {
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }
 
-        return new JsonResponse(['success' => true, 'contextKey' => $this->storeDebugContext($result['context'])] + $result);
+        return new JsonResponse([
+            'success' => true,
+            'executedIds' => $executor->lastExecutedIds(),
+            'contextKey' => $this->storeDebugContext($result['context']),
+        ] + $result);
     }
 
     /**
@@ -457,10 +503,12 @@ class OntologyFlowController extends AbstractController
             if ($steps === null) {
                 return new JsonResponse(['success' => false, 'message' => 'Invalid steps.'], 400);
             }
-            $stepErrors = $validator->validate($steps);
-            if ($stepErrors !== []) {
-                // The editor fixes one problem at a time, so it shows the first.
-                return new JsonResponse(['success' => false, 'message' => $stepErrors[0]], 422);
+            // Only STRUCTURAL problems block a save (duplicate names): incomplete/invalid step
+            // configs are storable — the editor marks them red and the flow cannot RUN until
+            // they are fixed (the executor re-checks the FULL bar).
+            $structural = $validator->structuralErrors($steps);
+            if ($structural !== []) {
+                return new JsonResponse(['success' => false, 'message' => $structural[0]], 422);
             }
             $entity->setSteps($steps === [] ? null : $steps);
         }
@@ -498,6 +546,10 @@ class OntologyFlowController extends AbstractController
             // Derived, not stored: last_executed with no matching last_finished yet.
             'running' => $flow->isRunning(),
             'lastModified' => $flow->getLastModified()?->format(\DateTimeInterface::ATOM),
+            // Step NAMES whose config keeps the flow from running — the editor paints them red
+            // and disables Run Now / Debug while any exist.
+            'invalidSteps' => $this->container->get(FlowStepValidator::class)
+                ->invalidStepNames($flow->getSteps() ?? []),
         ];
     }
 

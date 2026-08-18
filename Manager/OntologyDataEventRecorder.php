@@ -48,22 +48,29 @@ class OntologyDataEventRecorder
     }
 
     /**
-     * Closes an event: the ids actually written plus the finish time. ALWAYS called once the
-     * upsert function has answered — including on validation failure, where the run is over too
-     * (an event left open reads as "still running" in the Events page).
+     * Closes an event: the ids actually written plus the finish time — and HOW the run failed,
+     * when it did ($error null = success). ALWAYS called once the run is over — validation
+     * failures and crashes included (an event left open reads as "still running" in the Events
+     * page; a closed one derives its status from finished_at + error).
      *
      * @param array<int, string> $changedIds
      */
-    public function close(int $eventId, array $changedIds): void
+    public function close(int $eventId, array $changedIds, ?string $error = null): void
     {
         $this->connection()->update(
             'aaxis_ontology_data_events',
             [
                 'changed_ids' => self::encodeIds($changedIds),
                 'finished_at' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s'),
+                'error' => $error !== null && trim($error) !== '' ? trim($error) : null,
             ],
             ['id' => $eventId],
-            ['changed_ids' => \PDO::PARAM_STR, 'finished_at' => \PDO::PARAM_STR, 'id' => \PDO::PARAM_INT]
+            [
+                'changed_ids' => \PDO::PARAM_STR,
+                'finished_at' => \PDO::PARAM_STR,
+                'error' => \PDO::PARAM_STR,
+                'id' => \PDO::PARAM_INT,
+            ]
         );
     }
 
