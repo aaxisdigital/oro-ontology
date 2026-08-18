@@ -12,6 +12,7 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntityAttribute;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlOutputFormatter;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard;
+use Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\EntityBundle\Provider\EntityFieldProvider;
 use Oro\Bundle\EntityBundle\Provider\EntityProvider;
@@ -443,12 +444,39 @@ class OntologyEntityController extends AbstractOntologyController
             'systemName' => $system?->getName(),
             'attributeCount' => \count($attributes),
             'attributes' => $attributes,
+            // What a flow reader can address (order by / search by attribute): for INTERNAL
+            // entities the actual readable Oro fields — which may be every scalar column when no
+            // attributes are configured — for external ones the configured attribute names.
+            // Separate from `attributes` so the grid's attributeCount keeps meaning "configured".
+            'readerAttributes' => $this->readerAttributes($entity, $attributes),
             // Number of stored records (ontology data for external systems, the OroCommerce table
             // itself for internal systems).
             'recordCount' => $recordCount ?? $this->recordCount($entity),
             // How many flows reference this entity. Not implemented yet — hard-coded for now.
             'flowCount' => 0,
         ];
+    }
+
+    /**
+     * @param array<int, array{name: ?string, datatype: ?string, required: bool}> $attributes
+     *
+     * @return array<int, string>
+     */
+    private function readerAttributes(OntologyEntity $entity, array $attributes): array
+    {
+        $system = $entity->getSystem();
+        if ($system !== null && !$system->isExternal()) {
+            try {
+                return $this->container->get(OroEntityReader::class)->searchableFields($entity);
+            } catch (\Throwable) {
+                // Unreadable internal entity (unknown class…): fall through to configured names.
+            }
+        }
+
+        return array_values(array_filter(array_map(
+            static fn (array $attribute): string => trim((string) $attribute['name']),
+            $attributes
+        ), static fn (string $name): bool => $name !== ''));
     }
 
     /**
@@ -621,6 +649,7 @@ class OntologyEntityController extends AbstractOntologyController
             DwlTransformer::class,
             DwlOutputFormatter::class,
             DwlScriptGuard::class,
+            OroEntityReader::class,
         ]);
     }
 }

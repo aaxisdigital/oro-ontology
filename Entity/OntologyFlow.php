@@ -41,6 +41,14 @@ class OntologyFlow
     /** Toolbox step types that count as triggers (drive {@see computeType}). */
     public const array TRIGGER_STEP_TYPES = ['cron', 'endpoint', 'entity_change'];
 
+    /**
+     * Canvas format of the `design` column. MUST track DESIGN_VERSION in
+     * Resources/js-src/app/components/flow-editor-component.ts: the editor treats a design of any
+     * other version as corrupted and opens an EMPTY canvas, so an imported flow carrying one would
+     * still be scheduled and executed (the runner reads design.steps) while being uneditable.
+     */
+    public const int DESIGN_VERSION = 2;
+
     /** Every step type the editor toolbox offers (triggers + actions + operations). */
     public const array STEP_TYPES = [
         'cron', 'endpoint', 'entity_change',           // triggers

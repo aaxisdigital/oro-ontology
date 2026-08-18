@@ -104,6 +104,53 @@
     }
 }
 
+// Flow import dialog: every problem found in the file, listed inside the alert box.
+.aaxis-flow-import__errors {
+    margin: 0;
+    padding-left: 18px;
+
+    li + li {
+        margin-top: 4px;
+    }
+}
+
+// Events grid: the id columns lead with their element count, and the uuid carries a button that
+// filters the grid to the rows sharing it (same borderless in-cell look as the payload preview).
+.aaxis-event-ids {
+    &__count {
+        font-weight: font-weight('bold');
+        color: #2b3a4a;
+    }
+}
+
+.aaxis-event-uuid {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+
+    &__text {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    &__filter {
+        flex: 0 0 auto;
+        border: 0;
+        background: transparent;
+        padding: 0 2px;
+        color: #2b6cb0;
+        cursor: pointer;
+
+        &:hover {
+            color: #1b3a5b;
+        }
+    }
+}
+
 // Pretty-printed JSON in a dialog
 .aaxis-json-toolbar {
     display: flex;
@@ -1346,12 +1393,25 @@
             color: #fff;
         }
 
+        // A choice's two ports are its branches: green = the expression matched, red = it did not.
         &--a {
             top: 33%;
+            color: #2c7a3f;
+
+            &:hover {
+                background: #2c7a3f;
+                color: #fff;
+            }
         }
 
         &--b {
             top: 67%;
+            color: #c0392b;
+
+            &:hover {
+                background: #c0392b;
+                color: #fff;
+            }
         }
     }
 
@@ -1368,6 +1428,26 @@
             fill: none;
             stroke: #2b6cb0;
             stroke-width: 2;
+        }
+
+        // Choice branches: green when the expression matches (port 0), red when it does not
+        // (port 1). The group carries data-branch; a temp wire carries it directly.
+        [data-branch='matched'] [data-role='wire'],
+        [data-role='wire-temp'][data-branch='matched'] {
+            stroke: #2c7a3f;
+        }
+
+        [data-branch='not-matched'] [data-role='wire'],
+        [data-role='wire-temp'][data-branch='not-matched'] {
+            stroke: #c0392b;
+        }
+
+        marker[data-branch='matched'] path {
+            fill: #2c7a3f;
+        }
+
+        marker[data-branch='not-matched'] path {
+            fill: #c0392b;
         }
 
         [data-role='wire-temp'] {
@@ -1403,6 +1483,14 @@
         [data-role='wire-group']:hover [data-role='wire'],
         [data-role='start-group']:hover [data-role='wire'] {
             stroke: #1b3a5b;
+        }
+
+        [data-role='wire-group'][data-branch='matched']:hover [data-role='wire'] {
+            stroke: #1d5a2c;
+        }
+
+        [data-role='wire-group'][data-branch='not-matched']:hover [data-role='wire'] {
+            stroke: #8f2a1f;
         }
 
         marker path {
@@ -1716,6 +1804,23 @@
         min-height: 16px;
         color: #c0392b;
         font-size: 12px;
+    }
+
+    // Explanatory line under a settings field (e.g. the choice's green/red branch semantics).
+    &__settings-hint {
+        margin: 6px 0 0;
+        color: #6b7a89;
+        font-size: 12px;
+
+        .aaxis-flow-editor__hint-green {
+            color: #2c7a3f;
+            font-weight: font-weight('bold');
+        }
+
+        .aaxis-flow-editor__hint-red {
+            color: #c0392b;
+            font-weight: font-weight('bold');
+        }
     }
 
     &__settings-actions {

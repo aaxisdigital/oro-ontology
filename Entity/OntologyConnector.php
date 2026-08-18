@@ -9,7 +9,7 @@ use Doctrine\ORM\Mapping as ORM;
 use Oro\Bundle\EntityConfigBundle\Metadata\Attribute\Config;
 
 /**
- * Ontology "Connector": a named integration (SFTP / REST API / File System) belonging
+ * Ontology "Connector": a named integration (SFTP / REST API / File System / Bucket) belonging
  * to a {@see OntologySystem}. The per-type configuration is stored as JSON, authored via
  * the type-specific "Configure" popup on the edit page (never typed by hand):
  *
@@ -17,8 +17,12 @@ use Oro\Bundle\EntityConfigBundle\Metadata\Attribute\Config;
  * - sftp:        {server, port, user, auth: none|password|key, password?, key?}
  * - rest_api:    {server, port?, headers{}, auth: none|headers|oauth,
  *                 auth_headers{}?, oauth: {path, headers{}, body{}}?}
- * - database:    shape TBD — selectable, but its Configure form is not defined yet
- * - bucket:      shape TBD — selectable, but its Configure form is not defined yet
+ * - bucket:      {server, port?, access_key, secret_key, bucket_name} — S3-compatible object
+ *                storage (OCI Object Storage, AWS S3, MinIO); the key pair is SigV4 credentials
+ *                and BOTH keys are secrets (the *_key suffix rule masks them)
+ * - database:    {engine: postgresql, server, port, database, schema?, user, password} —
+ *                PostgreSQL only for now; `engine` is stored so a second engine needs no
+ *                reshaping of existing configs
  *
  * Secret values inside the config (passwords, keys, Authorization headers, ...) are stored
  * in clear but NEVER rendered — every read path masks them with the ******** sentinel and

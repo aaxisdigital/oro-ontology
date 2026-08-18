@@ -64,6 +64,24 @@ class OntologyApiException extends \RuntimeException
         return new self(sprintf('No record found for unique id "%s".', $uniqueId), 404, 'record_not_found');
     }
 
+    public static function internalEntityUnreadable(string $entityName, string $reason): self
+    {
+        return new self(
+            sprintf('Entity "%s" cannot be read from OroCommerce: %s.', $entityName, $reason),
+            422,
+            'internal_entity_unreadable'
+        );
+    }
+
+    public static function internalEntityUnwritable(string $entityName, string $reason): self
+    {
+        return new self(
+            sprintf('Entity "%s" cannot be written to OroCommerce: %s.', $entityName, $reason),
+            422,
+            'internal_entity_unwritable'
+        );
+    }
+
     public static function invalidPayload(string $reason): self
     {
         return new self($reason, 400, 'invalid_payload');

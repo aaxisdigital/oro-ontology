@@ -614,21 +614,49 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const svg = document.createElementNS(SVG_NS, 'svg');
         svg.setAttribute('class', 'aaxis-flow-editor__wires');
         const defs = document.createElementNS(SVG_NS, 'defs');
-        const marker = document.createElementNS(SVG_NS, 'marker');
-        marker.setAttribute('id', 'aaxis-flow-arrow');
-        marker.setAttribute('viewBox', '0 0 10 10');
-        marker.setAttribute('refX', '9');
-        marker.setAttribute('refY', '5');
-        marker.setAttribute('markerWidth', '7');
-        marker.setAttribute('markerHeight', '7');
-        marker.setAttribute('orient', 'auto-start-reverse');
-        const tip = document.createElementNS(SVG_NS, 'path');
-        tip.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
-        marker.appendChild(tip);
-        defs.appendChild(marker);
+        // One arrow head per wire color: the default blue plus the choice branches (markers cannot
+        // inherit their wire's stroke, so each branch needs its own tinted twin).
+        [['aaxis-flow-arrow', ''], ['aaxis-flow-arrow-green', 'matched'], ['aaxis-flow-arrow-red', 'not-matched']]
+            .forEach(([id, branch]) => {
+                const marker = document.createElementNS(SVG_NS, 'marker');
+                marker.setAttribute('id', id);
+                if (branch !== '') {
+                    marker.setAttribute('data-branch', branch);
+                }
+                marker.setAttribute('viewBox', '0 0 10 10');
+                marker.setAttribute('refX', '9');
+                marker.setAttribute('refY', '5');
+                marker.setAttribute('markerWidth', '7');
+                marker.setAttribute('markerHeight', '7');
+                marker.setAttribute('orient', 'auto-start-reverse');
+                const tip = document.createElementNS(SVG_NS, 'path');
+                tip.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+                marker.appendChild(tip);
+                defs.appendChild(marker);
+            });
         svg.appendChild(defs);
         this.canvas().prepend(svg);
         this.wires = svg;
+    }
+
+    /** The branch a link carries: green/red for a choice source, '' for everything else. */
+    private linkBranch(link: FlowLink): '' | 'matched' | 'not-matched' {
+        const src = this.stepById(link.from);
+        if (!src || portCount(src.type) !== 2) {
+            return '';
+        }
+        return link.fromPort === 0 ? 'matched' : 'not-matched';
+    }
+
+    /** Colors an in-drag temp wire like the link it would create (branch stroke + arrow head). */
+    private brandTempWire(path: SVGPathElement, from: PlacedStep, fromPort: number): void {
+        const branch = this.linkBranch({from: from.id, fromPort, to: ''});
+        if (branch === '') {
+            path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
+            return;
+        }
+        path.setAttribute('data-branch', branch);
+        path.setAttribute('marker-end', branch === 'matched' ? 'url(#aaxis-flow-arrow-green)' : 'url(#aaxis-flow-arrow-red)');
     }
 
     // --- Link geometry / rendering ------------------------------------------------
@@ -694,12 +722,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
             group.setAttribute('data-from', route.link.from);
             group.setAttribute('data-from-port', String(route.link.fromPort));
             group.setAttribute('data-to', route.link.to);
+            // Choice branches paint green (matched) / red (not matched) — attribute-driven CSS.
+            const branch = this.linkBranch(route.link);
+            if (branch !== '') {
+                group.setAttribute('data-branch', branch);
+            }
             // Visible arrow + an invisible wide twin that makes the thin line right-clickable
             // (the svg layer itself keeps pointer-events: none).
             const path = document.createElementNS(SVG_NS, 'path');
             path.setAttribute('data-role', 'wire');
             path.setAttribute('d', d);
-            path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
+            path.setAttribute('marker-end', branch === '' ? 'url(#aaxis-flow-arrow)'
+                : (branch === 'matched' ? 'url(#aaxis-flow-arrow-green)' : 'url(#aaxis-flow-arrow-red)'));
             const hit = document.createElementNS(SVG_NS, 'path');
             hit.setAttribute('data-role', 'wire-hit');
             hit.setAttribute('d', d);
@@ -1259,7 +1293,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         label.textContent = name;
         label.style.fontSize = `${Math.min(13, Math.max(9, Math.round(this.tileSize * 0.14)))}px`;
         el.appendChild(label);
-        // Output port(s) on the right edge — the drag source for flow links ("×" handle).
+        // Output port(s) on the right edge — the drag source for flow links ("×" handle). A
+        // choice's two ports are its branches: green (port 0) when the expression matches, red
+        // (port 1) when it does not.
         const ports = portCount(type);
         for (let p = 0; p < ports; p++) {
             const port = document.createElement('span');
@@ -1267,6 +1303,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 + (ports === 2 ? (p === 0 ? ' aaxis-flow-editor__port--a' : ' aaxis-flow-editor__port--b') : '');
             port.setAttribute('data-role', 'port');
             port.setAttribute('data-port', String(p));
+            if (ports === 2) {
+                port.setAttribute('title', __(p === 0
+                    ? 'aaxis.ontology.flow_editor.choice_port_matched'
+                    : 'aaxis.ontology.flow_editor.choice_port_not_matched'));
+            }
             port.textContent = '×';
             el.appendChild(port);
         }
@@ -1348,6 +1389,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'dwl_transform') {
             $top.prop('hidden', false);
             sections.push(this.dwlSection($top, $body, $panel[0], step.config || {}, $input));
+        } else if (step.type === 'choice') {
+            $top.prop('hidden', false);
+            sections.push(this.choiceSection($top, $body, $panel[0], step.config || {}, $input));
         } else if (step.type === 'cron') {
             // Schedule owns the first row too (Name | Mode).
             $top.prop('hidden', false);
@@ -1564,7 +1608,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $body.append(this.settingsLabel('config_system_label'), $system, this.settingsLabel('config_entity_label'), $entity);
         }
 
-        let entities: {name: string; displayName?: string; systemName?: string; attributes?: {name: string}[]}[] = [];
+        let entities: {name: string; displayName?: string; systemName?: string; attributes?: {name: string}[]; readerAttributes?: string[]}[] = [];
         const fillEntities = (): void => {
             const system = String($system.val() || '');
             const current = String(initial.entity || '');
@@ -1608,7 +1652,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 const system = String($system.val() || '');
                 const entity = String($entity.val() || '');
                 const match = entities.find(e => e.systemName === system && e.name === entity);
-                return (match && match.attributes) || [];
+                if (!match) {
+                    return [];
+                }
+                // What a reader can address: internal entities list their readable Oro fields here
+                // (all scalar columns when no attributes are configured); falls back to the
+                // configured attributes for older catalog payloads.
+                if (match.readerAttributes && match.readerAttributes.length) {
+                    return match.readerAttributes.map(name => ({name: name}));
+                }
+                return match.attributes || [];
             }
         };
     }
@@ -1645,11 +1698,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $body.append($entityBlock);
         const entityPair = this.systemEntitySection($entityBlock, variant === 'entity' ? initial : {}, true, () => onEntityChange());
 
-        // reader: load-mode (+ id); writer: the Content to write — a context key, or a DWL
-        // expression when its toggle is ON (always a textarea so toggling changes no visuals).
+        // reader: load-mode (+ id / attribute+value); writer: the Content to write — a context
+        // key, or a DWL expression when its toggle is ON (always a textarea so toggling changes
+        // no visuals).
         const $mode = $('<select/>', {'class': 'form-control'});
         const $recordId = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255});
         let $recordIdCol: any = null;
+        // "By attribute" inputs: the attribute to compare (the entity's readable attributes) and
+        // the value to match.
+        const $searchAttr = $('<select/>', {'class': 'form-control'});
+        const $searchValue = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255});
+        let $searchAttrCol: any = null;
+        let $searchValueCol: any = null;
         const content = createDwlField({
             label: __('aaxis.ontology.flow_editor.writer_content_label'),
             value: variant === 'entity' ? String(initial.content || 'payload') : 'payload',
@@ -1669,8 +1729,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 value: 'by_id', text: __('aaxis.ontology.flow_editor.reader_mode_by_id'),
                 selected: variant === 'entity' && initial.mode === 'by_id'
             }));
+            $mode.append($('<option/>', {
+                value: 'by_attribute', text: __('aaxis.ontology.flow_editor.reader_mode_by_attribute'),
+                selected: variant === 'entity' && initial.mode === 'by_attribute'
+            }));
             $recordId.val(variant === 'entity' ? String(initial.record_id || '') : '');
             $recordIdCol = this.settingsCol('reader_record_id_label', $recordId, 1.4);
+            $searchValue.val(variant === 'entity' ? String(initial.attr_value || '') : '');
+            $searchAttrCol = this.settingsCol('reader_attribute_label', $searchAttr, 1.3);
+            $searchValueCol = this.settingsCol('reader_attr_value_label', $searchValue, 1.4);
 
             ['asc', 'desc'].forEach(dir => $orderDir.append($('<option/>', {
                 value: dir, text: dir.toUpperCase(),
@@ -1684,16 +1751,28 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $orderDirCol = this.settingsCol('reader_order_dir_label', $orderDir, 0.8);
             $limitCol = this.settingsCol('reader_limit_label', $limit, 0.9);
             $entityBlock.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'})
-                .append(this.settingsCol('reader_mode_label', $mode, 0.9), $recordIdCol, $orderByCol, $orderDirCol, $limitCol));
+                .append(
+                    this.settingsCol('reader_mode_label', $mode, 0.9),
+                    $recordIdCol, $searchAttrCol, $searchValueCol, $orderByCol, $orderDirCol, $limitCol
+                ));
 
-            // Order By options follow the SELECTED entity; the saved value survives the first fill.
+            // Order By / search-attribute options follow the SELECTED entity; the saved values
+            // survive the first fill.
             let pendingOrderBy = variant === 'entity' ? String(initial.order_by || '') : '';
+            let pendingSearchAttr = variant === 'entity' ? String(initial.attribute || '') : '';
             onEntityChange = (): void => {
-                const current = String($orderBy.val() || '') || pendingOrderBy;
+                const attributes = entityPair.attributes();
+                const currentOrder = String($orderBy.val() || '') || pendingOrderBy;
                 pendingOrderBy = '';
                 $orderBy.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_order_by_none')}));
-                entityPair.attributes().forEach(attribute => $orderBy.append($('<option/>', {
-                    value: attribute.name, text: attribute.name, selected: attribute.name === current
+                attributes.forEach(attribute => $orderBy.append($('<option/>', {
+                    value: attribute.name, text: attribute.name, selected: attribute.name === currentOrder
+                })));
+                const currentAttr = String($searchAttr.val() || '') || pendingSearchAttr;
+                pendingSearchAttr = '';
+                $searchAttr.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
+                attributes.forEach(attribute => $searchAttr.append($('<option/>', {
+                    value: attribute.name, text: attribute.name, selected: attribute.name === currentAttr
                 })));
                 syncBlocks();
             };
@@ -1760,18 +1839,40 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         $side.append(bodyContent.$el);
 
-        const isRest = (): boolean => connectorTypes[String($connector.val() || '')] === 'rest_api';
+        // What a WRITER hands to a file/sftp/bucket connector: those have no request body to carry
+        // it, so the content is its own full-width row under the path. rest_api writers use the
+        // Body content field on the right instead.
+        const connectorContent = createDwlField({
+            label: __('aaxis.ontology.flow_editor.writer_content_label'),
+            value: variant === 'connector' ? String(initial.content || '') : '',
+            dwl: variant === 'connector' && initial.content_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+        if (kind === 'writer') {
+            $connectorBlock.append(connectorContent.$el);
+        }
+
+        const connectorType = (): string => connectorTypes[String($connector.val() || '')] || '';
+        const isRest = (): boolean => connectorType() === 'rest_api';
+        /** Connectors that write whole payloads rather than request bodies. */
+        const writesContent = (): boolean =>
+            ['file_system', 'sftp', 'bucket'].indexOf(connectorType()) >= 0;
+        const contentVisible = (): boolean =>
+            kind === 'writer' && String($type.val() || '') === 'connector'
+            && String($connector.val() || '') !== '' && writesContent();
         const syncBlocks = (): void => {
             const type = String($type.val() || '');
             $entityBlock.toggle(type === 'entity');
             $connectorBlock.toggle(type === 'connector');
             if ($recordIdCol) {
-                const all = String($mode.val()) !== 'by_id';
-                $recordIdCol.toggle(!all);
+                const mode = String($mode.val());
+                $recordIdCol.toggle(mode === 'by_id');
+                $searchAttrCol.toggle(mode === 'by_attribute');
+                $searchValueCol.toggle(mode === 'by_attribute');
                 // The "All" extras; the direction only matters once an Order By is chosen.
-                $orderByCol.toggle(all);
-                $orderDirCol.toggle(all && String($orderBy.val() || '') !== '');
-                $limitCol.toggle(all);
+                $orderByCol.toggle(mode === 'all');
+                $orderDirCol.toggle(mode === 'all' && String($orderBy.val() || '') !== '');
+                $limitCol.toggle(mode === 'all');
             }
             // Connector fields appear only once a connector is chosen; operation/body are
             // rest_api-only (sftp/file_system need just the path).
@@ -1779,6 +1880,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $fieldsRow.prop('hidden', !hasConnector);
             $operationCol.toggle(isRest());
             $bodyCol.toggle(isRest());
+            if (kind === 'writer') {
+                connectorContent.$el.toggle(contentVisible());
+            }
             const sideVisible = type === 'connector' && hasConnector && isRest() && String($bodyType.val()) !== 'empty';
             $side.prop('hidden', !sideVisible);
             panel.classList.toggle('is-wide', sideVisible);
@@ -1805,6 +1909,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     if (kind === 'reader' && String($mode.val()) === 'by_id' && String($recordId.val() || '').trim() === '') {
                         return __('aaxis.ontology.flow_editor.reader_record_id_required');
                     }
+                    if (kind === 'reader' && String($mode.val()) === 'by_attribute') {
+                        if (String($searchAttr.val() || '') === '') {
+                            return __('aaxis.ontology.flow_editor.reader_attribute_required');
+                        }
+                        if (String($searchValue.val() || '').trim() === '') {
+                            return __('aaxis.ontology.flow_editor.reader_attr_value_required');
+                        }
+                    }
                     if (kind === 'writer' && content.value().trim() === '') {
                         return __('aaxis.ontology.flow_editor.writer_content_required');
                     }
@@ -1814,6 +1926,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     }
                     if (String($path.val() || '').trim() === '') {
                         return __('aaxis.ontology.flow_editor.reader_path_required');
+                    }
+                    // A file/sftp/bucket writer has nothing to write without it.
+                    if (contentVisible() && connectorContent.value().trim() === '') {
+                        return __('aaxis.ontology.flow_editor.writer_content_required');
                     }
                 }
                 const destinationError = this.destinationError($destination);
@@ -1831,6 +1947,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
                         withPair.mode = String($mode.val());
                         if (withPair.mode === 'by_id') {
                             withPair.record_id = String($recordId.val() || '').trim();
+                        } else if (withPair.mode === 'by_attribute') {
+                            withPair.attribute = String($searchAttr.val() || '');
+                            withPair.attr_value = String($searchValue.val() || '').trim();
                         } else {
                             const orderBy = String($orderBy.val() || '');
                             if (orderBy !== '') {
@@ -1850,6 +1969,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
                 base.connector = String($connector.val());
                 base.path = String($path.val() || '').trim();
+                if (contentVisible()) {
+                    base.content = connectorContent.value().trim();
+                    base.content_dwl = connectorContent.isDwl();
+                }
                 if (isRest()) {
                     base.operation = String($operation.val());
                     base.body = String($bodyType.val());
@@ -1907,16 +2030,49 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
+     * Choice ("if"): first row = Name, body = the success DWL expression. When the expression
+     * evaluates truthy against the context the flow continues on the GREEN output; otherwise on
+     * the RED one (optional — leaving it unconnected simply ends the flow there).
+     */
+    private choiceSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput)
+        ));
+
+        const expression = createDwlField({
+            label: __('aaxis.ontology.flow_editor.choice_expression_label'),
+            value: String(initial.expression || ''),
+            dwl: true,
+            fixed: true, // the condition IS DWL — no pure-text mode, switch hidden
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+        $body.append(expression.$el);
+        $body.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            html: __('aaxis.ontology.flow_editor.choice_hint')
+        }));
+        panel.classList.add('is-wide');
+
+        return {
+            error: () => expression.value().trim() === ''
+                ? __('aaxis.ontology.flow_editor.choice_expression_required')
+                : '',
+            merge: config => ({...config, expression: expression.value()})
+        };
+    }
+
+    /**
      * Validates a destination input: required, and "flowUuid" is reserved (every execution seeds
-     * its uuid into the context under that key; the legacy "flow-uuid" spelling stays rejected
-     * too). Returns '' when valid.
+     * its uuid into the context under that key; "choiceResults" too — choice steps record their
+     * branch verdicts there; the legacy "flow-uuid" spelling stays rejected too). Returns '' when
+     * valid.
      */
     private destinationError($destination: any): string {
         const value = String($destination.val() || '').trim();
         if (value === '') {
             return __('aaxis.ontology.flow_editor.destination_required');
         }
-        if (['flowuuid', 'flow-uuid'].indexOf(value.toLowerCase()) >= 0) {
+        if (['flowuuid', 'flow-uuid', 'choiceresults'].indexOf(value.toLowerCase()) >= 0) {
             return __('aaxis.ontology.flow_editor.destination_reserved');
         }
         return '';
@@ -2247,7 +2403,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private startLinkDrag(e: PointerEvent, from: PlacedStep, fromPort: number): void {
         const path = document.createElementNS(SVG_NS, 'path');
         path.setAttribute('data-role', 'wire-temp');
-        path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
+        this.brandTempWire(path, from, fromPort);
         this.wires.appendChild(path);
         this.linkDrag = {pointerId: e.pointerId, from, fromPort, path, target: null, editing: null};
         this.moveLinkDrag(e);
@@ -2271,7 +2427,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         const path = document.createElementNS(SVG_NS, 'path');
         path.setAttribute('data-role', 'wire-temp');
-        path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
+        this.brandTempWire(path, from, link.fromPort);
         this.wires.appendChild(path);
         this.linkDrag = {
             pointerId: e.pointerId, from, fromPort: link.fromPort, path, target: null, editing: link

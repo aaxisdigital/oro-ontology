@@ -37,12 +37,34 @@ services:
     # other PHP code that needs the same operations.
     Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer: ~
 
+    # Reads/writes files through the file-based connectors (file_system, sftp, bucket) for the
+    # flow reader/writer steps.
+    Aaxis\Bundle\OntologyBundle\Manager\FileConnectorTransfer:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner'
+            - '@http_client'
+
     Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor:
         arguments:
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager'
             - '@doctrine'
             - '@http_client'
             - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FileConnectorTransfer'
+
+    # The rules a flow's steps must clear to be stored — shared by the editor's save endpoint and
+    # the importer, so an imported flow is exactly as valid as a hand-built one.
+    Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
+            - '@translator'
+
+    # Moves flows between environments as JSON (connector ids <-> name/type descriptors).
+    Aaxis\Bundle\OntologyBundle\Manager\FlowPortability:
+        arguments:
+            - '@doctrine'
+            - '@translator'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator'
 
     # The minutely flow scheduler (see Command/RunScheduledFlowsCommand).
     Aaxis\Bundle\OntologyBundle\Manager\ScheduledFlowRunner:
@@ -65,12 +87,39 @@ services:
             - '@oro_message_queue.client.message_producer'
             - '@oro_config.global'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyAttributeReconciler'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyDataEventRecorder'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityWriter'
+
+    # Reads internal-system entities from the OroCommerce entity itself (their data never lives in
+    # aaxis_ontology_data): payload = configured attributes, or every scalar column when none.
+    Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader:
+        arguments:
+            - '@doctrine'
+
+    # The write-side counterpart: UPDATES the Oro rows behind an internal-system entity (existing
+    # records only; field set shared with the reader so payloads round-trip).
+    Aaxis\Bundle\OntologyBundle\Manager\OroEntityWriter:
+        arguments:
+            - '@doctrine'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader'
+
+    # The single writer of aaxis_ontology_data_events, shared by the synchronous upsert path and
+    # the async consumer so their event rows can never drift apart.
+    Aaxis\Bundle\OntologyBundle\Manager\OntologyDataEventRecorder:
+        arguments:
+            - '@doctrine'
 
     # Masks/restores secret values inside connector JSON configs (form + view page).
     Aaxis\Bundle\OntologyBundle\Manager\ConnectorConfigSecrets: ~
 
-    # Runs the Configure popup's "Test" checks (path / socket / SFTP auth / OAuth call).
-    Aaxis\Bundle\OntologyBundle\Manager\ConnectorTester: ~
+    # Signs S3-compatible object storage requests (AWS SigV4) for bucket connectors.
+    Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner: ~
+
+    # Runs the Configure popup's "Test" checks (path / socket / SFTP auth / OAuth call / bucket list).
+    Aaxis\Bundle\OntologyBundle\Manager\ConnectorTester:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner'
 
     # Renders a DWL result per the script's `output <mime>` directive (DWL playground).
     Aaxis\Bundle\OntologyBundle\Manager\DwlOutputFormatter: ~
@@ -94,5 +143,6 @@ services:
         arguments:
             - '@doctrine'
             - '@logger'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyDataEventRecorder'
         tags:
             - { name: oro_message_queue.client.message_processor }

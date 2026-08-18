@@ -35,7 +35,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 > indexes — the installer is the single source of truth for schema (matching the pre-existing
 > `logo_id` unique index).
 | `OntologyEntityAttribute` | `aaxis_ontology_entity_attribute` | name, datatype (`TYPES` const), required |
-| `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; `type` ∈ sftp, rest_api, file_system, **database, bucket** (the last two are selectable but their config shape + Configure form are not defined yet — the button opens a "not available yet" note and `ConnectorTester` reports no test); JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
+| `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; `type` ∈ sftp, rest_api, file_system, bucket, database — **all five now have a Configure popup and a Test** (`openUnsupportedPopup()` survives only as the safety net for a type added to `TYPES` before its form); JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
 | `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|endpoint|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb — that migration still names the OLD `queue` trigger, deliberately: it is applied history, fresh installs skip it (installer ≥ v1_9), and no row ever used it), `last_finished` (datetime NULL — stamped by `FlowDebugExecutor::touchLastFinished()` when a run ENDS, from a `finally` so failures stamp too; v1_9 backfilled it from `last_executed` so pre-existing rows don't look permanently running; installer at v1_9). **`last_executed` + `last_finished` are the running-state pair** — see "Flow concurrency" below |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique |
@@ -65,10 +65,53 @@ Key facts:
   `upsertRecords(OntologyEntity, records)` (the shared core: infer uid from each payload, validate,
   queue one message), returning the batch uuid. The controller (`Api/OntologyDataApiController`) only
   enforces the config toggle + ACL, parses the request, and renders JSON.
+- **INTERNAL-system entities** (system `external = false`; the ontology entity's `name` is an Oro
+  entity class) have NO rows in `aaxis_ontology_data` — `read()`, `queryForFlow()` and
+  `queryForFlowByAttribute()` branch to `Manager/OroEntityReader`, which selects from the Oro
+  entity itself via DQL (no hydration).
+  Payload = the entity's configured attributes (names are Oro field names, enforced by the entity
+  form); NO attributes → every scalar column (`searchableFields()` exposes that resolved list —
+  the entity_list serializer ships it as `readerAttributes`). To-one associations become the
+  related id (`IDENTITY()`), to-many are skipped, date/datetime/time are formatted per Doctrine
+  type (`Y-m-d` / ATOM / `H:i:s`). By-id compares the entity's `unique_attribute` column (a
+  non-numeric id against an integer column is "not found", not a DB error); by-attribute
+  (`readByAttribute`) compares any payload field's column and treats a value the column type
+  cannot hold (SQLSTATE class 22) as "no match"; order_by must be a real field or it falls back
+  to identifier order (same leniency as the jsonb path). A misconfigured entity (name not a
+  managed class / no readable attribute / by-attribute on an unknown field) throws
+  `internal_entity_unreadable` (422).
+  WRITES: `upsertRecordsSync()` (flow writer steps) branches to `Manager/OroEntityWriter` —
+  UPDATES of existing rows only (matched by the unique attribute; a missing/ambiguous row rejects
+  the whole batch BEFORE anything is written; creating Oro entities generically is deliberately
+  unsupported: required relations/ownership). A record writes payload keys ∩ the reader's field
+  set minus identifier/unique columns — present keys written (null clears), absent left alone;
+  to-one associations take the related id (`getReference`, numeric-cast); values coerced per
+  Doctrine column type; ONE `flush()` per batch; only rows whose values actually differed count
+  as changed (dates compare by value, scalars loosely). Events are recorded/closed exactly like
+  the store path, and `prepareUpsertBatch(..., syncAttributes: false)` skips
+  `syncFromRecords` — an 88-column payload must NOT materialize 88 configured attributes
+  (`assertValid` still runs). The QUEUED path (`upsertRecords` — Add Data modal, REST API) throws
+  `invalid_payload` for internal entities instead of silently storing rows nothing reads.
+  Failures: `internal_entity_unwritable` (422).
+  KNOWN GAPS: the paged `query()` endpoint, the Data View listing and the entities playground still
+  read only `aaxis_ontology_data` (empty for internal entities).
 - **The back-office "Add Data" modal reuses this**: `OntologyDataController::createAction` decodes the
   payload (JSON/CSV/XML), normalizes single-object-vs-array, and calls `upsertRecords()` — so the
   modal behaves exactly like the API (no Mode selector, no Unique Id field; the uid is inferred from
-  the payload via the entity's `unique_attribute`). UI: `data-view-component.ts`.
+  the payload via the entity's `unique_attribute`). UI: `data-view-component.ts`. NOTE: for
+  INTERNAL-system entities this queued path throws (see above) — only flow writer steps can write
+  them.
+- **The Data View's per-row "Update" action is the SAME modal**: `openAddData(record?)` — with a
+  record it retitles to `update_title`, preloads system/entity from the row's `systemId`/`entityId`
+  (added to `serialize()` for this; names alone are ambiguous across systems), replaces the entity
+  options with just that entity, and sets `prop('disabled', true)` on both selects BEFORE Select2
+  initialises (Select2 renders the disabled state from the source select; a disabled select still
+  answers `.val()`, so the submit body is unaffected). The payload loads pretty-printed
+  (`prettyJsonOrRaw`, format forced to json) and `addBaseline` holds that exact text: `updateAddState`
+  keeps Submit disabled until the textarea DIFFERS from it, so reopening a record and closing cannot
+  rewrite it. `disposeAddSelects()` clears the baseline so the next plain "+ Add Data" is ungated.
+  Submitting is the ordinary upsert — the record gains a new version, and editing the unique id
+  inside the payload writes a DIFFERENT record rather than renaming this one.
 - **Attribute reconciliation + contract** (`Manager/OntologyAttributeReconciler`, called by
   `upsertRecords` before queueing, so it applies to both the API and the Add Data UI):
   - *Auto-create*: every attribute present in the written payloads but not yet defined on the entity
@@ -272,6 +315,21 @@ service**. Per-type shapes (also in the entity docblock):
   oauth: {path, headers{}, body{}}?}` (headers are `{name: value}` objects, edited as key/value
   rows; the OAuth token path is a required textbox and the body/headers pair renders as two tabs —
   "OAuth body" first — via the widget's `tabGroup`)
+- `bucket` → `{server, port?, access_key, secret_key, bucket_name}` — S3-compatible object storage
+  (OCI Object Storage, AWS S3, MinIO). `server` is the endpoint HOST, not a bucket URL (OCI:
+  `<namespace>.compat.objectstorage.<region>.oraclecloud.com`); `bucket_name` is what Cyberduck
+  calls "Path". ⚠️ **BOTH keys are secrets** — `access_key` and `secret_key` end in `_key`, so the
+  existing suffix rule masks them with no rule change, and both render as `password` fields. The
+  access key being masked like a password is deliberate (asked for), at the cost of not being able
+  to see WHICH key a saved connector uses. **No region field**: SigV4 needs one, and
+  `S3RequestSigner::regionFromHost()` derives it from the hostname (OCI/AWS patterns, else
+  `us-east-1`) — a provider that neither encodes the region in the host nor accepts `us-east-1`
+  would need the field added.
+- `database` → `{engine: postgresql, server, port, database, schema?, user, password}` —
+  **PostgreSQL only for now**; `engine` is a select with a single option, stored anyway so adding
+  a second engine needs no reshaping of saved configs (`ConnectorTester::ENGINE_POSTGRESQL` mirrors
+  the TS constant, and an ABSENT engine is read as postgresql). `schema` is optional and omitted
+  from the JSON when blank (= the server's `search_path`).
 
 **Secrets round-trip** (`Manager/ConnectorConfigSecrets`): values are stored in clear in
 `config` but never rendered. Every read path masks them to the `********` sentinel — the form's
@@ -293,7 +351,10 @@ select (programmatic revert is muted via a suppress flag so it doesn't re-trigge
 server/port as a 75/25 row and auth/user/password as a 24/38/38 row, with the key textarea
 full-width below; the password/key controls are ALWAYS rendered — the auth select only toggles
 their `disabled` state (per design feedback: control enablement, not visibility). Ports are
-`min: 1, max: 65535` (validated by the widget). REST uses the same 75/25 server/port row. The
+`min: 1, max: 65535` (validated by the widget). REST, bucket and database use the same 75/25
+server/port row; bucket follows it with a 50/50 access-key / secret-key row (both `password`) and a
+full-width "Bucket name" below, database with a 24/38/38 engine/database/schema row (the same
+proportions as sftp's auth row) over a 50/50 user/password row. The
 popups use the shared `RecordFormModal` `password` field type (show/hide toggle inside the input),
 `hint` lines, `disabled` fields and number `min`/`max` — documented in `../CommonBundle/CLAUDE.md`.
 
@@ -306,7 +367,26 @@ persisted connector (same-type only) via `ConnectorConfigSecrets::merge()`, then
 `Manager/ConnectorTester`: file_system = base path exists/is dir/readable; sftp = ① TCP socket
 (reports the SSH banner) ② authenticate with the informed user/password-or-key; rest_api =
 ① TCP socket (port defaults from scheme; bare hosts assume https/443) ② `auth: oauth` only —
-POST to the OAuth path with the informed headers + form-encoded body, success = HTTP < 400.
+POST to the OAuth path with the informed headers + form-encoded body, success = HTTP < 400;
+bucket = ① TCP socket ② `GET /<bucket_name>?list-type=2&max-keys=1` signed with AWS SigV4
+(`Manager/S3RequestSigner`), so ONE call validates the credentials *and* the bucket's existence —
+403 and 404 get their own messages. Path-style addressing is used (endpoint/bucket), which keeps
+the signed host independent of the bucket name and works on every S3-compatible provider.
+⚠️ **A just-created key legitimately 403s for a few minutes** (measured on OCI: >2.5 min), which is
+why the 403 message says so — do not read an immediate 403 on a fresh key as a wrong secret.
+`S3RequestSigner` signs **body-less requests only** (payload hash is hard-coded to the empty-string
+SHA-256); an upload path must hash the real body. Its two subtleties: the signed `host` must equal
+what the HTTP client actually sends (`hostHeader()` adds `:port` only for non-default ports), and
+the region comes from the hostname (`regionFromHost()`), since bucket configs carry no region.
+database = ① TCP socket (default port 5432) ② a real `PDO` connection with the informed
+credentials, reporting the server version ③ **only when a schema is configured** — it exists AND
+the user holds USAGE on it. Three things to keep in mind: credentials are passed as PDO
+CONSTRUCTOR ARGUMENTS, never in the DSN (a driver message built from the DSN would carry them),
+and `withoutSecret()` scrubs the password from any exception text on top of that; a `;` in the
+server or database name is REFUSED because PDO splits the pgsql DSN on `;` before libpq sees it,
+so such a value would inject a connection parameter and no quoting can prevent it; and the schema
+check reads `pg_catalog.pg_namespace`, NOT `information_schema.schemata` — the latter lists only
+schemas the user OWNS, so a readable schema would wrongly look missing.
 SFTP auth prefers **phpseclib3** and falls back to **ext-ssh2** (password only); with neither
 installed the auth step fails with an instructive message — the app must
 `composer require phpseclib/phpseclib` to test SFTP credentials. Responses are
@@ -372,7 +452,10 @@ connector/entity created in another tab won't appear until the editor page is re
 panel data sources through the same accessors rather than a bare `fetch`.
 
 **Flow links**: every tile has an "×" output port on its right edge (vertically centered; `choice`
-has two, at 1/3 and 2/3 height) — drag from a port onto another tile to wire them. An existing wire
+has two, at 1/3 and 2/3 height — port 0 GREEN "when the expression matches", port 1 RED "when it
+does not"; the ports, their wires, temp drag wires and arrow heads are tinted via `data-branch`
+attributes + the `#aaxis-flow-arrow-green/-red` marker twins, since markers can't inherit stroke) —
+drag from a port onto another tile to wire them. An existing wire
 can be **re-routed by dragging its arrow head** (an invisible `wire-end` grip circle at the last
 route point): the link is pulled out of `links` for the drag — so the canvas previews the result and
 the "already has an incoming line" rule doesn't count the link being edited — then on release,
@@ -401,25 +484,45 @@ checks both shapes; a present expression still re-validates with `Cron\CronExpre
 **entity_change** requires `{system, entity}` (selects fed by `aaxis_ontology_entity_list` —
 entities filtered by the chosen system, both referenced by NAME per the bundle's addressing);
 **reader** requires `{reader: entity|connector, destination}` (destination defaults to
-`payload`) plus, per variant, `{system, entity, mode: all|by_id, record_id (when by_id)}` — in
-`all` mode the Load row also offers OPTIONAL `order_by` (the selected entity's attributes, fed by
-the entity_list payload via `systemEntitySection().attributes()`; picking one reveals `order_dir`
-asc|desc) and `limit` (No limit | 1 | 10 | 100 | 1000). Entity "all" reads go through
+`payload`) plus, per variant, `{system, entity, mode: all|by_id|by_attribute, record_id (when
+by_id), attribute + attr_value (when by_attribute)}` — in `all` mode the Load row also offers
+OPTIONAL `order_by` (picking one reveals `order_dir` asc|desc) and `limit` (No limit | 1 | 10 |
+100 | 1000); `by_attribute` shows an Attribute select + a Value input instead. Both the Order By
+and Attribute selects list the entity's `readerAttributes` from the entity_list payload (via
+`systemEntitySection().attributes()`, which prefers `readerAttributes` over the configured
+`attributes`): what a reader can actually address — for INTERNAL entities the readable Oro
+fields (`OroEntityReader::searchableFields()`, every scalar column when no attributes are
+configured), for external ones the configured attribute names. Entity "all" reads go through
 `OntologyDataApiManager::queryForFlow()` — NOT page-capped like the outside-facing `query()`
 (flows get every record unless the step limits itself; ordering compares the jsonb value:
-numbers numerically, strings lexically, id as tiebreaker) — or
+numbers numerically, strings lexically, id as tiebreaker); `by_attribute` reads go through
+`queryForFlowByAttribute()` (external: `payload ->> attr = value` text equality; internal: the
+Oro column compared, a value the column type can't hold = no match) and yield the LIST of
+matches, [] when none — or
 `{connector: <id>, path, and for rest_api connectors also operation: get|put|post|patch|delete,
 body: empty|json|text|xml, body_content (when body ≠ empty)}`. Reader popup layout: a full-width
 FIXED first row `Name | Reader type | Destination` (the reader takes over the name placement via
 `$top`), then variant rows in the left column — entity: `System | Entity` row then `Load (| Id)`
 row; connector: picker (fed by the exposed `aaxis_ontology_connector_list`, which also provides
 each connector's type), then a row that adapts to the chosen connector: rest_api →
-`Operation | Path | Body`, sftp/file_system → path only. A non-empty body opens the body-content
+`Operation | Path | Body`, sftp/file_system → path only. A WRITER on a file_system/sftp/bucket
+connector additionally gets a full-width **Content** DWL field in its own row under the path
+(`config.content` + `content_dwl`, the same keys the entity writer uses): those connectors have no
+request body to carry what to write, whereas a rest_api writer puts it in Body content. Server side
+`FlowStepValidator` stays DB-free, so it cannot look up the connector's type — the SHAPE decides:
+a writer/connector config with no `operation` is not a rest config, so `content` must be filled.
+A non-empty body opens the body-content
 textarea in the right column BELOW the fixed row (panel widens via `is-wide`). Every visibility
 toggle calls `reposition()` and the panel is viewport-capped (`max-height` + scrolling middle) so
 Cancel/Confirm always stay reachable. The modal blocks Confirm on missing
 values; the server re-checks any PRESENT config's completeness in `isStepConfigValid()`
 (422 `flow_manager.invalid_step_config`) — a null config (never opened) is still saveable.
+**`Manager/FlowStepValidator` owns those step rules** (normalize + validate: shape, unique names,
+`Cron\CronExpression`, per-type completeness, DWL parse) and BOTH writers call it — the editor's
+`save()` (shows `$errors[0]`, one fix at a time) and `FlowPortability::import()` (reports all of
+them). Never re-implement a step rule in a caller: an imported flow has to be exactly as valid as a
+hand-built one, or it stores something the editor/executor chokes on (e.g. `"limit": "100"` as a
+string passes a loose check and then makes the flow permanently unsavable).
 Other types configure only the name so far. **Selection**: click selects a tile, dragging on empty canvas
 rubber-bands a multi-selection (macOS style, blue ring = selected), any outside click clears it;
 dragging a tile that belongs to a multi-selection moves the WHOLE selection (relative offsets
@@ -504,20 +607,35 @@ invocation itself is still unimplemented; whoever builds it must pass the curren
 scripts use `flowUuid` DIRECTLY (renamed from the old hyphenated `flow-uuid`, which was not a
 valid DWL identifier; the transformer still binds the whole context as a `context` object for
 OTHER non-identifier keys, e.g. hyphenated destinations). `flowUuid` is a RESERVED destination —
-the legacy `flow-uuid` spelling too (rejected in `isStepConfigValid` + the TS panels'
-`destinationError()` — jsmessage `destination_reserved`). Executed for real: entity readers (`all` = first page via OntologyDataApiManager::query
-— capped at 100, `by_id` = read(); a MISSING record yields null, not an error) and **rest_api
+`choiceResults` and the legacy `flow-uuid` spelling too (rejected in `isStepConfigValid` + the TS
+panels' `destinationError()` — jsmessage `destination_reserved`). **choice** steps evaluate their
+`config.expression` (DWL, required; syntax-checked on save via `stepDwlSnippets`) against the
+context: truthy continues on the GREEN port 0, falsy on the RED port 1 (optional — no link ends
+the flow); the verdict lands in the context under `choiceResults` (step id => bool), which is what
+`executionOrder(steps, links, choiceResults)` uses to follow only the taken branch — an
+undecided choice ends the walk, so `execute()`/`executeFrom()` RE-DERIVE the order after each
+executed choice (the stepper's `total` grows as branches resolve; the prefix never reorders
+because every port drives one link and every step accepts one incoming). Executed for real: entity readers (`all`
+= EVERY record via `OntologyDataApiManager::queryForFlow()` — not page-capped, optional
+order_by/order_dir/limit from the step's config — `by_id` = read(); a MISSING record yields null,
+not an error; `by_attribute` = the LIST of records whose attribute equals the value via
+`queryForFlowByAttribute()`, [] when none match; INTERNAL-system entities read from the
+OroCommerce entity itself — see `Manager/OroEntityReader` under "Data HTTP API") and **rest_api
 connector readers** (URL = connector server[:port] + step path; connector headers; auth=headers
 merges auth_headers; auth=oauth POSTs the token path — form-encoded oauth.body + oauth.headers —
 and attaches `access_token` as a bearer; the step's operation/body/body_content are honoured;
 TLS verification off like the toolbox proxy; JSON responses decoded, others returned raw;
-HTTP ≥ 400 aborts naming the step). sftp/file_system connector readers emit a `_debug`
+HTTP ≥ 400 aborts naming the step). **file_system/sftp/bucket connector readers run for real** via
+`Manager/FileConnectorTransfer` (see "File-based connector transfers" below); database connectors
+still emit a `_debug`
 placeholder note; **dwl_transform** steps execute their DWL script via `Dwl/DwlTransformer` with
 the WHOLE current context bound as variables (payload, prior destinations…), result stored under
 their destination; **writer/entity** steps write the context value named by `config.content`
 (a single object or an array of objects) into the configured system/entity **synchronously** via
-`OntologyDataApiManager::upsertRecordsSync()` — same validation + `aaxis_ontology_data_upsert` PG
-function as the async Data View "Add Data" path (`upsertRecords()`, still queued), but no queue:
+`OntologyDataApiManager::upsertRecordsSync()` — external entities: same validation +
+`aaxis_ontology_data_upsert` PG function as the async Data View "Add Data" path
+(`upsertRecords()`, still queued); INTERNAL entities: `Manager/OroEntityWriter` updates the Oro
+rows themselves (existing records only — see "Data HTTP API"). No queue either way:
 uid inferred from the entity's unique_attribute, **stamped with the flow being debugged** (the
 editor sends `flowId` in the debug POST; a never-saved flow falls back to
 `requireEnabledFlow(Manual)`) **and with the run's `flowUuid`** (the optional uuid arg). The
@@ -526,12 +644,29 @@ receipt stored under the destination reports the REAL outcome — `{uuid, count,
 content — null / [] / "" — is NOT an error: the write is skipped, no event row, receipt
 `{uuid: <run uuid>, count: 0, upsert: 0, changedIds: []}`) — and the
 event row is recorded AND completed inline (unique_ids = seen, changed_ids = upserted,
-finished_at set); PG validation errors throw, naming the step. Writer/connector emits a `_debug`
-placeholder; other step types are no-ops for now. `prepareUpsertBatch()` (shared by both paths)
-rejects a batch that REPEATS a unique id, naming both record numbers. GOTCHA (async path only,
-i.e. Add Data / REST API): the consumer closes events ONLY on validation errors — the only trace
-is an `app.ERROR` log line and an event with `finished_at` set but empty `changed_ids`; the
-success path leaves events open for the next pipeline stage (still a TODO). The writer's properties dialog reuses the
+finished_at set); PG validation errors throw, naming the step. **writer/connector** writes for real
+through file_system/sftp/bucket (below); rest_api/database writers emit a `_debug` placeholder;
+other step types are no-ops for now. Both writers resolve their content through the SAME
+`resolveContent()` (context key, or the DWL expression when `content_dwl` is on), so the two cannot
+drift on how a step's content is read. `prepareUpsertBatch()` (shared by both paths)
+rejects a batch that REPEATS a unique id, naming both record numbers.
+**`Manager/OntologyDataEventRecorder` is the SINGLE writer of `aaxis_ontology_data_events`** — used
+by BOTH the synchronous path (`upsertRecordsSync`) and the async consumer, because the two used to
+duplicate this bookkeeping and drifted (the consumer left every successful event open, so Manual
+"Add Data" rows showed no Changed Ids and no Finished At). `open()` inserts the row, `close()`
+stamps changed_ids + finished_at from a **`finally`** on both paths, so a rejected batch or a crash
+never leaves an event "open"; `parseUpsertResponse()` is the one place that reads the PG function's
+answer (an UNTOUCHED record is marked json null, so "changed" = the keys carrying a diff;
+numeric-looking unique ids come back as INT array keys and are strval'd; the failure payload is
+recognised BY SHAPE — the whole payload being `{errors: [strings]}` — so a record whose unique id
+is literally `errors` is not misread as a rejection). `encodeIds()` writes NULL, never `''`, for an
+empty list: Doctrine's simple_array reads `''` back as `['']`, a phantom blank element that would
+show up as a count of 1. CONSEQUENCE of always closing: a rejected batch and a successful batch that
+changed nothing now look identical in the table (finished_at set, changed_ids NULL) — the only
+trace of a rejection is the `app.ERROR` log line, since the table has no status column.
+GOTCHA: the queue consumers are LONG-RUNNING php processes — they keep executing the old code until
+restarted, so a change here needs `oro:message-queue:consume` restarted (plus a cache clear for the
+container, since the processor's constructor arguments changed). The writer's properties dialog reuses the
 reader's (`ioSection(kind)`) with the entity variant showing a Content textarea instead of
 Load/Id; config discriminator is `writer: entity|connector`.
 **DWL-toggled fields** render through ONE shared widget — `widgets/dwl-field.ts`,
@@ -585,7 +720,10 @@ firstWith · indexOf/lastIndexOf/indexWhere · partition {success, failure} · s
 {l, r} · join/leftJoin/outerJoin ({l, r} rows, type-tagged match keys) · countBy/sumBy/every/some),
 the `mod` operator (global env function; NOTE the parser gates infix names by the
 `isInfixFunction()` WHITELIST — 2-arg functions must be listed there to be used infix, the
-evaluator then resolves non-builtins from the env) and the DATE SUPPORT: `|…|` literals (ISO dates/times and `|PT1S|` periods — the
+evaluator then resolves non-builtins from the env), the structural `-` operator (`object - "key"`
+removes every pair of that key, `array - item` every equal item — before, `-` was numeric-only and
+coerced objects to 0, breaking the DW replace-a-key idiom `obj - 'k' ++ {k: v}`; `-` binds tighter
+than `++` so no parentheses needed) and the DATE SUPPORT: `|…|` literals (ISO dates/times and `|PT1S|` periods — the
 lexer falls back to the `|` operator when the pipes don't wrap something date-shaped), temporal
 Values (`Value::dateTime(dt, kind)` with kind date|time|localtime|local_datetime|datetime,
 `Value::period()` keeping the ISO text; both leave the engine as ISO strings via toPhp/toString),
@@ -610,6 +748,86 @@ add/change one, touch all of them:
 5. `Resources/js-src/app/components/<x>-component.ts` — the record type, the form field, the
    edit-load `values`, and the save payload.
 6. `Resources/translations/messages.en.yml` — label + any validation/placeholder strings.
+
+## File-based connector transfers (`Manager/FileConnectorTransfer`)
+
+The read/write half of the **file_system, sftp and bucket** connectors, used by the flow
+reader/writer steps. One class covers all three so a flow behaves the same whichever it points at —
+`supports($type)` is the single place that answers "is this connector file-based".
+
+**Result contract** (what lands in the step's destination variable):
+
+| Case | Value |
+|------|-------|
+| read a FOLDER | a LIST of `{name, path, type: file\|folder, size, modified}`, sorted by name |
+| read a FILE | its content as a plain STRING |
+| write | `{isError: false, message, path, bytes}` |
+| I/O failure (either) | `{isError: true, message, exception: {class, message}}` — root cause when the storage threw, the transfer failure itself otherwise, so the key is always readable |
+
+- ⚠️ **I/O failures are RETURNED, not thrown** — a missing path or refused permission is a result
+  the flow can branch on, NOT a reason to abort the run. This is deliberately unlike the rest_api
+  reader (which aborts on HTTP ≥ 400). What still aborts the step is a broken *definition*: no
+  server/base path/bucket configured, no credentials, phpseclib missing. `Exception/ConnectorTransferFailure`
+  is what separates the two — the transfer throws it internally for soft failures and converts it to
+  the payload at the ONE public boundary; a plain `\RuntimeException` escapes and aborts.
+- **Folder vs file**: file_system and sftp ask the storage (`is_dir`). Object storage has no
+  folders, so a bucket path counts as a folder when EMPTY or ending in `/`, and as an object key
+  otherwise — a bucket "folder" read is a prefix listing (delimiter `/`, `CommonPrefixes` reported
+  as `type: folder`). Consequence: a listed folder's `path` KEEPS its trailing slash so it can be
+  fed straight back into the next step; file_system/sftp tolerate the slash.
+- **File content is NOT JSON-decoded** (again unlike the rest_api reader): a file's type is not
+  knowable from the transport, so the raw string is handed over and a DWL step parses if it wants.
+- ⚠️ **file_system reads/writes are confined to the connector's `base_path`** (`localTarget()`):
+  a flow author types the path, so without the containment check a step could read `/etc/passwd`
+  through a connector scoped to an import folder. Paths that do not exist yet (every write target)
+  are checked LEXICALLY, since `realpath()` returns false for them.
+- Local writes do **not** create missing folders — a typo would otherwise scatter directories
+  instead of reporting the mistake.
+- Bucket writes are `PUT` with a signed body: `S3RequestSigner::headers()` takes a `$payloadHash`
+  for that (omit it and an empty body is signed). The URL is built with the signer's public
+  `encodePath()`/`encodeQuery()`, because `http_build_query()` renders a space as `+` while SigV4
+  demands `%20` — a mismatch there is an instant signature failure.
+- SFTP needs **phpseclib3** (no ext-ssh2 fallback here, unlike `ConnectorTester`); without it the
+  step aborts with an instructive message.
+
+## Flow portability (export / import)
+
+`Manager/FlowPortability` moves a flow between environments as a JSON document; the flows grid has a
+per-row **Export** action and an **Import Flow** button (gated on `aaxis_ontology_flow_create`, so it
+matches the endpoint). Endpoints: `GET /flows/api/{id}/export` (view ACL) and
+`POST /flows/api/import` (create ACL + CSRF, 2 MB cap, outer+inner `json_decode` with
+JSON_THROW_ON_ERROR and depth 64 — the client posts the file TEXT and the server decodes it, so a
+malformed file fails the same way as any bad document).
+
+WHY it is not just "dump the jsonb": a flow already names systems/entities rather than pointing at
+ids, but connector steps hold the numeric `config.connector`, which is meaningless elsewhere. Export
+rewrites it to `connectorRef: {name, type, system}` in BOTH `steps` and `design.steps` (each carries
+its own copy of every config) and adds an `entities` manifest with each referenced entity's
+`uniqueAttribute` — the piece step configs do NOT carry, and what requirement (d) checks. Import
+resolves the descriptors back to local ids and drops the refs.
+
+Document: `{format: 'aaxis-ontology-flow', version: 1, exportedAt, flow: {name, type, steps, design},
+entities: [{system, entity, uniqueAttribute}]}`. `flow.type` is informational — import always
+recomputes type/triggerType from the steps.
+
+Import refuses (collecting EVERY problem into `FlowImportException::getErrors()`, rendered as a list
+in the dialog): wrong format/`version`; a `design.version` ≠ `OntologyFlow::DESIGN_VERSION` (**that
+PHP constant mirrors DESIGN_VERSION in flow-editor-component.ts — keep them in step**; a mismatched
+canvas would still be SCHEDULED and executed, since `ScheduledFlowRunner` reads `design.steps`, while
+the editor calls it corrupted and opens empty = an uneditable running flow); `steps` and
+`design.steps` describing different flows (they drive different consumers); a taken name; a leftover
+RAW `config.connector` id (the exact cross-environment mis-binding this feature exists to prevent);
+a connector ref missing name/type/system (a partial descriptor used to match loosely); an unmatched
+or ambiguous connector; an entity missing here or keyed by a different unique attribute; a malformed
+step element (never silently truncate a flow); and anything `FlowStepValidator` rejects. Imported
+flows are always created **disabled** (requirement e).
+
+KNOWN GAPS (deliberate, surfaced to the user): a referenced entity/system that exists here but is
+DISABLED imports clean and 422s on the first run — reporting it needs a warnings channel the
+response shape does not have yet; export does not detect ambiguity in the SOURCE environment
+(connector names are not unique — no unique index on `(system_id, name, type)`); and `sub_flow` /
+`invoke` reference nothing today, so the day they gain an id-bearing config key, `rewriteStepList`
+would ship it verbatim — a per-type config-key allowlist would catch that.
 
 ## JS / TypeScript — NEVER hand-edit the compiled `.js`
 

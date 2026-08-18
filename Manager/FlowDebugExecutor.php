@@ -19,19 +19,31 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  *
  * Per-type behaviour (grows as step types gain execution semantics):
  *  - entity_change trigger: seeds the context with the payload the user provided (`payload` key);
+ *  - choice: evaluates its DWL expression against the context — truthy continues on the GREEN
+ *    output (port 0), falsy on the RED one (port 1; optional — no link just ends the flow). The
+ *    verdict is recorded in the context under the reserved `choiceResults` key (step id => bool),
+ *    which is also what re-derives the already-walked path in step-through debug;
  *  - reader/entity: real data via {@see OntologyDataApiManager} (`all` = EVERY record — flow
  *    reads are not page-capped — optionally ordered by one attribute and/or limited by the step's
- *    own config; `by_id` = one record's payload — a MISSING record yields null, not an error);
+ *    own config; `by_id` = one record's payload — a MISSING record yields null, not an error;
+ *    `by_attribute` = the LIST of records whose attribute equals the value, [] when none match).
+ *    Internal-system entities read from the OroCommerce entity itself ({@see OroEntityReader});
  *  - reader/connector: rest_api connectors execute for real (URL from the connector's
  *    server/port + the step's path; connector headers + auth headers; auth=oauth first POSTs the
  *    token path and attaches the returned access_token; the step's operation/body are honoured);
- *    sftp/file_system connectors emit a placeholder note;
+ *    file_system/sftp/bucket connectors read for real via {@see FileConnectorTransfer} — a FOLDER
+ *    path yields a list of items, a FILE path its content, and an I/O failure an
+ *    `{isError: true, ...}` payload instead of aborting the run; database connectors emit a
+ *    placeholder note;
  *  - dwl_transform: runs the step's DataWeave script with the whole context as variables (also
  *    reachable as one `context` object, e.g. context["flowUuid"]);
  *  - writer/entity: performs the real upsert SYNCHRONOUSLY (same validation and PG function as
  *    the Data View "Add Data", but no queue), stamped with the flow being debugged (Manual only
  *    when the flow was never saved) and the execution uuid — the receipt carries the actual
  *    outcome ({uuid, count, upsert, changedIds}) and the event row completes on the spot;
+ *  - writer/connector: file_system/sftp/bucket write for real via {@see FileConnectorTransfer} —
+ *    the step's content (a context key, or its DWL expression) is written to the step's path and
+ *    the receipt is `{isError, message, path, bytes}`; rest_api/database emit a placeholder note;
  *  - everything else: no-op pass-through for now.
  *
  * Every TOP-LEVEL execution mints ONE uuid up front, seeded into the context as `flowUuid`: all
@@ -47,6 +59,7 @@ class FlowDebugExecutor
         private readonly ManagerRegistry $doctrine,
         private readonly HttpClientInterface $httpClient,
         private readonly DwlTransformer $dwl,
+        private readonly FileConnectorTransfer $files,
     ) {
     }
 
@@ -77,8 +90,15 @@ class FlowDebugExecutor
 
         $context = $this->initialContext($order[0], $input, $executionUuid);
         try {
-            foreach ($order as $step) {
+            // The order is re-derived after every choice: its verdict (just recorded in the
+            // context) extends the walk with the branch it picked — or ends it, when the picked
+            // port has no link.
+            for ($cursor = 0; $cursor < \count($order); $cursor++) {
+                $step = $order[$cursor];
                 $this->executeStep($step, $context, $flow, $executionUuid);
+                if ($step['type'] === 'choice') {
+                    $order = $this->executionOrder($steps, $links, self::choiceResults($context));
+                }
             }
         } finally {
             // finally, not a happy-path call: a failed run must still release the "running" state
@@ -107,7 +127,10 @@ class FlowDebugExecutor
      */
     public function executeFrom(array $steps, array $links, array $input, int $index, ?array $context, ?OntologyFlow $flow = null, bool $runToEnd = false): array
     {
-        $order = $this->executionOrder($steps, $links);
+        // Branch-aware: the verdicts recorded by the choice steps ALREADY executed (carried by the
+        // debug context) rebuild exactly the path walked so far, so the client's plain index stays
+        // a valid cursor into it. `total` grows as later choices resolve their branch.
+        $order = $this->executionOrder($steps, $links, self::choiceResults($context ?? []));
         $total = \count($order);
         if ($index < 0 || $index >= $total) {
             throw new \RuntimeException('There is no step left to execute.');
@@ -130,6 +153,10 @@ class FlowDebugExecutor
             do {
                 $executed = $order[$cursor];
                 $this->executeStep($executed, $context, $flow, $executionUuid);
+                if ($executed['type'] === 'choice') {
+                    $order = $this->executionOrder($steps, $links, self::choiceResults($context));
+                    $total = \count($order);
+                }
                 $cursor++;
             } while ($runToEnd && $cursor < $total);
         } finally {
@@ -150,15 +177,23 @@ class FlowDebugExecutor
     }
 
     /**
-     * The execution order: breadth-first along the links from the trigger (choice branches by
-     * port order) — reachable steps only, the trigger itself first.
+     * The execution order: breadth-first along the links from the trigger — reachable steps only,
+     * the trigger itself first.
+     *
+     * A CHOICE step only continues on the branch its recorded verdict picked ($choiceResults,
+     * step id => bool: true = the green port 0, false = the red port 1). A choice with NO verdict
+     * yet ends the walk there — what follows is unknowable until the choice runs, so the order
+     * grows as verdicts land (see the recompute in {@see execute()} / {@see executeFrom()}); a
+     * picked branch with no link simply ends the flow. Since every port drives at most one link
+     * and every step accepts at most one incoming link, already-walked prefixes never reorder.
      *
      * @param array<int, array{id: string, type: string, name: string, config: array<string, mixed>|null}> $steps
      * @param array<int, array{from: string, fromPort: int, to: string}> $links
+     * @param array<string, bool> $choiceResults verdicts of the choice steps executed so far
      *
      * @return array<int, array{id: string, type: string, name: string, config: array<string, mixed>|null}>
      */
-    private function executionOrder(array $steps, array $links): array
+    private function executionOrder(array $steps, array $links, array $choiceResults = []): array
     {
         $byId = [];
         $trigger = null;
@@ -186,8 +221,17 @@ class FlowDebugExecutor
         $order = [];
         while ($queue !== []) {
             $id = array_shift($queue);
-            $order[] = $byId[$id];
-            foreach ($outgoing[$id] ?? [] as $link) {
+            $step = $byId[$id];
+            $order[] = $step;
+            $follow = $outgoing[$id] ?? [];
+            if ($step['type'] === 'choice') {
+                if (!\array_key_exists($id, $choiceResults)) {
+                    continue; // verdict pending — the path beyond is not known yet
+                }
+                $port = $choiceResults[$id] ? 0 : 1;
+                $follow = array_values(array_filter($follow, static fn (array $l) => $l['fromPort'] === $port));
+            }
+            foreach ($follow as $link) {
                 if (isset($byId[$link['to']]) && !isset($visited[$link['to']])) {
                     $visited[$link['to']] = true;
                     $queue[] = $link['to'];
@@ -196,6 +240,20 @@ class FlowDebugExecutor
         }
 
         return $order;
+    }
+
+    /**
+     * The choice verdicts a context has accumulated (the reserved `choiceResults` key).
+     *
+     * @param array<string, mixed> $context
+     *
+     * @return array<string, bool>
+     */
+    private static function choiceResults(array $context): array
+    {
+        $results = $context['choiceResults'] ?? null;
+
+        return \is_array($results) ? array_map(static fn ($v) => (bool) $v, $results) : [];
     }
 
     /**
@@ -254,6 +312,28 @@ class FlowDebugExecutor
      */
     private function executeStep(array $step, array &$context, ?OntologyFlow $flow, string $executionUuid): void
     {
+        // Choice: evaluates its DWL expression against the current context and records the verdict
+        // under the RESERVED context key `choiceResults` (step id => bool) — the walk reads it to
+        // pick the branch: truthy = the green output (port 0), falsy = the red one (port 1).
+        if ($step['type'] === 'choice') {
+            $expression = \is_array($step['config']) && \is_string($step['config']['expression'] ?? null)
+                ? trim($step['config']['expression'])
+                : '';
+            if ($expression === '') {
+                throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
+            }
+            try {
+                $result = $this->dwl->transform($expression, $context);
+            } catch (\Throwable $e) {
+                throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
+            }
+            $results = \is_array($context['choiceResults'] ?? null) ? $context['choiceResults'] : [];
+            $results[$step['id']] = (bool) $result;
+            $context['choiceResults'] = $results;
+
+            return;
+        }
+
         if (!\in_array($step['type'], ['reader', 'dwl_transform', 'writer'], true)) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
         }
@@ -282,7 +362,7 @@ class FlowDebugExecutor
             if (($config['writer'] ?? null) === 'entity') {
                 $context[$destination] = $this->writeEntity($step['name'], $config, $context, $flow, $executionUuid);
             } else {
-                $context[$destination] = ['_debug' => 'Connector writers are not executed in debug yet.'];
+                $context[$destination] = $this->writeConnector($step['name'], $config, $context);
             }
 
             return;
@@ -302,9 +382,20 @@ class FlowDebugExecutor
     {
         $system = (string) ($config['system'] ?? '');
         $entityName = (string) ($config['entity'] ?? '');
+        $mode = $config['mode'] ?? 'all';
         try {
-            if (($config['mode'] ?? 'all') === 'by_id') {
+            if ($mode === 'by_id') {
                 return $this->dataApi->read($system, $entityName, (string) ($config['record_id'] ?? ''));
+            }
+            // "By attribute" yields the LIST of matches ([] when none) — an attribute, unlike the
+            // unique id, may match any number of records.
+            if ($mode === 'by_attribute') {
+                return $this->dataApi->queryForFlowByAttribute(
+                    $system,
+                    $entityName,
+                    (string) ($config['attribute'] ?? ''),
+                    (string) ($config['attr_value'] ?? '')
+                );
             }
 
             // Flow reads are NOT page-capped (the API's caps are for outside callers): "all"
@@ -330,7 +421,9 @@ class FlowDebugExecutor
     /**
      * Writes the context value named by `content` (or produced by its DWL expression) into the
      * configured entity: a single object or an array of objects, unique id inferred from the
-     * entity's unique_attribute. An EMPTY value (null / [] / "") is not an error — the write is
+     * entity's unique_attribute. INTERNAL-system entities are written to the OroCommerce entity
+     * itself (updates of existing rows only — {@see OroEntityWriter}); external ones upsert the
+     * ontology store. An EMPTY value (null / [] / "") is not an error — the write is
      * skipped and the receipt reads {uuid: <run uuid>, count: 0, upsert: 0, changedIds: []}.
      * Otherwise the write is SYNCHRONOUS ({@see OntologyDataApiManager::upsertRecordsSync})
      * so the receipt reports the real outcome — {uuid, count, upsert: <created+changed>,
@@ -344,21 +437,9 @@ class FlowDebugExecutor
      */
     private function writeEntity(string $stepName, array $config, array $context, ?OntologyFlow $flow, string $executionUuid): array
     {
-        $contentSource = trim((string) ($config['content'] ?? ''));
-        if (($config['content_dwl'] ?? false) === true) {
-            // The DWL toggle turns the content into an expression over the context; its result is
-            // the record(s) to write.
-            try {
-                $value = $this->dwl->transform($contentSource, $context);
-            } catch (\Throwable $e) {
-                throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
-            }
-        } else {
-            if (!\array_key_exists($contentSource, $context)) {
-                throw new \RuntimeException(sprintf('Step "%s": content "%s" is not available in the context.', $stepName, $contentSource));
-            }
-            $value = $context[$contentSource];
-        }
+        // The DWL toggle turns the content into an expression over the context; its result is the
+        // record(s) to write. Same resolution as the connector writer's.
+        $value = $this->resolveContent($stepName, $config, $context);
         // Nothing to write is a legitimate outcome (an upstream filter left no records): skip the
         // upsert entirely and report an empty-but-successful receipt under the run's uuid.
         if ($value === null || $value === [] || $value === '') {
@@ -406,6 +487,66 @@ class FlowDebugExecutor
     }
 
     /**
+     * Writes the step's content through a file-based connector (file_system / sftp / bucket). The
+     * content is resolved exactly like the entity writer's — a context key, or a DWL expression
+     * when `content_dwl` is on — and stringified: strings verbatim, anything else JSON-encoded.
+     *
+     * The receipt is `{isError: false, message, path, bytes}`, or `{isError: true, message,
+     * exception?}` when the storage refused the write. Connector types that cannot write yet
+     * (rest_api, database) keep their placeholder note.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array<string, mixed>
+     */
+    private function writeConnector(string $stepName, array $config, array $context): array
+    {
+        /** @var OntologyConnector|null $connector */
+        $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
+        if ($connector === null) {
+            throw new \RuntimeException(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
+        }
+        if (!$this->files->supports((string) $connector->getType())) {
+            return ['_debug' => sprintf('"%s" connector writers are not executed in debug yet.', (string) $connector->getType())];
+        }
+
+        $value = $this->resolveContent($stepName, $config, $context);
+        $content = \is_string($value) ? $value : (string) json_encode($value);
+
+        try {
+            return $this->files->write($connector, (string) ($config['path'] ?? ''), $content);
+        } catch (\RuntimeException $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s.', $stepName, $e->getMessage()), 0, $e);
+        }
+    }
+
+    /**
+     * The value a writer step is asked to write: the named context key, or the result of its DWL
+     * expression when `content_dwl` is on. Shared by the entity and connector writers so both read
+     * the step config the same way.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     */
+    private function resolveContent(string $stepName, array $config, array $context): mixed
+    {
+        $contentSource = trim((string) ($config['content'] ?? ''));
+        if (($config['content_dwl'] ?? false) === true) {
+            try {
+                return $this->dwl->transform($contentSource, $context);
+            } catch (\Throwable $e) {
+                throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+            }
+        }
+        if (!\array_key_exists($contentSource, $context)) {
+            throw new \RuntimeException(sprintf('Step "%s": content "%s" is not available in the context.', $stepName, $contentSource));
+        }
+
+        return $context[$contentSource];
+    }
+
+    /**
      * @param array<string, mixed> $config
      * @param array<string, mixed> $context
      */
@@ -415,6 +556,15 @@ class FlowDebugExecutor
         $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
         if ($connector === null) {
             throw new \RuntimeException(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
+        }
+        $path = (string) ($config['path'] ?? '');
+        if ($this->files->supports((string) $connector->getType())) {
+            // Folder → a list of items; file → its content; failure → an isError payload.
+            try {
+                return $this->files->read($connector, $path);
+            } catch (\RuntimeException $e) {
+                throw new \RuntimeException(sprintf('Step "%s": %s.', $stepName, $e->getMessage()), 0, $e);
+            }
         }
         if ($connector->getType() !== OntologyConnector::TYPE_REST_API) {
             return ['_debug' => sprintf('"%s" connectors are not executed in debug yet.', (string) $connector->getType())];

@@ -22,6 +22,14 @@
                             aria-label="{{ 'aaxis.common.grid.columns_title'|trans }}">
                         <span class="fa fa-cog" aria-hidden="true"></span>
                     </button>
+                    {# Creates a flow from a JSON exported elsewhere; sits before "Add Flow".
+                       Gated on the same permission the import endpoint requires. #}
+                    {% if is_granted('aaxis_ontology_flow_create') %}
+                        <button type="button" class="btn aaxis-ontology-sys__add" data-role="import">
+                            <span class="fa fa-download" aria-hidden="true"></span>
+                            {{ 'aaxis.ontology.flow_view.import_button'|trans }}
+                        </button>
+                    {% endif %}
                     <button type="button" class="btn btn-primary aaxis-ontology-sys__add" data-role="add">
                         <span class="fa fa-plus" aria-hidden="true"></span>
                         {{ 'aaxis.ontology.flow_view.add_button'|trans }}

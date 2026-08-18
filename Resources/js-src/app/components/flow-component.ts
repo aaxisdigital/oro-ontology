@@ -1,8 +1,10 @@
+import $ from 'jquery';
 import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction} from 'aaxiscommon/js/app/widgets/data-grid';
+import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 
 interface OntologyFlowOptions {
     _sourceElement: any;
@@ -41,6 +43,16 @@ class OntologyFlowComponent extends BaseComponent {
                 icon: 'fa-pencil',
                 disabled: (row: FlowRecord) => row.type === 'native',
                 disabledTitle: __('aaxis.ontology.flow_view.edit_builtin_disabled')
+            },
+            {
+                key: 'export',
+                label: __('aaxis.ontology.flow_view.export'),
+                icon: 'fa-upload',
+                // The two built-in flows are fixture-seeded in every environment: there is nothing
+                // to carry across, and they cannot be recreated by an import either (it always
+                // builds a user flow).
+                disabled: (row: FlowRecord) => row.type === 'native',
+                disabledTitle: __('aaxis.ontology.flow_view.export_builtin_disabled')
             }
         ];
 
@@ -90,6 +102,10 @@ class OntologyFlowComponent extends BaseComponent {
             e.preventDefault();
             window.location.href = routing.generate('aaxis_ontology_flow_editor');
         });
+        this.$el.on('click.aaxisOntologyFlow', '[data-role="import"]', (e: any) => {
+            e.preventDefault();
+            this.openImport();
+        });
 
         this.load();
     }
@@ -97,7 +113,128 @@ class OntologyFlowComponent extends BaseComponent {
     private onAction(action: string, row: FlowRecord): void {
         if (action === 'edit' && row.type !== 'native') {
             window.location.href = routing.generate('aaxis_ontology_flow_editor', {id: row.id});
+        } else if (action === 'export' && row.type !== 'native') {
+            // The grid dispatches disabled actions too, so re-check here (as 'edit' does).
+            this.exportFlow(row);
         }
+    }
+
+    /** Downloads the flow as a portable JSON document (connector ids become name/type refs). */
+    private exportFlow(row: FlowRecord): void {
+        fetch(routing.generate('aaxis_ontology_flow_export', {id: row.id}), {credentials: 'same-origin'})
+            .then(r => r.json().then(d => ({ok: r.ok, data: d})))
+            .then(res => {
+                if (!res.ok || !res.data || !res.data.success) {
+                    const errors: string[] = (res.data && res.data.errors) || [];
+                    throw new Error(errors[0] || __('aaxis.ontology.flow_view.export_error'));
+                }
+                this.saveJsonFile(
+                    JSON.stringify(res.data.document, null, 2),
+                    String(res.data.filename || 'flow.json')
+                );
+            })
+            .catch((err: Error) => messenger.notificationFlashMessage(
+                'error', err.message || __('aaxis.ontology.flow_view.export_error')
+            ));
+    }
+
+    /** Hands the browser a file to save (same approach as the DWL playground's export). */
+    private saveJsonFile(content: string, filename: string): void {
+        const blob = new Blob([content], {type: 'application/json;charset=utf-8'});
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        // Revoke on the next tick — Safari needs the URL alive for the duration of the click.
+        window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
+    }
+
+    /**
+     * Import dialog: pick a previously exported file, send its text to the server, and show every
+     * problem it reports (bad format, name already taken, connectors/entities that do not match
+     * here). A successful import lands as a DISABLED flow, so nothing runs until it is reviewed.
+     */
+    private openImport(): void {
+        const dialog = new Dialog({
+            title: __('aaxis.ontology.flow_view.import_title'),
+            subtitle: __('aaxis.ontology.flow_view.import_hint'),
+            width: '560px'
+        });
+        const $content = dialog.open();
+
+        const $errors = $('<div/>', {'class': 'aaxis-rfm__alert', role: 'alert', hidden: 'hidden'});
+        const $file = $('<input/>', {type: 'file', accept: 'application/json,.json', 'class': 'form-control'});
+        const $field = $('<div/>', {'class': 'aaxis-rfm__field'}).append(
+            $('<label/>', {'class': 'aaxis-rfm__label', text: __('aaxis.ontology.flow_view.import_file')}),
+            $file
+        );
+
+        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
+        const $submit = $('<button/>', {
+            type: 'button', 'class': 'btn btn-primary', disabled: true,
+            text: __('aaxis.ontology.flow_view.import_button')
+        });
+        $actions.append($cancel, $submit);
+        $content.append($errors, $field, $actions);
+
+        $file.on('change', () => {
+            $errors.attr('hidden', 'hidden').empty();
+            $submit.prop('disabled', !($file[0] as HTMLInputElement).files?.length);
+        });
+        $cancel.on('click', () => dialog.close());
+        $submit.on('click', () => {
+            const file = ($file[0] as HTMLInputElement).files?.[0];
+            if (!file) {
+                return;
+            }
+            $submit.prop('disabled', true);
+            const reader = new FileReader();
+            reader.onerror = () => {
+                this.showImportErrors($errors, [__('aaxis.ontology.flow_view.import_read_error')]);
+                $submit.prop('disabled', false);
+            };
+            reader.onload = () => {
+                this.sendImport(String(reader.result || ''), dialog, $errors, $submit);
+                // Clear the picker: re-selecting the SAME file fires no change event otherwise,
+                // which would strand the user on a dialog that stays open after an error.
+                $file.val('');
+                $submit.prop('disabled', true);
+            };
+            reader.readAsText(file);
+        });
+    }
+
+    private sendImport(document: string, dialog: Dialog, $errors: any, $submit: any): void {
+        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
+        const match = window.document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+        fetch(routing.generate('aaxis_ontology_flow_import'), {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': match ? decodeURIComponent(match[1]) : ''},
+            body: JSON.stringify({document})
+        }).then(r => r.json().then(d => ({ok: r.ok, data: d}))).then(res => {
+            if (!res.ok || !res.data || !res.data.success) {
+                this.showImportErrors($errors, (res.data && res.data.errors) || [__('aaxis.ontology.flow_view.import_error')]);
+                $submit.prop('disabled', false);
+                return;
+            }
+            messenger.notificationFlashMessage('success', __('aaxis.ontology.flow_view.imported'));
+            dialog.close();
+            this.load();
+        }).catch(() => {
+            this.showImportErrors($errors, [__('aaxis.ontology.flow_view.import_error')]);
+            $submit.prop('disabled', false);
+        });
+    }
+
+    private showImportErrors($errors: any, messages: string[]): void {
+        const $list = $('<ul/>', {'class': 'aaxis-flow-import__errors'});
+        messages.forEach(message => $list.append($('<li/>', {text: String(message)})));
+        $errors.empty().append($list).removeAttr('hidden');
     }
 
     private load(): void {

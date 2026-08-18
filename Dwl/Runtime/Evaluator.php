@@ -291,6 +291,22 @@ class Evaluator
 
     private function subtract(Value $left, Value $right): Value
     {
+        // Object - "key": a new object without every pair of that key (objects are pair lists and
+        // may carry duplicate keys). `obj - 'k' ++ {k: v}` is the DataWeave way to replace a key.
+        if ($left->type === ValueType::Object && $right->type === ValueType::String) {
+            return Value::object(array_values(array_filter(
+                $left->data,
+                fn(array $pair) => $this->toString($pair[0]) !== $right->data
+            )));
+        }
+        // Array - item: a new array without every occurrence of the item (equality, not identity —
+        // same matching as `--`).
+        if ($left->type === ValueType::Array) {
+            return Value::array(array_values(array_filter(
+                $left->data,
+                fn(Value $item) => !$this->isEqual($item, $right)
+            )));
+        }
         $shifted = $this->shiftByPeriod($left, $right, true);
         if ($shifted !== null) {
             return $shifted;

@@ -64,8 +64,10 @@ class OntologyEventController extends AbstractController
      */
     private function serialize(OntologyDataEvent $event, array $entityNames, array $flowNames): array
     {
-        $uniqueIds = $event->getUniqueIds() ?? [];
-        $changedIds = $event->getChangedIds() ?? [];
+        // simple_array reads an EMPTY column back as [''] (one blank element), which would show as
+        // a count of 1 with no id — drop blanks so the counts the grid prefixes are truthful.
+        $uniqueIds = array_values(array_filter($event->getUniqueIds() ?? [], static fn ($id) => $id !== ''));
+        $changedIds = array_values(array_filter($event->getChangedIds() ?? [], static fn ($id) => $id !== ''));
 
         return [
             'id' => $event->getId(),

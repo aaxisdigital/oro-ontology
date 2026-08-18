@@ -40,11 +40,17 @@ class OntologyDataApiManager
         private readonly MessageProducerInterface $producer,
         private readonly ConfigManager $configManager,
         private readonly OntologyAttributeReconciler $attributeReconciler,
+        private readonly OntologyDataEventRecorder $events,
+        private readonly OroEntityReader $oroReader,
+        private readonly OroEntityWriter $oroWriter,
     ) {
     }
 
     /**
      * Reads a single record identified by system + entity name and unique id, returning its payload.
+     *
+     * An INTERNAL system's data lives in the OroCommerce entity itself (the ontology entity's name
+     * is the class), never in `aaxis_ontology_data` — so those reads go to {@see OroEntityReader}.
      *
      * @return array<int|string, mixed>|null
      *
@@ -53,6 +59,15 @@ class OntologyDataApiManager
     public function read(string $systemName, string $entityName, string $uniqueId): ?array
     {
         $entity = $this->resolveEntity($systemName, $entityName, false);
+
+        if ($this->isInternal($entity)) {
+            $payload = $this->oroReader->readById($entity, $uniqueId);
+            if ($payload === null) {
+                throw OntologyApiException::recordNotFound($uniqueId);
+            }
+
+            return $payload;
+        }
 
         /** @var OntologyData|null $record */
         $record = $this->doctrine->getRepository(OntologyData::class)
@@ -63,6 +78,14 @@ class OntologyDataApiManager
         }
 
         return $record->getPayload();
+    }
+
+    /** An internal system's records live in the Oro entity itself, not the ontology data store. */
+    private function isInternal(OntologyEntity $entity): bool
+    {
+        $system = $entity->getSystem();
+
+        return $system !== null && !$system->isExternal();
     }
 
     /**
@@ -122,6 +145,17 @@ class OntologyDataApiManager
      */
     public function upsertRecords(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid = null): string
     {
+        // Internal-system records live in the Oro entity itself and are only written SYNCHRONOUSLY
+        // ({@see upsertRecordsSync}, used by flow writer steps) — the queued path would silently
+        // store rows nothing ever reads, so it refuses loudly instead.
+        if ($this->isInternal($entity)) {
+            throw OntologyApiException::invalidPayload(sprintf(
+                'Entity "%s" belongs to an internal system — its records live in OroCommerce itself'
+                . ' and can only be written by a flow writer step (update of existing records).',
+                (string) $entity->getName()
+            ));
+        }
+
         [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid);
 
         // The async upsert flow expects unique_id and payload as parallel arrays (one per record).
@@ -154,23 +188,19 @@ class OntologyDataApiManager
      */
     public function upsertRecordsSync(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid = null): array
     {
+        if ($this->isInternal($entity)) {
+            return $this->updateOroEntitySync($entity, $records, $flow, $uuid);
+        }
+
         [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid);
 
         $connection = $this->connection();
         $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-        $eventId = (int) $connection->fetchOne(
-            'INSERT INTO aaxis_ontology_data_events (flow_id, uuid, entity_id, unique_ids, started_at)'
-            . ' VALUES (?, ?, ?, ?, ?) RETURNING id',
-            [
-                $flow->getId(),
-                $uuid,
-                $entity->getId(),
-                // simple_array column: stored as a comma-separated string (same as the consumer).
-                implode(',', $uniqueIds),
-                $startedAt->format('Y-m-d H:i:s'),
-            ]
-        );
 
+        // Encoded BEFORE the event is opened: JSON_THROW_ON_ERROR can reject the batch (an INF
+        // from a DWL float overflow, a >512-deep payload…) and a throw between open() and the
+        // try/finally below would leave an event open forever — the very state this class exists
+        // to prevent. Failing here means no event row at all, which is the truth: nothing ran.
         $input = json_encode([
             'flow_id' => $flow->getId(),
             'uuid' => $uuid,
@@ -179,27 +209,51 @@ class OntologyDataApiManager
             'updated_at' => $startedAt->format(\DateTimeInterface::ATOM),
             'payload' => $payloads,
         ], JSON_THROW_ON_ERROR);
-        $raw = $connection->fetchOne('SELECT aaxis_ontology_data_upsert(CAST(? AS jsonb))', [$input]);
-        $response = json_decode((string) $raw, true);
-        $result = \is_array($response) && \is_array($response['payload'] ?? null) ? $response['payload'] : [];
 
-        $errors = $result['errors'] ?? null;
-        // The function marks untouched records with json null — created/updated ones carry a diff.
-        $changed = $errors === null
-            ? array_values(array_map('strval', array_keys(array_filter($result, static fn ($diff) => $diff !== null))))
-            : [];
+        $eventId = $this->events->open($flow->getId(), $uuid, $entity->getId(), $uniqueIds, $startedAt);
+        $changed = [];
+        try {
+            $raw = $connection->fetchOne('SELECT aaxis_ontology_data_upsert(CAST(? AS jsonb))', [$input]);
+            $response = json_decode((string) $raw, true);
+            $outcome = $this->events->parseUpsertResponse(\is_array($response) ? $response : []);
+            $changed = $outcome['changed'];
 
-        $connection->update(
-            'aaxis_ontology_data_events',
-            [
-                'changed_ids' => $changed === [] ? null : implode(',', $changed),
-                'finished_at' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s'),
-            ],
-            ['id' => $eventId]
-        );
+            if ($outcome['errors'] !== null) {
+                throw OntologyApiException::invalidPayload(implode('; ', $outcome['errors']));
+            }
+        } finally {
+            // Closed however this ends — rejected batch or a database failure included — so an
+            // event never stays open (an open event now reads as "still running").
+            $this->events->close($eventId, $changed);
+        }
 
-        if ($errors !== null) {
-            throw OntologyApiException::invalidPayload(implode('; ', array_map('strval', (array) $errors)));
+        return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
+    }
+
+    /**
+     * The internal-system arm of {@see upsertRecordsSync}: UPDATES the OroCommerce rows behind the
+     * entity through {@see OroEntityWriter} (existing records only — no creation), with the same
+     * validation, event recording and receipt shape as the store path. The attribute definitions
+     * are NOT synced from the payloads: the Oro entity itself is the contract, and an 88-column
+     * payload must not materialize 88 configured attributes.
+     *
+     * @param array<int, array<int|string, mixed>> $records
+     *
+     * @return array{uuid: string, seen: array<int, string>, changed: array<int, string>}
+     *
+     * @throws OntologyApiException
+     */
+    private function updateOroEntitySync(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid): array
+    {
+        [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid, false);
+
+        $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $eventId = $this->events->open($flow->getId(), $uuid, $entity->getId(), $uniqueIds, $startedAt);
+        $changed = [];
+        try {
+            $changed = $this->oroWriter->update($entity, $uniqueIds, $payloads);
+        } finally {
+            $this->events->close($eventId, $changed);
         }
 
         return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
@@ -207,8 +261,9 @@ class OntologyDataApiManager
 
     /**
      * The shared per-record validation of a write batch: unique attribute present and non-empty on
-     * every record, no repeated ids, attribute contract enforced, missing attribute definitions
-     * synced — returning the batch uuid (validated or minted) and the parallel id/payload arrays.
+     * every record, no repeated ids, attribute contract enforced and — unless $syncAttributes is
+     * off (internal-system writes) — missing attribute definitions synced from the payloads.
+     * Returns the batch uuid (validated or minted) and the parallel id/payload arrays.
      *
      * @param array<int, array<int|string, mixed>> $records
      *
@@ -216,7 +271,7 @@ class OntologyDataApiManager
      *
      * @throws OntologyApiException
      */
-    private function prepareUpsertBatch(OntologyEntity $entity, array $records, ?string $uuid): array
+    private function prepareUpsertBatch(OntologyEntity $entity, array $records, ?string $uuid, bool $syncAttributes = true): array
     {
         // The aaxis_ontology_data_upsert PG function also enforces this shape — reject a malformed
         // caller-provided uuid here, where the caller can see it.
@@ -274,7 +329,9 @@ class OntologyDataApiManager
 
         // Reconcile the entity's attribute definitions with the data being written: any attribute
         // present in the payloads but not yet defined is created (datatype undefined, not required).
-        $this->attributeReconciler->syncFromRecords($entity, $payloads);
+        if ($syncAttributes) {
+            $this->attributeReconciler->syncFromRecords($entity, $payloads);
+        }
 
         return [$uuid ?? $this->generateUuid(), $uniqueIds, $payloads];
     }
@@ -331,7 +388,8 @@ class OntologyDataApiManager
      * API, capped by the configured max page size — this is NOT paged: a flow step gets every
      * record unless it asks for a limit itself. Optional ordering by ONE payload attribute uses
      * jsonb comparison (numbers order numerically, strings lexically), with the row id as a
-     * stable tiebreaker.
+     * stable tiebreaker. Internal-system entities read from the Oro entity itself instead
+     * ({@see OroEntityReader}), ordered by a column of the same name.
      *
      * @return array<int, array<int|string, mixed>|null>
      *
@@ -345,6 +403,10 @@ class OntologyDataApiManager
         ?int $limit = null,
     ): array {
         $entity = $this->resolveEntity($systemName, $entityName, false);
+
+        if ($this->isInternal($entity)) {
+            return $this->oroReader->readAll($entity, $orderBy, $direction, $limit);
+        }
 
         $sql = 'SELECT payload FROM aaxis_ontology_data WHERE entity_id = :entity_id';
         $params = ['entity_id' => $entity->getId()];
@@ -362,6 +424,34 @@ class OntologyDataApiManager
         }
 
         $rows = $this->connection()->fetchAllAssociative($sql, $params, $types);
+
+        return array_map(fn (array $row): ?array => $this->decodePayload($row['payload']), $rows);
+    }
+
+    /**
+     * Reads every record whose $attribute equals $value, for a FLOW execution ("by attribute"
+     * reader mode) — a LIST, [] when nothing matches (an attribute is not necessarily unique).
+     * External entities compare the jsonb attribute's text form against the value; internal ones
+     * compare the Oro entity's column of that name ({@see OroEntityReader::readByAttribute}).
+     *
+     * @return array<int, array<int|string, mixed>|null>
+     *
+     * @throws OntologyApiException
+     */
+    public function queryForFlowByAttribute(string $systemName, string $entityName, string $attribute, string $value): array
+    {
+        $entity = $this->resolveEntity($systemName, $entityName, false);
+
+        if ($this->isInternal($entity)) {
+            return $this->oroReader->readByAttribute($entity, $attribute, $value);
+        }
+
+        $rows = $this->connection()->fetchAllAssociative(
+            'SELECT payload FROM aaxis_ontology_data'
+            . ' WHERE entity_id = :entity_id AND payload ->> :attr = :value ORDER BY id ASC',
+            ['entity_id' => $entity->getId(), 'attr' => $attribute, 'value' => $value],
+            ['entity_id' => ParameterType::INTEGER]
+        );
 
         return array_map(fn (array $row): ?array => $this->decodePayload($row['payload']), $rows);
     }

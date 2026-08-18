@@ -6,8 +6,10 @@ namespace Aaxis\Bundle\OntologyBundle\Controller;
 
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Exception\FlowImportException;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
-use Cron\CronExpression;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowPortability;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Psr\Cache\CacheItemPoolInterface;
@@ -122,6 +124,97 @@ class OntologyFlowController extends AbstractController
         }
 
         return $this->save($entity, $request);
+    }
+
+    /**
+     * Exports a flow as a portable JSON document (see {@see FlowPortability}) — connector ids are
+     * rewritten as name/type descriptors so another environment can match them. The client saves
+     * the returned document as a file.
+     */
+    #[Route(
+        path: '/flows/api/{id}/export',
+        name: 'aaxis_ontology_flow_export',
+        requirements: ['id' => '\d+'],
+        options: ['expose' => true],
+        methods: ['GET']
+    )]
+    #[AclAncestor('aaxis_ontology_flow_view')]
+    public function exportAction(OntologyFlow $entity): JsonResponse
+    {
+        // Built-in flows are fixture-seeded in every environment — nothing to carry across, and an
+        // import could not recreate one anyway (it always builds a user flow).
+        if ($entity->isNative()) {
+            return new JsonResponse([
+                'success' => false,
+                'errors' => [$this->trans('aaxis.ontology.flow_portability.export_builtin_forbidden')],
+            ], 422);
+        }
+
+        try {
+            $document = $this->container->get(FlowPortability::class)->export($entity);
+        } catch (FlowImportException $e) {
+            return new JsonResponse(['success' => false, 'errors' => $e->getErrors()], 422);
+        }
+
+        return new JsonResponse([
+            'success' => true,
+            'document' => $document,
+            'filename' => $this->exportFilename((string) $entity->getName()),
+        ]);
+    }
+
+    /**
+     * Creates a flow from a previously exported document. Everything is validated first — format,
+     * a free name, the same step rules a normal save enforces, and that every referenced
+     * connector/entity exists here — and ALL problems come back at once; the flow lands disabled.
+     */
+    #[Route(path: '/flows/api/import', name: 'aaxis_ontology_flow_import', options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('aaxis_ontology_flow_create')]
+    #[CsrfProtection]
+    public function importAction(Request $request): JsonResponse
+    {
+        $invalid = fn (): JsonResponse => new JsonResponse([
+            'success' => false,
+            'errors' => [$this->trans('aaxis.ontology.flow_portability.invalid_format')],
+        ], 422);
+
+        $payload = json_decode($request->getContent(), true);
+        $raw = \is_array($payload) ? ($payload['document'] ?? null) : null;
+        if (!\is_string($raw) || trim($raw) === '') {
+            return $invalid();
+        }
+        // A flow document is small; anything larger is not one, and refusing it here beats letting
+        // the web server answer with an HTML error page the client cannot parse.
+        if (\strlen($raw) > 2 * 1024 * 1024) {
+            return new JsonResponse([
+                'success' => false,
+                'errors' => [$this->trans('aaxis.ontology.flow_portability.too_large')],
+            ], 422);
+        }
+
+        // Decoded here (not by the client) so a malformed or absurdly nested file is rejected the
+        // same way as any other bad document.
+        try {
+            $document = json_decode($raw, true, 64, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return $invalid();
+        }
+
+        try {
+            $flow = $this->container->get(FlowPortability::class)->import($document);
+        } catch (FlowImportException $e) {
+            return new JsonResponse(['success' => false, 'errors' => $e->getErrors()], 422);
+        }
+
+        return new JsonResponse(['success' => true, 'flow' => $this->serialize($flow)]);
+    }
+
+    /** A filesystem-friendly file name for an exported flow. */
+    private function exportFilename(string $flowName): string
+    {
+        $slug = strtolower(trim((string) preg_replace('/[^A-Za-z0-9]+/', '-', $flowName), '-'));
+
+        return sprintf('flow-%s.json', $slug === '' ? 'export' : $slug);
     }
 
     /**
@@ -358,49 +451,16 @@ class OntologyFlowController extends AbstractController
         }
 
         if (\array_key_exists('steps', $payload)) {
-            $steps = $this->normalizeSteps($payload['steps']);
+            // The same rules an IMPORTED flow must clear — see Manager/FlowStepValidator.
+            $validator = $this->container->get(FlowStepValidator::class);
+            $steps = $validator->normalize($payload['steps']);
             if ($steps === null) {
                 return new JsonResponse(['success' => false, 'message' => 'Invalid steps.'], 400);
             }
-            $stepNames = array_map(static fn (array $s) => mb_strtolower($s['name']), $steps);
-            if (\count($stepNames) !== \count(array_unique($stepNames))) {
-                return new JsonResponse([
-                    'success' => false,
-                    'message' => $this->trans('aaxis.ontology.flow_manager.step_names_unique'),
-                ], 422);
-            }
-            // A step's config is optional (unconfigured steps may be saved mid-design), but a
-            // PRESENT config must be complete and valid for its type.
-            foreach ($steps as $step) {
-                $expression = $step['config']['expression'] ?? null;
-                if ($step['type'] === 'cron' && $expression !== null
-                    && !CronExpression::isValidExpression((string) $expression)
-                ) {
-                    return new JsonResponse([
-                        'success' => false,
-                        'message' => $this->trans('aaxis.ontology.flow_manager.invalid_cron', ['{{ name }}' => $step['name']]),
-                    ], 422);
-                }
-                if (!$this->isStepConfigValid($step)) {
-                    return new JsonResponse([
-                        'success' => false,
-                        'message' => $this->trans('aaxis.ontology.flow_manager.invalid_step_config', ['{{ name }}' => $step['name']]),
-                    ], 422);
-                }
-                // Every DWL snippet a step carries (transform code, DWL-toggled body/content)
-                // must parse to be saved.
-                foreach ($this->stepDwlSnippets($step) as $snippet) {
-                    $dwlError = $this->container->get(DwlTransformer::class)->validate($snippet);
-                    if ($dwlError !== null) {
-                        return new JsonResponse([
-                            'success' => false,
-                            'message' => $this->trans('aaxis.ontology.flow_manager.invalid_dwl', [
-                                '{{ name }}' => $step['name'],
-                                '{{ error }}' => $dwlError,
-                            ]),
-                        ], 422);
-                    }
-                }
+            $stepErrors = $validator->validate($steps);
+            if ($stepErrors !== []) {
+                // The editor fixes one problem at a time, so it shows the first.
+                return new JsonResponse(['success' => false, 'message' => $stepErrors[0]], 422);
             }
             $entity->setSteps($steps === [] ? null : $steps);
         }
@@ -417,147 +477,6 @@ class OntologyFlowController extends AbstractController
         $em->flush();
 
         return new JsonResponse(['success' => true, 'flow' => $this->serialize($entity)]);
-    }
-
-    /**
-     * Validates/normalizes the editor's steps payload: a list of {type, name, x, y, config} where
-     * type is a known toolbox step type, name is a non-empty step label (uniqueness is checked by
-     * the caller), x/y are non-negative canvas coordinates and config is an optional per-type
-     * object (content validated by the caller). Returns null when the payload is malformed.
-     *
-     * @return array<int, array{type: string, name: string, x: int, y: int, config: array<string, mixed>|null}>|null
-     */
-    private function normalizeSteps(mixed $raw): ?array
-    {
-        if ($raw === null) {
-            return [];
-        }
-        if (!\is_array($raw) || !array_is_list($raw)) {
-            return null;
-        }
-
-        $steps = [];
-        foreach ($raw as $step) {
-            $name = \is_string($step['name'] ?? null) ? trim($step['name']) : '';
-            $config = $step['config'] ?? null;
-            if (!\is_array($step) || !\in_array($step['type'] ?? null, OntologyFlow::STEP_TYPES, true)
-                || $name === '' || mb_strlen($name) > 64
-                || !is_numeric($step['x'] ?? null) || !is_numeric($step['y'] ?? null)
-                || ($config !== null && (!\is_array($config) || array_is_list($config)))
-            ) {
-                return null;
-            }
-            $steps[] = [
-                'type' => (string) $step['type'],
-                'name' => $name,
-                'x' => max(0, (int) $step['x']),
-                'y' => max(0, (int) $step['y']),
-                'config' => $config,
-            ];
-        }
-
-        return $steps;
-    }
-
-    /**
-     * Type-specific completeness of a PRESENT step config (null config = not configured yet):
-     *  - entity_change: non-empty `system` and `entity`;
-     *  - reader: `reader` = entity (with system+entity) or connector (with connector+path),
-     *    plus a non-empty `destination`.
-     *
-     * @param array{type: string, name: string, config: array<string, mixed>|null} $step
-     */
-    /**
-     * The DWL snippets a step carries: the transform's code, plus body_content/content when their
-     * DWL toggles are on. All of them must parse for the flow to save.
-     *
-     * @param array{type: string, config: array<string, mixed>|null} $step
-     *
-     * @return array<int, string>
-     */
-    private function stepDwlSnippets(array $step): array
-    {
-        $config = $step['config'];
-        if (!\is_array($config)) {
-            return [];
-        }
-        $snippets = [];
-        if ($step['type'] === 'dwl_transform' && \is_string($config['code'] ?? null) && trim($config['code']) !== '') {
-            $snippets[] = $config['code'];
-        }
-        if (\in_array($step['type'], ['reader', 'writer'], true) && ($config['body_dwl'] ?? false) === true
-            && \is_string($config['body_content'] ?? null) && trim($config['body_content']) !== ''
-        ) {
-            $snippets[] = $config['body_content'];
-        }
-        if ($step['type'] === 'writer' && ($config['content_dwl'] ?? false) === true
-            && \is_string($config['content'] ?? null) && trim($config['content']) !== ''
-        ) {
-            $snippets[] = $config['content'];
-        }
-
-        return $snippets;
-    }
-
-    private function isStepConfigValid(array $step): bool
-    {
-        $config = $step['config'];
-        if ($config === null) {
-            return true;
-        }
-        $filled = static fn (string $key): bool => \is_string($config[$key] ?? null) && trim($config[$key]) !== '';
-
-        // Enum keys are lenient when ABSENT (configs saved by older editors) but strict when set.
-        $enumOk = static fn (string $key, array $allowed): bool =>
-            !isset($config[$key]) || \in_array($config[$key], $allowed, true);
-
-        // The DWL on/off toggles (body_dwl / content_dwl) are lenient when absent, bool when set.
-        $boolOk = static fn (string $key): bool => !isset($config[$key]) || \is_bool($config[$key]);
-
-        // "flowUuid" is reserved (every execution seeds its uuid into the context under it);
-        // the legacy "flow-uuid" spelling stays rejected too.
-        $destinationOk = static fn (): bool =>
-            $filled('destination')
-            && !\in_array(strtolower(trim((string) $config['destination'])), ['flowuuid', 'flow-uuid'], true);
-
-        $connectorOk = static fn (): bool =>
-            is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
-            && $filled('path')
-            && $enumOk('operation', ['get', 'put', 'post', 'patch', 'delete'])
-            && $enumOk('body', ['empty', 'json', 'text', 'xml'])
-            && $boolOk('body_dwl');
-
-        return match ($step['type']) {
-            // Schedule: interval (value + unit) or cron (expression; also the LEGACY shape, which
-            // carries no mode). Expression syntax is checked separately with Cron\CronExpression.
-            'cron' => match ($config['mode'] ?? 'cron') {
-                'interval' => \is_int($config['value'] ?? null) && $config['value'] >= 1
-                    && \in_array($config['unit'] ?? null, ['minute', 'hour', 'day', 'week', 'month', 'year'], true),
-                'cron' => $filled('expression'),
-                default => false,
-            },
-            'entity_change' => $filled('system') && $filled('entity'),
-            'dwl_transform' => $filled('code') && $destinationOk(),
-            'reader' => $destinationOk()
-                && match ($config['reader'] ?? null) {
-                    'entity' => $filled('system') && $filled('entity')
-                        && $enumOk('mode', ['all', 'by_id'])
-                        && (($config['mode'] ?? 'all') !== 'by_id' || $filled('record_id'))
-                        // "All" extras, each optional: order_by attribute (+ direction) and limit.
-                        && (!isset($config['order_by']) || \is_string($config['order_by']))
-                        && $enumOk('order_dir', ['asc', 'desc'])
-                        && $enumOk('limit', [1, 10, 100, 1000]),
-                    'connector' => $connectorOk(),
-                    default => false,
-                },
-            'writer' => $destinationOk()
-                && match ($config['writer'] ?? null) {
-                    'entity' => $filled('system') && $filled('entity') && $filled('content') && $boolOk('content_dwl'),
-                    'connector' => $connectorOk(),
-                    default => false,
-                },
-            default => true,
-        };
     }
 
     /**
@@ -619,6 +538,8 @@ class OntologyFlowController extends AbstractController
             TranslatorInterface::class,
             ConfigManager::class,
             FlowDebugExecutor::class,
+            FlowPortability::class,
+            FlowStepValidator::class,
             DwlTransformer::class,
             CacheItemPoolInterface::class,
         ]);

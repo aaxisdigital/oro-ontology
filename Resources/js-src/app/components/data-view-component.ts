@@ -17,6 +17,8 @@ interface DataRecord {
     id: number;
     system: string | null;
     entity: string | null;
+    systemId: number | null;
+    entityId: number | null;
     uniqueId: string | null;
     uuid: string | null;
     version: number | null;
@@ -61,6 +63,11 @@ class OntologyDataViewComponent extends BaseComponent {
     private formatSelect2: any = null;
     private addSyncing = false;
     private addUniqueAttribute = '';
+    /**
+     * Update mode only: the payload exactly as it was loaded. Submit unlocks once the textarea
+     * differs from it, so an accidental open-and-close cannot rewrite the record. Null = Add mode.
+     */
+    private addBaseline: string | null = null;
     private $addError: any = null;
     private $addEntity: any = null;
     private $addFormat: any = null;
@@ -96,6 +103,9 @@ class OntologyDataViewComponent extends BaseComponent {
                 }
             ],
             actions: [
+                // Update writes through the create endpoint, so it is offered only to users who
+                // may create — same gate as the "+ Add Data" button.
+                ...(options.canCreate ? [{key: 'update', label: __('aaxis.ontology.data_view.update'), icon: 'fa-pencil'}] : []),
                 {key: 'versions', label: __('aaxis.ontology.data_view.versions'), icon: 'fa-clone'}
             ],
             gridKey: 'ontology-data-view',
@@ -124,6 +134,9 @@ class OntologyDataViewComponent extends BaseComponent {
     private onAction(action: string, row: DataRecord): void {
         if (action === 'versions') {
             this.openVersions(row);
+        } else if (action === 'update') {
+            // The same Add Data form, preloaded with this record and locked to its system/entity.
+            this.openAddData(row);
         }
     }
 
@@ -607,9 +620,19 @@ class OntologyDataViewComponent extends BaseComponent {
 
     // --- Add Data ------------------------------------------------------------
 
-    private openAddData(): void {
+    /**
+     * The Add Data form. With `record` it becomes "Update Data" for that row: same form and same
+     * upsert submit, but the system/entity are preloaded and LOCKED (the record's identity is not
+     * up for editing), the payload arrives pretty-printed, and Submit stays disabled until the
+     * payload is actually edited — reopening and closing a record must not rewrite it.
+     */
+    private openAddData(record?: DataRecord): void {
+        const isUpdate = !!record;
         const dialog = new Dialog({
-            title: __('aaxis.ontology.data_view.add_title'),
+            title: isUpdate ? __('aaxis.ontology.data_view.update_title') : __('aaxis.ontology.data_view.add_title'),
+            subtitle: isUpdate
+                ? [record?.entity, record?.uniqueId].filter(part => !!part).join(' — ') || undefined
+                : undefined,
             width: '860px',
             onClose: () => this.disposeAddSelects()
         });
@@ -674,11 +697,35 @@ class OntologyDataViewComponent extends BaseComponent {
         this.$addSubmit = $submit;
         this.addUniqueAttribute = '';
 
+        if (isUpdate && record) {
+            // Locked context: exactly this record's system/entity, so there is nothing to rebuild.
+            // Disabled BEFORE Select2 initialises — it renders the disabled state from the source
+            // select, and a jQuery .val() on a disabled control still reaches the submit payload.
+            $system.val(String(record.systemId ?? ''));
+            $entity.empty().append($('<option/>', {value: String(record.entityId ?? ''), text: record.entity || ''}));
+            $entity.val(String(record.entityId ?? ''));
+            $system.prop('disabled', true);
+            $entity.prop('disabled', true);
+            const ent = this.entities.find(e => String(e.id) === String(record.entityId));
+            this.addUniqueAttribute = ent ? String(ent.uniqueAttribute || '') : '';
+
+            // JSON, pretty-printed — the row carries it compact.
+            $format.val('json');
+            $payload.val(this.prettyJsonOrRaw(record.payload));
+            this.addBaseline = String($payload.val() || '');
+        } else {
+            this.addBaseline = null;
+        }
+
         // Initialise the comboboxes (single-select with an internal clear "x"). Format is also a
         // Select2 (no clear, no search) so its height matches System/Entity.
         this.systemSelect2 = this.initSelect2($system, {width: '100%', allowClear: true});
         this.formatSelect2 = this.initSelect2($format, {width: '100%', minimumResultsForSearch: Infinity});
-        this.rebuildEntityOptions($entity, null);
+        if (isUpdate) {
+            this.entitySelect2 = this.initSelect2($entity, {width: '100%'});
+        } else {
+            this.rebuildEntityOptions($entity, null);
+        }
 
         // Wiring.
         $system.on('change', () => {
@@ -765,6 +812,8 @@ class OntologyDataViewComponent extends BaseComponent {
             this.formatSelect2 = null;
         }
         this.addDialog = null;
+        // Back to Add semantics: the next plain "+ Add Data" must not inherit an update baseline.
+        this.addBaseline = null;
     }
 
     /**
@@ -892,7 +941,8 @@ class OntologyDataViewComponent extends BaseComponent {
             return;
         }
         if (format === 'json') {
-            this.$addPayload.val(JSON.stringify(JSON.parse(raw), null, 2));
+            // Textual re-indent: never round-trips numbers through JS floats (see reindentJson).
+            this.$addPayload.val(this.prettyJsonOrRaw(raw));
         } else if (format === 'xml') {
             this.$addPayload.val(this.prettyXml(raw));
         } else if (format === 'csv') {
@@ -904,7 +954,102 @@ class OntologyDataViewComponent extends BaseComponent {
     private updateAddState(): void {
         const entityOk = !!this.$addEntity.val();
         const payloadOk = this.validateAddPayload();
-        this.$addSubmit.prop('disabled', !(entityOk && payloadOk));
+        // Update mode additionally requires an actual edit — reopening a record and submitting it
+        // untouched would write a pointless new version.
+        const changed = this.addBaseline === null || String(this.$addPayload.val() || '') !== this.addBaseline;
+        this.$addSubmit.prop('disabled', !(entityOk && payloadOk && changed));
+    }
+
+    /** Pretty-prints a JSON payload for editing; anything unparseable is shown as it came. */
+    private prettyJsonOrRaw(payload: string): string {
+        const raw = String(payload || '').trim();
+        if (raw === '') {
+            return '';
+        }
+        let parsed: any;
+        try {
+            parsed = JSON.parse(raw);
+        } catch {
+            return raw;
+        }
+        const pretty = this.reindentJson(raw);
+        try {
+            // Only trust the re-indenter when it round-trips to the same structure; otherwise show
+            // the payload untouched rather than risk handing back something altered.
+            if (JSON.stringify(JSON.parse(pretty)) === JSON.stringify(parsed)) {
+                return pretty;
+            }
+        } catch {
+            // fall through
+        }
+        return raw;
+    }
+
+    /**
+     * Re-indents JSON **textually**: string literals are copied verbatim and number tokens are
+     * never parsed. That matters because this text is what gets submitted back — running a payload
+     * through JSON.parse/stringify would round an integer beyond 2^53 (a 16+ digit ERP id) to a
+     * different value and silently rewrite a field the user never touched, since jsonb keeps such
+     * numbers exactly and compares them numerically.
+     */
+    private reindentJson(raw: string): string {
+        const pad = (depth: number): string => '\n' + '  '.repeat(depth);
+        let out = '';
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+
+        for (let i = 0; i < raw.length; i++) {
+            const ch = raw[i];
+            if (inString) {
+                out += ch;
+                if (escaped) {
+                    escaped = false;
+                } else if (ch === '\\') {
+                    escaped = true;
+                } else if (ch === '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (ch === '"') {
+                inString = true;
+                out += ch;
+                continue;
+            }
+            if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+                continue; // structural whitespace is rebuilt below
+            }
+            if (ch === '{' || ch === '[') {
+                // An empty container stays on one line, like JSON.stringify renders it.
+                const next = raw.slice(i + 1).search(/\S/);
+                const closer = ch === '{' ? '}' : ']';
+                if (next !== -1 && raw[i + 1 + next] === closer) {
+                    out += ch + closer;
+                    i += 1 + next;
+                    continue;
+                }
+                depth++;
+                out += ch + pad(depth);
+                continue;
+            }
+            if (ch === '}' || ch === ']') {
+                depth = Math.max(0, depth - 1);
+                out += pad(depth) + ch;
+                continue;
+            }
+            if (ch === ',') {
+                out += ',' + pad(depth);
+                continue;
+            }
+            if (ch === ':') {
+                out += ': ';
+                continue;
+            }
+            out += ch;
+        }
+
+        return out;
     }
 
     private prettyXml(xml: string): string {

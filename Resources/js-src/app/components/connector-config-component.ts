@@ -25,6 +25,12 @@ const SENTINEL = '********';
 const TYPE_SFTP = 'sftp';
 const TYPE_REST_API = 'rest_api';
 const TYPE_FILE_SYSTEM = 'file_system';
+const TYPE_BUCKET = 'bucket';
+const TYPE_DATABASE = 'database';
+
+/** The only database engine supported so far — mirrors ConnectorTester::ENGINE_POSTGRESQL. */
+const ENGINE_POSTGRESQL = 'postgresql';
+const POSTGRES_DEFAULT_PORT = 5432;
 
 /**
  * Mirror of the server-side secret-key rules (PHP ConnectorConfigSecrets::isSecretKey) used to
@@ -42,8 +48,8 @@ const SECRET_SUFFIXES = ['_key', '_token', '_secret', '_password'];
  * Companion component of the Connector create/update form (Connector/update.html.twig).
  *
  * The mapped config JSON textarea is hidden and read-only — the configuration is authored through
- * a type-specific "Configure" popup (File System / SFTP / REST API) rendered with the reusable
- * RecordFormModal widget. What the user sees instead is a display-only copy of the JSON with every
+ * a type-specific "Configure" popup (File System / SFTP / REST API / Bucket / Database) rendered
+ * with the reusable RecordFormModal widget. What the user sees instead is a display-only copy of the JSON with every
  * secret masked, so neither stored secrets (already masked server-side as ********) nor secrets
  * typed in the popup during this session are ever readable on the page.
  *
@@ -201,9 +207,13 @@ class ConnectorConfigComponent extends BaseComponent {
             this.openSftpPopup(config);
         } else if (type === TYPE_REST_API) {
             this.openRestApiPopup(config);
+        } else if (type === TYPE_BUCKET) {
+            this.openBucketPopup(config);
+        } else if (type === TYPE_DATABASE) {
+            this.openDatabasePopup(config);
         } else {
-            // A connector type exists before its Configure form does (database/bucket). Say so
-            // rather than letting the button do nothing.
+            // Safety net for a type added to OntologyConnector::TYPES before its Configure form
+            // exists — says so rather than letting the button do nothing.
             this.openUnsupportedPopup();
         }
     }
@@ -519,6 +529,176 @@ class ConnectorConfigComponent extends BaseComponent {
             );
         }
         return fields;
+    }
+
+    // Bucket (S3-compatible object storage — OCI Object Storage, AWS S3, MinIO): endpoint
+    // server/port on the first row, the access key / secret key pair on the second and the bucket
+    // to work in below. BOTH keys are password fields: the server-side secret rules already treat
+    // any *_key as a secret, so the access key is masked on every read path like the secret key is.
+    private openBucketPopup(config: Record<string, any>): void {
+        const hasStoredAccessKey = typeof config.access_key === 'string' && config.access_key !== '';
+        const hasStoredSecretKey = typeof config.secret_key === 'string' && config.secret_key !== '';
+
+        new RecordFormModal({
+            title: __('aaxis.ontology.connector_config.title_bucket'),
+            subtitle: hasStoredAccessKey || hasStoredSecretKey
+                ? __('aaxis.ontology.connector_config.secrets_note')
+                : __('aaxis.ontology.connector_config.subtitle'),
+            width: '620px',
+            resizable: false,
+            fields: this.bucketFields(hasStoredAccessKey, hasStoredSecretKey),
+            values: {
+                server: typeof config.server === 'string' ? config.server : '',
+                port: typeof config.port === 'number' ? config.port : null,
+                bucket_name: typeof config.bucket_name === 'string' ? config.bucket_name : ''
+                // access_key/secret_key intentionally not prefilled — stored values never reach the form
+            },
+            testAction: {
+                label: __('aaxis.ontology.connector_config.test'),
+                onTest: values => this.runConfigTest(
+                    TYPE_BUCKET,
+                    this.buildBucketConfig(values, config, hasStoredAccessKey, hasStoredSecretKey)
+                )
+            },
+            onSubmit: values => {
+                this.writeConfig(this.buildBucketConfig(values, config, hasStoredAccessKey, hasStoredSecretKey));
+            }
+        }).open();
+    }
+
+    private buildBucketConfig(
+        values: Record<string, any>,
+        config: Record<string, any>,
+        hasStoredAccessKey: boolean,
+        hasStoredSecretKey: boolean
+    ): Record<string, any> {
+        // Built key by key (rather than as one literal) so the JSON keeps the form's order with
+        // the optional port right after the server.
+        const out: Record<string, any> = {server: String(values.server || '')};
+        if (values.port != null) {
+            out.port = Math.round(Number(values.port));
+        }
+        out.access_key = this.keepStoredSecret(values.access_key, config.access_key, hasStoredAccessKey);
+        out.secret_key = this.keepStoredSecret(values.secret_key, config.secret_key, hasStoredSecretKey);
+        out.bucket_name = String(values.bucket_name || '');
+
+        return out;
+    }
+
+    /**
+     * An empty secret input means "keep what the JSON already holds" — the ******** sentinel for a
+     * saved secret, or a value typed earlier this session; a filled one replaces it.
+     */
+    private keepStoredSecret(submitted: any, stored: any, hasStored: boolean): string {
+        const value = submitted ? String(submitted) : '';
+
+        return value === '' && hasStored ? String(stored) : value;
+    }
+
+    private bucketFields(hasStoredAccessKey: boolean, hasStoredSecretKey: boolean): FormField[] {
+        const t = (key: string): string => __('aaxis.ontology.connector_config.' + key);
+        return [
+            {key: 'server', label: t('server'), type: 'text', required: true, row: 'srv', width: '75%'},
+            {key: 'port', label: t('port'), type: 'number', min: 1, max: 65535, row: 'srv', width: '25%'},
+            {
+                key: 'access_key', label: t('access_key'), type: 'password', row: 'keys', width: '50%',
+                required: !hasStoredAccessKey,
+                hint: hasStoredAccessKey ? t('access_key_defined') : undefined
+            },
+            {
+                key: 'secret_key', label: t('secret_key'), type: 'password', row: 'keys', width: '50%',
+                required: !hasStoredSecretKey,
+                hint: hasStoredSecretKey ? t('secret_key_defined') : undefined
+            },
+            {
+                key: 'bucket_name', label: t('bucket_name'), type: 'text', required: true,
+                placeholder: t('bucket_name_placeholder')
+            }
+        ];
+    }
+
+    // Database: server/port, then engine/database/schema, then the credentials. PostgreSQL is the
+    // only engine so far — it is still a stored, visible field so the JSON shape does not have to
+    // change when a second engine is added. Schema is optional (blank = the server's search_path).
+    private openDatabasePopup(config: Record<string, any>): void {
+        const hasStoredPassword = typeof config.password === 'string' && config.password !== '';
+
+        new RecordFormModal({
+            title: __('aaxis.ontology.connector_config.title_database'),
+            subtitle: hasStoredPassword
+                ? __('aaxis.ontology.connector_config.secrets_note')
+                : __('aaxis.ontology.connector_config.subtitle'),
+            width: '640px',
+            resizable: false,
+            fields: this.databaseFields(hasStoredPassword),
+            values: {
+                server: typeof config.server === 'string' ? config.server : '',
+                port: typeof config.port === 'number' ? config.port : POSTGRES_DEFAULT_PORT,
+                engine: ENGINE_POSTGRESQL,
+                database: typeof config.database === 'string' ? config.database : '',
+                schema: typeof config.schema === 'string' ? config.schema : '',
+                user: typeof config.user === 'string' ? config.user : ''
+                // password intentionally not prefilled — stored values never reach the form
+            },
+            testAction: {
+                label: __('aaxis.ontology.connector_config.test'),
+                onTest: values => this.runConfigTest(
+                    TYPE_DATABASE,
+                    this.buildDatabaseConfig(values, config, hasStoredPassword)
+                )
+            },
+            onSubmit: values => {
+                this.writeConfig(this.buildDatabaseConfig(values, config, hasStoredPassword));
+            }
+        }).open();
+    }
+
+    private buildDatabaseConfig(
+        values: Record<string, any>,
+        config: Record<string, any>,
+        hasStoredPassword: boolean
+    ): Record<string, any> {
+        const out: Record<string, any> = {
+            engine: String(values.engine || ENGINE_POSTGRESQL),
+            server: String(values.server || ''),
+            port: values.port == null ? POSTGRES_DEFAULT_PORT : Math.round(Number(values.port)),
+            database: String(values.database || ''),
+            user: String(values.user || ''),
+            password: this.keepStoredSecret(values.password, config.password, hasStoredPassword)
+        };
+        // Optional — omitted entirely rather than stored as "" so the shape says "not configured".
+        const schema = String(values.schema || '').trim();
+        if (schema !== '') {
+            out.schema = schema;
+        }
+
+        return out;
+    }
+
+    private databaseFields(hasStoredPassword: boolean): FormField[] {
+        const t = (key: string): string => __('aaxis.ontology.connector_config.' + key);
+        return [
+            {key: 'server', label: t('server'), type: 'text', required: true, row: 'srv', width: '75%'},
+            {
+                key: 'port', label: t('port'), type: 'number', required: true,
+                min: 1, max: 65535, row: 'srv', width: '25%'
+            },
+            {
+                key: 'engine', label: t('engine'), type: 'select', row: 'db', width: '24%',
+                options: [{value: ENGINE_POSTGRESQL, label: t('engine_postgresql')}]
+            },
+            {key: 'database', label: t('database'), type: 'text', required: true, row: 'db', width: '38%'},
+            {
+                key: 'schema', label: t('schema'), type: 'text', row: 'db', width: '38%',
+                placeholder: t('schema_placeholder')
+            },
+            {key: 'user', label: t('user'), type: 'text', required: true, row: 'cred', width: '50%'},
+            {
+                key: 'password', label: t('password'), type: 'password', row: 'cred', width: '50%',
+                required: !hasStoredPassword,
+                hint: hasStoredPassword ? t('password_defined') : undefined
+            }
+        ];
     }
 
     /** {"Header": "value"} object → collection rows [{name, value}]. */

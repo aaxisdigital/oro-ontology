@@ -342,6 +342,10 @@ class OntologyDataController extends AbstractController
             'id' => $record->getId(),
             'system' => $record->getSystem()?->getName(),
             'entity' => $record->getEntity()?->getName(),
+            // Ids as well as names: the row's "Update" action reopens the Add Data form locked to
+            // exactly this record's system/entity, and names alone are ambiguous across systems.
+            'systemId' => $record->getSystem()?->getId(),
+            'entityId' => $record->getEntity()?->getId(),
             'uniqueId' => $record->getUniqueId(),
             'uuid' => $record->getUuid(),
             'version' => $record->getVersion(),
