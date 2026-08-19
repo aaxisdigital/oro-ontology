@@ -174,6 +174,15 @@ class FlowStepValidator
         if ($step['type'] === 'choice' && \is_string($config['expression'] ?? null) && trim($config['expression']) !== '') {
             $snippets[] = $config['expression'];
         }
+        // SQL Query: the SQL text and the bindings are DWL-capable too.
+        if ($step['type'] === 'sql_query') {
+            if (($config['sql_dwl'] ?? false) === true && \is_string($config['sql'] ?? null) && trim($config['sql']) !== '') {
+                $snippets[] = $config['sql'];
+            }
+            if (($config['binding_dwl'] ?? false) === true && \is_string($config['binding'] ?? null) && trim($config['binding']) !== '') {
+                $snippets[] = $config['binding'];
+            }
+        }
 
         return $snippets;
     }
@@ -237,13 +246,16 @@ class FlowStepValidator
         return match ($step['type']) {
             // Schedule: interval (value + unit) or cron (expression; also the LEGACY shape, which
             // carries no mode). Expression syntax is checked separately with Cron\CronExpression.
-            'cron' => match ($config['mode'] ?? 'cron') {
+            'cron' => $boolOk('enabled') && match ($config['mode'] ?? 'cron') {
                 'interval' => \is_int($config['value'] ?? null) && $config['value'] >= 1
                     && \in_array($config['unit'] ?? null, ['minute', 'hour', 'day', 'week', 'month', 'year'], true),
                 'cron' => $filled('expression'),
                 default => false,
             },
-            'entity_change' => $filled('system') && $filled('entity'),
+            'entity_change' => $filled('system') && $filled('entity') && $boolOk('enabled'),
+            // The remaining triggers carry only the enabled flag (bool when set; a missing flag
+            // reads as DISABLED at evaluation, not as invalid — old flows stay green).
+            'endpoint', 'subflow' => $boolOk('enabled'),
             // Choice: the success expression is the whole config (syntax checked via
             // stepDwlSnippets); the branch links live in the design, not here.
             'choice' => $filled('expression'),
@@ -256,6 +268,12 @@ class FlowStepValidator
             'file_read', 'file_list', 'file_delete' => $destinationOk() && $fileOpOk(),
             'file_write' => $destinationOk() && $fileOpOk() && $filled('content') && $boolOk('content_dwl'),
             'file_rename' => $destinationOk() && $fileOpOk() && $filled('new_name') && $boolOk('new_name_dwl'),
+            // "SQL Query": a database connector, the (DWL-capable) SQL, optional bindings.
+            'sql_query' => $destinationOk()
+                && is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
+                && $filled('sql') && $boolOk('sql_dwl')
+                && (!isset($config['binding']) || \is_string($config['binding']))
+                && $boolOk('binding_dwl'),
             default => true,
         };
     }

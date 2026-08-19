@@ -422,6 +422,20 @@ fataled with "Call to undefined method deleteEntity()". It shows the flow name (
 `new_flow_<6 random alphanumerics>`), an enabled switch and cancel/save, over a dot-matrix canvas
 whose spacing comes from `aaxis_ontology.flow_editor_grid_spacing` (System Configuration →
 Aaxis Ontology → Flows, default 10px, exposed to CSS as the `--aaxis-flow-grid` custom property).
+**ENABLED moved onto the TRIGGER**: there is no top-bar enabled switch anymore — every trigger's
+properties popup carries an Enabled switch (`triggerEnabledSection`, config key `enabled`,
+defaults ON for a fresh trigger), and `flows.enabled` is DERIVED on every save
+(`OntologyFlow::computeEnabled()`: true only when a trigger exists AND carries `enabled: true` —
+a missing/unconfigured trigger or a missing flag reads as DISABLED, so a broken entry point never
+runs; the column stays synced for the grid and the scheduler's plain WHERE). The client mirror is
+`flowEnabled()` (gates Run Now/Debug, refreshed via syncDirty). v1_10's
+`SeedTriggerEnabledFlags` seeded the flag into existing triggers from the old column so no flow
+changed state; `FlowPortability::import()` forces the imported trigger's flag OFF (steps + design)
+so the column and the config agree on "imported = disabled". `computeType()`: a REAL trigger
+(cron/endpoint/entity_change) = `flow`; the Subflow trigger — or, legacy, no trigger — =
+`subflow`. Since only ONE trigger may exist per canvas, flow-vs-subflow is mutually exclusive by
+construction, and a subflow now anchors the executor's BFS like any trigger (subflows are
+runnable/debuggable; the legacy "Start here" marker remains only for old triggerless designs).
 CANVAS ARCHITECTURE: `__canvas-wrap` (non-scrolling anchor) > `__canvas` = the SCROLL VIEWPORT
 (`data-role="canvas-viewport"`) > `__canvas-inner` = the content plane carrying the dots, steps
 and wires — and, crucially, **`data-role="canvas"`**, so `canvas()` (all coordinate math measures
@@ -432,7 +446,13 @@ top-left now — tiles may grow the plane). The toolbox lives in `__canvas-wrap`
 scroller, so it stays viewport-pinned; its drag/clamp math uses the viewport. The editor fills
 the page via `fitEditorHeight()` (measured top → viewport bottom, refreshed on window resize —
 the CSS `min-height` calc is only a fallback; the resize handler also re-clamps the toolbox).
-Topbar: flow name + enabled switch on the left as STACKED label-above-control fields (`__field` /
+Topbar: the flow NAME on the left is a READ-ONLY mirror of the TRIGGER STEP's name
+(`syncFlowNameDisplay`, "unnamed — add a trigger" until one exists): the flow is NAMED BY ITS
+TRIGGER — rename the trigger to rename the flow. The save payload carries no name; the server
+derives it (`deriveFlowName()`: trigger step name → stored name → generated `new_flow_<hex>`),
+re-checking uniqueness against the derived value, and `FlowPortability::import()` derives it the
+same way (document name only as the legacy triggerless fallback, re-checked for collisions).
+Topbar fields are STACKED label-above-control (`__field` /
 `__field-label`, controls bottom-aligned — keeps the left side narrow); every right-side button is
 icon + a `__btn-text` span that a `max-width: 1199px` viewport hides (icon-only mode, the `title`
 tooltips carry the labels — which is why syncDirty updates the cancel button's LABEL SPAN
@@ -442,8 +462,11 @@ lays every step out in execution order — BFS from the trigger/"Start here", un
 appended in reading order — with one-tile gaps, wrapping rows before the viewport width, then
 scrolls to top-left) + cancel/save on the right (the toolbox title bar also carries a × that
 hides it). The draggable toolbox
-(Triggers: cron/endpoint/entity change · Actions: DWL transform/Choice (an "if")/sub-flow ·
-Operations: Entity Read/Entity Write/HTTP Request · File Operations: Read
+(Triggers: cron/endpoint/entity change/Subflow (`subflow` — the ENTRY POINT of a callable
+subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call Subflow" action
+`sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop
+(`foreach`, PLACEHOLDER — name-only settings, no-op at runtime) · Operations: DWL transform/Entity
+Read/Entity Write/HTTP Request/SQL Query · File Operations: Read
 File/Write File/List Folder/Delete/Rename) is the step palette — each SECTION collapses via the
 +/- at the right of its title (`data-role="toolbox-section-toggle"` → `.is-collapsed` hides the
 items; in-memory only, every load starts expanded). The toolbox's position/visibility are a
@@ -490,6 +513,25 @@ bezier arrows (marker `#aaxis-flow-arrow`) arriving at the target's left-center,
 border; each port drives exactly one link (re-drag re-wires), each element accepts at most ONE
 incoming link, and triggers accept none (invalid drops flash why). Links live in the design as
 `{from, fromPort, to}` referencing stable per-step ids, so renames don't touch them.
+**Anchor sides**: which tile side a line arrives at / leaves from is user-configurable per tile
+via the right-click menu — "flow-in" (hidden on triggers, which accept no incoming) and
+"flow-out" (a choice shows "flow-true"/"flow-false" instead, one per port) are HOVER SUBMENUS
+(`addSubmenu` in `showMenuAt`: a wrapper div + pure-CSS `:hover` reveal, child list overlapping
+4px so the pointer never crosses a dead gap) listing North/South/West/East with the CURRENT side
+checked and sides used by the tile's other anchors DISABLED (each anchor keeps its own side; a
+choice occupies three of the four). DRAG gestures re-anchor too (`dropAnchor` + `nearestSide`):
+dropping a relink-drag's arrow head back on its CURRENT target moves that tile's flow-in to the
+side nearest the release point, and releasing a port drag on its OWN tile moves that port's
+flow-out the same way — an occupied side leaves things unchanged.
+Defaults: in = west, out = east, choice's false port = south. Model: `PlacedStep.inSide` /
+`outSides[port]` (`AnchorSide`, `SIDE_VECTOR`), persisted in design.steps as optional
+`inSide`/`outSides` keys ONLY when changed (defaults stay implicit; DESIGN_VERSION unchanged —
+`sanitizeAnchors()` validates them LENIENTLY on restore: bad values or colliding resolved sides
+just fall back to defaults, never "corrupted"). Geometry: `anchorPoint()` (side midpoints) feeds
+`outputPos`/`inputPos`; the port "×" handles are placed by INLINE styles (`positionPortsEl`,
+beating the CSS defaults); `routeLink()`'s stubs leave/arrive along each anchor side's outward
+normal (`SIDE_VECTOR`, ±2 grid cells) with the A* core unchanged, and the "Start here" arrow
+follows the in-side too.
 Double-clicking a tile opens the **step settings** —
 a "flying" panel positioned next to the tile over a click-absorbing backdrop (a true modal: the
 user must Confirm/Cancel; Escape = Cancel via `keydown.aaxisFlowSettings`, active even under the
@@ -540,6 +582,18 @@ Destination`, row 2 `Operation | Path | Body`, row 3 the Body-content DWL field 
 disabled (`.aaxis-dwl-field--disabled` + textarea/switch inert) while Body = Empty. The TYPE key
 stays `invoke` (only the label changed) so stored designs keep validating; validator arm:
 `destinationOk && connectorOk`, body_content DWL-checked via `stepDwlSnippets`.
+**sql_query** ("SQL Query", `sqlQuerySection`) runs SQL against a DATABASE connector
+(`Manager/DatabaseQueryRunner` — PostgreSQL via PDO, same connection rules as the connector Test;
+executor arm `sqlQuery()`): row 1 `Name | Connector (database only) | Destination`, row 2 the SQL
+(a DWL field: literal statement, or an expression BUILDING one), row 3 the optional Bindings
+(context key or DWL, like a writer's Content). The SQL takes `:name` placeholders (PDO named
+params — `::type` casts and quoted strings are NOT placeholders); the Bindings result feeds them:
+an OBJECT = one run, a LIST = the same prepared statement run once per element with the
+destination holding the per-run results in order. Resultset statements (SELECT / RETURNING) yield
+rows as a list of objects, plain DML yields `{affected: n}`. Binding values must be scalars/null
+(typed PDO binds); a missing key or a SQL failure aborts the step naming it. Validator arm:
+connector + `sql` (+ `sql_dwl`/`binding`/`binding_dwl` shapes), both texts DWL-syntax-checked when
+their toggle is on.
 Every visibility
 toggle calls `reposition()` and the panel is viewport-capped (`max-height` + scrolling middle) so
 Cancel/Confirm always stay reachable. The modal blocks Confirm on missing

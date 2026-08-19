@@ -35,11 +35,18 @@ class OntologyFlow
     /** User-created flow that contains a trigger step. */
     public const string TYPE_FLOW = 'flow';
 
-    /** User-created flow without a trigger step (invoked from other flows). */
+    /**
+     * User-created flow whose trigger is the "Subflow" element (invoked from other flows via
+     * "Call Subflow") — or, legacy, one without any trigger step.
+     */
     public const string TYPE_SUBFLOW = 'subflow';
 
-    /** Toolbox step types that count as triggers (drive {@see computeType}). */
-    public const array TRIGGER_STEP_TYPES = ['cron', 'endpoint', 'entity_change'];
+    /**
+     * Toolbox step types that count as triggers (drive {@see computeType} and the per-trigger
+     * `enabled` flag). `subflow` is the entry-point of a callable subflow — a step TYPE, not to be
+     * confused with the flow TYPE {@see TYPE_SUBFLOW} or the "Call Subflow" ACTION `sub_flow`.
+     */
+    public const array TRIGGER_STEP_TYPES = ['cron', 'endpoint', 'entity_change', 'subflow'];
 
     /**
      * Canvas format of the `design` column. MUST track DESIGN_VERSION in
@@ -51,12 +58,14 @@ class OntologyFlow
 
     /** Every step type the editor toolbox offers (triggers + actions + operations). */
     public const array STEP_TYPES = [
-        'cron', 'endpoint', 'entity_change',           // triggers
-        'dwl_transform', 'choice', 'sub_flow',         // actions ("choice" acts as an if)
+        'cron', 'endpoint', 'entity_change', 'subflow', // triggers (subflow = callable entry point)
+        // Flow Control ("choice" acts as an if; `foreach` is a PLACEHOLDER, not implemented yet).
+        'choice', 'sub_flow', 'foreach',
         // Operations. entity_read/entity_write are the typed successors of the REMOVED generic
         // reader/writer (v1_10's ConvertLegacyReaderWriterSteps rewrote stored flows); `invoke`
-        // is the "HTTP Request" step (rest_api connectors only).
-        'invoke', 'entity_read', 'entity_write',
+        // is the "HTTP Request" step (rest_api connectors only); `sql_query` runs SQL against
+        // database connectors.
+        'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query',
         // File Operations (file_system/sftp/bucket connectors, DWL-capable paths).
         'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename',
     ];
@@ -170,14 +179,35 @@ class OntologyFlow
     }
 
     /**
-     * The type of a user-created flow follows from its steps: a trigger step makes it a `flow`,
-     * otherwise it is a `subflow`.
+     * The type of a user-created flow follows from its trigger: a REAL trigger (cron / endpoint /
+     * entity_change) makes it a `flow`; the "Subflow" trigger — or, legacy, no trigger at all —
+     * makes it a `subflow`.
      *
      * @param array<int, array<string, mixed>>|null $steps
      */
     public static function computeType(?array $steps): string
     {
-        return self::computeTriggerType($steps) === null ? self::TYPE_SUBFLOW : self::TYPE_FLOW;
+        $trigger = self::computeTriggerType($steps);
+
+        return $trigger === null || $trigger === 'subflow' ? self::TYPE_SUBFLOW : self::TYPE_FLOW;
+    }
+
+    /**
+     * The flow's effective ENABLED state, derived from its trigger step's `enabled` config flag:
+     * true only when a trigger exists AND carries `enabled: true`. A missing trigger, an
+     * unconfigured one or a missing flag all read as DISABLED — a broken entry point must not run.
+     *
+     * @param array<int, array<string, mixed>>|null $steps
+     */
+    public static function computeEnabled(?array $steps): bool
+    {
+        foreach ($steps ?? [] as $step) {
+            if (\is_array($step) && \in_array($step['type'] ?? null, self::TRIGGER_STEP_TYPES, true)) {
+                return \is_array($step['config'] ?? null) && ($step['config']['enabled'] ?? null) === true;
+            }
+        }
+
+        return false;
     }
 
     /**

@@ -176,8 +176,28 @@ class FlowPortability
         $importedSteps = $normalized;
 
         $flow = new OntologyFlow();
+        // The flow name IS the trigger step's name now — the document's name is only the fallback
+        // for (legacy) triggerless subflow files. NOTE: the unique-name check above ran on the
+        // document name; re-check when the trigger disagrees.
+        foreach ($importedSteps as $importedStep) {
+            if (\in_array($importedStep['type'] ?? null, OntologyFlow::TRIGGER_STEP_TYPES, true)
+                && \is_string($importedStep['name'] ?? null) && trim($importedStep['name']) !== ''
+            ) {
+                $name = trim($importedStep['name']);
+                break;
+            }
+        }
+        if ($this->doctrine->getRepository(OntologyFlow::class)->findOneBy(['name' => $name]) !== null) {
+            throw new FlowImportException([$this->trans('name_taken', ['{{ name }}' => $name])]);
+        }
         $flow->setName($name);
-        // Requirement: an imported flow never starts running on the strength of a file.
+        // Requirement: an imported flow never starts running on the strength of a file. Enabled
+        // now LIVES on the trigger step's config, so the flag is forced off there (steps AND
+        // design copies) — the column below only mirrors it.
+        $importedSteps = $this->disableTrigger($importedSteps);
+        if (\is_array($design) && \is_array($design['steps'] ?? null)) {
+            $design['steps'] = $this->disableTrigger($design['steps']);
+        }
         $flow->setEnabled(false);
         $flow->setSteps($importedSteps === [] ? null : $importedSteps);
         $flow->setDesign(\is_array($design) ? $design : null);
@@ -482,6 +502,28 @@ class FlowPortability
     /**
      * @param array<string, string> $params
      */
+    /**
+     * Forces every trigger step's `enabled` config flag OFF (import safety: nothing runs on the
+     * strength of a file).
+     *
+     * @param array<int, mixed> $steps
+     *
+     * @return array<int, mixed>
+     */
+    private function disableTrigger(array $steps): array
+    {
+        foreach ($steps as $i => $step) {
+            if (\is_array($step) && \in_array($step['type'] ?? null, OntologyFlow::TRIGGER_STEP_TYPES, true)) {
+                $config = \is_array($step['config'] ?? null) ? $step['config'] : [];
+                $config['enabled'] = false;
+                $step['config'] = $config;
+                $steps[$i] = $step;
+            }
+        }
+
+        return $steps;
+    }
+
     private function trans(string $key, array $params = []): string
     {
         return $this->translator->trans('aaxis.ontology.flow_portability.' . $key, $params, 'messages');

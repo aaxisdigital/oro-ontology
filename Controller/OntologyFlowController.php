@@ -471,22 +471,6 @@ class OntologyFlowController extends AbstractOntologyController
             return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
         }
 
-        $name = trim((string) ($payload['name'] ?? ''));
-        if ($name === '') {
-            return new JsonResponse([
-                'success' => false,
-                'message' => $this->trans('aaxis.ontology.flow_manager.name_required'),
-            ], 422);
-        }
-
-        $existing = $this->registry()->getRepository(OntologyFlow::class)->findOneBy(['name' => $name]);
-        if ($existing !== null && $existing->getId() !== $entity->getId()) {
-            return new JsonResponse([
-                'success' => false,
-                'message' => $this->trans('aaxis.ontology.flow_manager.name_unique'),
-            ], 422);
-        }
-
         if (\array_key_exists('design', $payload)) {
             // The design is the editor's own (versioned) canvas representation — stored opaquely;
             // the editor validates it on load and treats unreadable values as corrupted.
@@ -513,8 +497,23 @@ class OntologyFlowController extends AbstractOntologyController
             $entity->setSteps($steps === [] ? null : $steps);
         }
 
+        // The flow's NAME is the TRIGGER STEP's name (the top-bar input is gone) — a triggerless
+        // canvas keeps the stored name, and a brand new one gets a generated placeholder.
+        $name = $this->deriveFlowName($entity);
+        $existing = $this->registry()->getRepository(OntologyFlow::class)->findOneBy(['name' => $name]);
+        if ($existing !== null && $existing->getId() !== $entity->getId()) {
+            return new JsonResponse([
+                'success' => false,
+                'message' => $this->trans('aaxis.ontology.flow_manager.name_unique'),
+            ], 422);
+        }
+
         $entity->setName($name);
-        $entity->setEnabled((bool) ($payload['enabled'] ?? true));
+        // Enabled is DERIVED, not taken from the payload: the trigger step's `enabled` config flag
+        // is the one switch (a missing/unconfigured trigger reads as disabled — a broken entry
+        // point must not run). The column stays synced so the grid and the scheduler keep their
+        // plain reads.
+        $entity->setEnabled(OntologyFlow::computeEnabled($entity->getSteps()));
         $entity->setType(OntologyFlow::computeType($entity->getSteps()));
         $entity->setTriggerType(OntologyFlow::computeTriggerType($entity->getSteps()));
         // Every save rewrites the flow definition — that IS a modification.
@@ -525,6 +524,22 @@ class OntologyFlowController extends AbstractOntologyController
         $em->flush();
 
         return new JsonResponse(['success' => true, 'flow' => $this->serialize($entity)]);
+    }
+
+    /** Trigger step name → flow name; else the stored name; else a generated placeholder. */
+    private function deriveFlowName(OntologyFlow $entity): string
+    {
+        foreach ($entity->getSteps() ?? [] as $step) {
+            if (\is_array($step) && \in_array($step['type'] ?? null, OntologyFlow::TRIGGER_STEP_TYPES, true)
+                && \is_string($step['name'] ?? null) && trim($step['name']) !== ''
+            ) {
+                return trim($step['name']);
+            }
+        }
+
+        $current = trim((string) $entity->getName());
+
+        return $current !== '' ? $current : 'new_flow_' . substr(bin2hex(random_bytes(4)), 0, 6);
     }
 
     /**

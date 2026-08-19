@@ -18,20 +18,12 @@
                     {# Labels sit ABOVE their controls to keep the left side narrow. #}
                     <div class="aaxis-flow-editor__name">
                         <div class="aaxis-flow-editor__field">
-                            <label class="aaxis-flow-editor__field-label" for="aaxis-flow-editor-name">
+                            <span class="aaxis-flow-editor__field-label">
                                 {{ 'aaxis.ontology.flow_editor.name_label'|trans }}
-                            </label>
-                            <input type="text" id="aaxis-flow-editor-name" maxlength="128"
-                                   class="aaxis-flow-editor__name-input" data-role="flow-name">
-                        </div>
-                        <div class="aaxis-flow-editor__field aaxis-flow-editor__field--switch">
-                            <span class="aaxis-flow-editor__field-label">{{ 'aaxis.ontology.flow_editor.enabled_label'|trans }}</span>
-                            <label class="aaxis-flow-editor__switch" title="{{ 'aaxis.ontology.flow_editor.enabled_label'|trans }}">
-                                <input type="checkbox" data-role="flow-enabled" checked>
-                                <span class="aaxis-flow-editor__switch-track">
-                                    <span class="aaxis-flow-editor__switch-thumb"></span>
-                                </span>
-                            </label>
+                            </span>
+                            {# Read-only: the flow is NAMED BY ITS TRIGGER STEP — rename the trigger
+                               to rename the flow (kept in sync by the component). #}
+                            <div class="aaxis-flow-editor__name-display" data-role="flow-name-display"></div>
                         </div>
                     </div>
                     {# Every button: icon + a text span that a <1200px viewport hides (icon-only mode). #}
@@ -101,17 +93,20 @@
                             {key: 'triggers', category: 'trigger', items: [
                                 {key: 'cron', icon: 'fa-clock-o'},
                                 {key: 'endpoint', icon: 'fa-plug'},
-                                {key: 'entity_change', icon: 'fa-database'}
+                                {key: 'entity_change', icon: 'fa-database'},
+                                {key: 'subflow', icon: 'fa-sign-in'}
                             ]},
-                            {key: 'actions', category: 'action', items: [
-                                {key: 'dwl_transform', icon: 'fa-random'},
+                            {key: 'flow_control', category: 'action', items: [
                                 {key: 'choice', icon: 'fa-code-fork'},
-                                {key: 'sub_flow', icon: 'fa-sitemap'}
+                                {key: 'sub_flow', icon: 'fa-sitemap'},
+                                {key: 'foreach', icon: 'fa-repeat'}
                             ]},
                             {key: 'operations', category: 'operation', items: [
+                                {key: 'dwl_transform', icon: 'fa-random'},
                                 {key: 'entity_read', icon: 'fa-download'},
                                 {key: 'entity_write', icon: 'fa-upload'},
-                                {key: 'invoke', icon: 'fa-bolt'}
+                                {key: 'invoke', icon: 'fa-bolt'},
+                                {key: 'sql_query', icon: 'fa-table'}
                             ]},
                             {key: 'file_operations', category: 'operation', items: [
                                 {key: 'file_read', icon: 'fa-file-text-o'},

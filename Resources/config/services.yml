@@ -52,6 +52,7 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
             - '@Aaxis\Bundle\OntologyBundle\Manager\FileConnectorTransfer'
             - '@Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\DatabaseQueryRunner'
 
     # The rules a flow's steps must clear to be stored — shared by the editor's save endpoint and
     # the importer, so an imported flow is exactly as valid as a hand-built one.
@@ -116,6 +117,9 @@ services:
 
     # Signs S3-compatible object storage requests (AWS SigV4) for bucket connectors.
     Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner: ~
+
+    # Executes the "SQL Query" flow step against database connectors (PostgreSQL, PDO).
+    Aaxis\Bundle\OntologyBundle\Manager\DatabaseQueryRunner: ~
 
     # Runs the Configure popup's "Test" checks (path / socket / SFTP auth / OAuth call / bucket list).
     Aaxis\Bundle\OntologyBundle\Manager\ConnectorTester:

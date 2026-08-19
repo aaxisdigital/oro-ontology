@@ -1078,6 +1078,19 @@
         }
     }
 
+    // Read-only mirror of the trigger step's name (the flow is named by its trigger).
+    &__name-display {
+        min-width: 160px;
+        max-width: 340px;
+        padding: 6px 0;
+        font-size: 15px;
+        font-weight: font-weight('bold');
+        color: #1b3a5b;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
     &__controls {
         display: flex;
         align-items: center;
@@ -1678,6 +1691,48 @@
         }
     }
 
+    &__menu-item--disabled {
+        color: #b6c0c9;
+        cursor: default;
+
+        &:hover {
+            background: transparent;
+            color: #b6c0c9;
+        }
+    }
+
+    &__menu-item--active {
+        font-weight: font-weight('bold');
+    }
+
+    // Hover-revealed nested menu: the wrapper anchors the child list at its right edge.
+    &__menu-sub {
+        position: relative;
+
+        .aaxis-flow-editor__menu--nested {
+            display: none;
+            position: absolute;
+            // Slight overlap: the pointer must never cross a dead gap on its way into the child
+            // list, or :hover would drop and close it.
+            left: calc(100% - 4px);
+            top: -7px;
+        }
+
+        &:hover .aaxis-flow-editor__menu--nested {
+            display: block;
+        }
+    }
+
+    &__menu-item--parent {
+        width: 100%;
+    }
+
+    &__menu-caret {
+        margin-left: auto;
+        padding-left: 10px;
+        color: #8a98a6;
+    }
+
     &__toolbox[hidden] {
         display: none;
     }
@@ -1848,6 +1903,16 @@
     &__settings-row {
         display: flex;
         gap: 8px;
+    }
+
+    // A label + switch pair on one line (the trigger's Enabled flag).
+    &__settings-row--switch {
+        align-items: center;
+        gap: 10px;
+
+        .aaxis-flow-editor__settings-label {
+            margin: 0;
+        }
     }
 
     &__settings-col {

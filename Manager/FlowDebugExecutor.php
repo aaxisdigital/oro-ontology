@@ -63,6 +63,7 @@ class FlowDebugExecutor
         private readonly DwlTransformer $dwl,
         private readonly FileConnectorTransfer $files,
         private readonly FlowStepValidator $stepValidator,
+        private readonly DatabaseQueryRunner $database,
     ) {
     }
 
@@ -389,7 +390,7 @@ class FlowDebugExecutor
         $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
         if (!\in_array(
             $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke'], $fileOps),
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query'], $fileOps),
             true
         )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
@@ -424,6 +425,11 @@ class FlowDebugExecutor
         }
         if ($step['type'] === 'invoke') {
             $context[$destination] = $this->readConnector($step['name'], $config, $context);
+
+            return;
+        }
+        if ($step['type'] === 'sql_query') {
+            $context[$destination] = $this->sqlQuery($step['name'], $config, $context);
 
             return;
         }
@@ -639,10 +645,10 @@ class FlowDebugExecutor
      * @param array<string, mixed> $config
      * @param array<string, mixed> $context
      */
-    private function resolveContent(string $stepName, array $config, array $context): mixed
+    private function resolveContent(string $stepName, array $config, array $context, string $key = 'content'): mixed
     {
-        $contentSource = trim((string) ($config['content'] ?? ''));
-        if (($config['content_dwl'] ?? false) === true) {
+        $contentSource = trim((string) ($config[$key] ?? ''));
+        if (($config[$key . '_dwl'] ?? false) === true) {
             try {
                 return $this->dwl->transform($contentSource, $context);
             } catch (\Throwable $e) {
@@ -650,10 +656,45 @@ class FlowDebugExecutor
             }
         }
         if (!\array_key_exists($contentSource, $context)) {
-            throw new \RuntimeException(sprintf('Step "%s": content "%s" is not available in the context.', $stepName, $contentSource));
+            throw new \RuntimeException(sprintf('Step "%s": %s "%s" is not available in the context.', $stepName, $key, $contentSource));
         }
 
         return $context[$contentSource];
+    }
+
+    /**
+     * The "SQL Query" step: runs the (DWL-capable) SQL against a DATABASE connector via
+     * {@see DatabaseQueryRunner}. `:name` placeholders are fed by the Bindings result (a context
+     * key, or a DWL expression when its toggle is on): an object = one run, a LIST = one run per
+     * element with the destination holding the per-run results in order.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     */
+    private function sqlQuery(string $stepName, array $config, array $context): mixed
+    {
+        /** @var OntologyConnector|null $connector */
+        $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
+        if ($connector === null) {
+            throw new \RuntimeException(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
+        }
+
+        $sql = $this->resolveDwlText(
+            $stepName,
+            'SQL',
+            (string) ($config['sql'] ?? ''),
+            ($config['sql_dwl'] ?? false) === true,
+            $context
+        );
+        $bindings = trim((string) ($config['binding'] ?? '')) === ''
+            ? null
+            : $this->resolveContent($stepName, $config, $context, 'binding');
+
+        try {
+            return $this->database->run($connector, $sql, $bindings);
+        } catch (\RuntimeException $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s.', $stepName, $e->getMessage()), 0, $e);
+        }
     }
 
     /**

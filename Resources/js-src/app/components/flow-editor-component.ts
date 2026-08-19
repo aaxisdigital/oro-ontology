@@ -216,6 +216,19 @@ function portCount(type: string): number {
     return type === 'choice' ? 2 : 1;
 }
 
+/** The four tile sides a flow line can attach to. */
+type AnchorSide = 'north' | 'south' | 'east' | 'west';
+
+const ANCHOR_SIDES: AnchorSide[] = ['north', 'south', 'east', 'west'];
+
+/** Outward unit vector of each side (canvas coordinates: y grows downward). */
+const SIDE_VECTOR: Record<AnchorSide, {dx: number; dy: number}> = {
+    north: {dx: 0, dy: -1},
+    south: {dx: 0, dy: 1},
+    west: {dx: -1, dy: 0},
+    east: {dx: 1, dy: 0}
+};
+
 interface FlowEditorOptions {
     _sourceElement: any;
     flow?: FlowRecord | null;
@@ -235,6 +248,10 @@ interface PlacedStep extends FlowStep {
     el: HTMLElement;
     /** The stored config is incomplete/invalid — the tile renders red and the flow cannot run. */
     invalid?: boolean;
+    /** Which side incoming links arrive at (default west). */
+    inSide?: AnchorSide;
+    /** Which side each output port leaves from (defaults: port 0 east; choice port 1 south). */
+    outSides?: AnchorSide[];
 }
 
 /**
@@ -380,8 +397,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const factor = Math.min(16, Math.max(2, Number(options.stepSizeFactor) || 8));
         this.tileSize = factor * this.spacing;
 
-        this.$el.find('[data-role="flow-name"]').val(this.flow?.name || this.generateName());
-        this.$el.find('[data-role="flow-enabled"]').prop('checked', this.flow ? this.flow.enabled : true);
+        this.syncFlowNameDisplay();
 
         // Dot-matrix spacing is a CSS custom property so the SCSS owns the pattern itself.
         this.canvas().style.setProperty('--aaxis-flow-grid', `${this.spacing}px`);
@@ -414,12 +430,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Warm the settings catalogs in the background so the first panel opens instantly too.
         this.prefetchCatalogs();
 
-        this.$el.on('input.aaxisFlowEditor', '[data-role="flow-name"]', () => this.syncDirty());
-        this.$el.on('change.aaxisFlowEditor', '[data-role="flow-enabled"]', () => {
-            this.syncDirty();
-            // A disabled flow cannot be run — Debug/Run Now grey out with the switch.
-            this.syncDebugButtons();
-        });
         this.$el.on('click.aaxisFlowEditor', '[data-role="cancel"]', (e: any) => {
             e.preventDefault();
             window.location.href = this.listUrl;
@@ -567,15 +577,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-    /** new_flow_ + 6 random alphanumerics, e.g. "new_flow_a3k9zq". */
-    private generateName(): string {
-        const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
-        let suffix = '';
-        for (let i = 0; i < 6; i++) {
-            suffix += alphabet[Math.floor(Math.random() * alphabet.length)];
-        }
-        return `new_flow_${suffix}`;
-    }
 
     /**
      * Sizes the editor to end at the viewport bottom (minus a small page margin): the measured
@@ -677,14 +678,89 @@ class OntologyFlowEditorComponent extends BaseComponent {
     // --- Link geometry / rendering ------------------------------------------------
 
     /** Center of an output port, in canvas coordinates. */
-    private outputPos(step: PlacedStep, port: number): {x: number; y: number} {
-        const ratio = portCount(step.type) === 2 ? (port === 0 ? 1 / 3 : 2 / 3) : 0.5;
-        return {x: step.x + this.tileSize, y: step.y + Math.round(this.tileSize * ratio)};
+    /** The side incoming links arrive at (user-configurable via the context menu). */
+    private inSideOf(step: PlacedStep): AnchorSide {
+        return step.inSide || 'west';
     }
 
-    /** Where links arrive: just off the LEFT edge (2px margin), vertically centered. */
+    /** The side an output port leaves from (choice's red port defaults to south). */
+    private outSideOf(step: PlacedStep, port: number): AnchorSide {
+        return (step.outSides && step.outSides[port]) || (port === 1 ? 'south' : 'east');
+    }
+
+    /** Midpoint of one side of the tile, in canvas coordinates. */
+    private anchorPoint(step: PlacedStep, side: AnchorSide): {x: number; y: number} {
+        const half = this.tileSize / 2;
+        switch (side) {
+            case 'north': return {x: step.x + half, y: step.y};
+            case 'south': return {x: step.x + half, y: step.y + this.tileSize};
+            case 'west': return {x: step.x, y: step.y + half};
+            default: return {x: step.x + this.tileSize, y: step.y + half};
+        }
+    }
+
+    private outputPos(step: PlacedStep, port: number): {x: number; y: number} {
+        return this.anchorPoint(step, this.outSideOf(step, port));
+    }
+
+    /** Where links arrive: 2px off the configured in-side, centered on it. */
     private inputPos(step: PlacedStep): {x: number; y: number} {
-        return {x: step.x - 2, y: step.y + this.tileSize / 2};
+        const side = this.inSideOf(step);
+        const v = SIDE_VECTOR[side];
+        const a = this.anchorPoint(step, side);
+        return {x: a.x + 2 * v.dx, y: a.y + 2 * v.dy};
+    }
+
+    /** Places a tile's "×" port handles on their configured sides (inline styles beat the CSS). */
+    private positionPortsEl(el: HTMLElement, type: string, outSides: AnchorSide[]): void {
+        el.querySelectorAll('[data-role="port"]').forEach(node => {
+            const port = node as HTMLElement;
+            const side = outSides[Number(port.getAttribute('data-port')) || 0] || 'east';
+            port.style.left = side === 'west' ? '-9px' : (side === 'east' ? 'auto' : '50%');
+            port.style.right = side === 'east' ? '-9px' : 'auto';
+            port.style.top = side === 'north' ? '-9px' : (side === 'south' ? 'auto' : '50%');
+            port.style.bottom = side === 'south' ? '-9px' : 'auto';
+            port.style.transform = side === 'north' || side === 'south' ? 'translateX(-50%)' : 'translateY(-50%)';
+        });
+    }
+
+    private positionPorts(step: PlacedStep): void {
+        const sides: AnchorSide[] = [];
+        for (let p = 0; p < portCount(step.type); p++) {
+            sides.push(this.outSideOf(step, p));
+        }
+        this.positionPortsEl(step.el, step.type, sides);
+    }
+
+    /** The sides a tile's OTHER anchors occupy — what the submenu must offer as unavailable. */
+    private usedAnchorSides(step: PlacedStep, except: 'in' | number): Set<AnchorSide> {
+        const used = new Set<AnchorSide>();
+        if (except !== 'in' && this.stepMeta[step.type].category !== 'trigger') {
+            used.add(this.inSideOf(step));
+        }
+        for (let p = 0; p < portCount(step.type); p++) {
+            if (except !== p) {
+                used.add(this.outSideOf(step, p));
+            }
+        }
+        return used;
+    }
+
+    /** Applies an anchor-side choice (guarded against a side another anchor already uses). */
+    private setAnchorSide(step: PlacedStep, kind: 'in' | number, side: AnchorSide): void {
+        if (this.usedAnchorSides(step, kind).has(side)) {
+            return;
+        }
+        if (kind === 'in') {
+            step.inSide = side;
+        } else {
+            const sides = step.outSides ? [...step.outSides] : [];
+            sides[kind] = side;
+            step.outSides = sides;
+            this.positionPorts(step);
+        }
+        this.redrawLinks();
+        this.syncDirty();
     }
 
     private wirePath(x1: number, y1: number, x2: number, y2: number): string {
@@ -784,8 +860,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return;
         }
         const tip = this.inputPos(step);
-        const originX = Math.max(2, tip.x - 3 * this.spacing);
-        const d = `M ${originX} ${tip.y} L ${tip.x} ${tip.y}`;
+        const v = SIDE_VECTOR[this.inSideOf(step)];
+        const originX = Math.max(2, tip.x + v.dx * 3 * this.spacing);
+        const originY = Math.max(2, tip.y + v.dy * 3 * this.spacing);
+        const d = `M ${originX} ${originY} L ${tip.x} ${tip.y}`;
         const group = document.createElementNS(SVG_NS, 'g');
         group.setAttribute('data-role', 'start-group');
         const path = document.createElementNS(SVG_NS, 'path');
@@ -834,12 +912,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const cell = this.spacing;
         const a = this.outputPos(from, fromPort);
         const b = this.inputPos(to);
+        // Both stubs leave/arrive along their anchor side's outward normal.
+        const av = SIDE_VECTOR[this.outSideOf(from, fromPort)];
+        const bv = SIDE_VECTOR[this.inSideOf(to)];
 
-        const clamp = (v: number, max: number): number => Math.min(Math.max(v, 0), max);
-        const sc = clamp(Math.round((from.x + this.tileSize) / cell) + 2, grid.cols - 1);
-        const sr = clamp(Math.round(a.y / cell), grid.rows - 1);
-        const ec = clamp(Math.round(to.x / cell) - 2, grid.cols - 1);
-        const er = clamp(Math.round((to.y + this.tileSize / 2) / cell), grid.rows - 1);
+        const clampC = (v: number): number => Math.min(Math.max(v, 0), grid.cols - 1);
+        const clampR = (v: number): number => Math.min(Math.max(v, 0), grid.rows - 1);
+        const sc = clampC(Math.round(a.x / cell) + av.dx * 2);
+        const sr = clampR(Math.round(a.y / cell) + av.dy * 2);
+        const ec = clampC(Math.round(b.x / cell) + bv.dx * 2);
+        const er = clampR(Math.round(b.y / cell) + bv.dy * 2);
 
         const cells = this.astar(grid, sc, sr, ec, er);
         const points: {x: number; y: number}[] = [{x: a.x, y: a.y}];
@@ -850,7 +932,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
         };
 
-        push(sc * cell, a.y); // stub away from the source tile (at the port's own height)
+        // Stub away from the source tile, at the port's own height/column.
+        if (av.dx !== 0) {
+            push(sc * cell, a.y);
+        } else {
+            push(a.x, sr * cell);
+        }
         if (cells) {
             for (const c of cells) {
                 push(c.c * cell, c.r * cell);
@@ -863,8 +950,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
             push(midX, er * cell);
             push(ec * cell, er * cell);
         }
-        push(ec * cell, b.y);
-        push(b.x, b.y); // stub into the arrow tip (2px off the target's left border)
+        // Approach segment aligned to the arrival anchor, then the stub into the arrow tip.
+        if (bv.dx !== 0) {
+            push(ec * cell, b.y);
+        } else {
+            push(b.x, er * cell);
+        }
+        push(b.x, b.y);
         return this.compressPolyline(points);
     }
 
@@ -1169,12 +1261,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
     // --- Dirty tracking (Save enabled / Cancel↔Close) -----------------------------------
 
     /** Everything the save payload carries — the unit of "changes pending". */
+    // (syncDirty below also refreshes the debug buttons: the trigger's enabled flag — the run
+    // switch — changes through step edits/removals, all of which funnel through syncDirty.)
     private snapshot(): string {
-        return JSON.stringify({
-            name: String(this.$el.find('[data-role="flow-name"]').val() || '').trim(),
-            enabled: this.$el.find('[data-role="flow-enabled"]').is(':checked'),
-            design: this.currentDesign()
-        });
+        // The flow name lives on the trigger step, which the design already carries.
+        return JSON.stringify({design: this.currentDesign()});
     }
 
     /** Records the current state as saved and refreshes the buttons. */
@@ -1192,6 +1283,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // the icon-only narrow-viewport mode.
         this.$el.find('[data-role="cancel-label"]').text(label);
         this.$el.find('[data-role="cancel"]').attr('title', label);
+        this.syncDebugButtons();
+        this.syncFlowNameDisplay();
+    }
+
+    /** The top-bar name is a mirror of the TRIGGER STEP's name (the flow is named by it). */
+    private syncFlowNameDisplay(): void {
+        const trigger = this.findTrigger();
+        const name = (trigger && trigger.name)
+            || (this.flow && this.flow.name)
+            || __('aaxis.ontology.flow_editor.name_unset');
+        this.$el.find('[data-role="flow-name-display"]').text(name);
     }
 
     /** The full canvas state persisted alongside the logical steps. */
@@ -1201,7 +1303,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // ({@see saveToolboxState}); old designs may still carry a `toolbox` key, which is ignored.
         return {
             version: DESIGN_VERSION,
-            steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null})),
+            steps: this.steps.map(s => ({
+                id: s.id, type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null,
+                // Anchor sides travel only when the user changed them (defaults stay implicit).
+                ...(s.inSide ? {inSide: s.inSide} : {}),
+                ...(s.outSides && s.outSides.some(v => Boolean(v)) ? {outSides: s.outSides} : {})
+            })),
             links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
             start: this.startId
         };
@@ -1226,6 +1333,35 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 this.addStep(step.type, this.snap(step.x), this.snap(step.y), step.name);
             }
         });
+    }
+
+    /**
+     * Validates a stored step's optional anchor sides LENIENTLY (they are cosmetic): unknown
+     * values or a collision between the resolved in/out sides just falls back to the defaults —
+     * never "corrupted".
+     */
+    private sanitizeAnchors(step: any): {inSide?: AnchorSide; outSides?: AnchorSide[]} | undefined {
+        const isSide = (v: any): v is AnchorSide => ANCHOR_SIDES.indexOf(v) >= 0;
+        const inSide = isSide(step.inSide) ? step.inSide : undefined;
+        let outSides: AnchorSide[] | undefined;
+        if (Array.isArray(step.outSides) && step.outSides.length <= portCount(step.type)
+            && step.outSides.every((v: any) => v === undefined || v === null || isSide(v))
+        ) {
+            outSides = step.outSides.map((v: any) => (isSide(v) ? v : undefined)) as AnchorSide[];
+        }
+        // Resolve every anchor (stored or default) and require distinct sides.
+        const resolved: string[] = [];
+        const isTrigger = this.stepMeta[step.type] && this.stepMeta[step.type].category === 'trigger';
+        if (!isTrigger) {
+            resolved.push(inSide || 'west');
+        }
+        for (let p = 0; p < portCount(step.type); p++) {
+            resolved.push((outSides && outSides[p]) || (p === 1 ? 'south' : 'east'));
+        }
+        if (new Set(resolved).size !== resolved.length) {
+            return undefined;
+        }
+        return inSide || outSides ? {inSide, outSides} : undefined;
     }
 
     /** Strictly validates the stored design BEFORE applying anything; false = corrupted. */
@@ -1282,7 +1418,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return false;
         }
 
-        design.steps.forEach((step: any) => this.addStep(step.type, this.snap(step.x), this.snap(step.y), step.name, step.id, step.config || null));
+        design.steps.forEach((step: any) => this.addStep(
+            step.type, this.snap(step.x), this.snap(step.y), step.name, step.id, step.config || null,
+            this.sanitizeAnchors(step)
+        ));
         this.links = links.map((l: any) => ({from: l.from, fromPort: l.fromPort, to: l.to}));
         this.startId = start;
         this.redrawLinks();
@@ -1383,14 +1522,22 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
     }
 
-    private addStep(type: string, x: number, y: number, name?: string, id?: string, config?: Record<string, any> | null): void {
+    private addStep(type: string, x: number, y: number, name?: string, id?: string, config?: Record<string, any> | null, anchors?: {inSide?: AnchorSide; outSides?: AnchorSide[]}): void {
         const stepName = (name || '').trim() || this.defaultName(type);
         const pos = this.place(x, y);
         const el = this.buildTile(type, stepName);
         el.style.left = `${pos.x}px`;
         el.style.top = `${pos.y}px`;
         this.canvas().appendChild(el);
-        this.steps.push({id: id || this.newStepId(), type, name: stepName, x: pos.x, y: pos.y, config: config || null, el});
+        const step: PlacedStep = {id: id || this.newStepId(), type, name: stepName, x: pos.x, y: pos.y, config: config || null, el};
+        if (anchors?.inSide) {
+            step.inSide = anchors.inSide;
+        }
+        if (anchors?.outSides) {
+            step.outSides = anchors.outSides;
+        }
+        this.steps.push(step);
+        this.positionPorts(step);
         this.updateReachability();
         this.syncDirty();
     }
@@ -1446,6 +1593,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'invoke') {
             $top.prop('hidden', false);
             sections.push(this.httpRequestSection($top, $body, $panel[0], step.config || {}, $input, reposition));
+        } else if (step.type === 'sql_query') {
+            $top.prop('hidden', false);
+            sections.push(this.sqlQuerySection($top, $body, $panel[0], step.config || {}, $input));
         } else if (step.type.indexOf('file_') === 0) {
             $top.prop('hidden', false);
             sections.push(this.fileOpSection(step.type, $top, $body, $panel[0], step.config || {}, $input));
@@ -1467,6 +1617,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (step.type === 'entity_change') {
                 sections.push(this.systemEntitySection($body, step.config || {}));
             }
+        }
+        // EVERY trigger carries the flow's enabled switch — the one place the flow is turned
+        // on/off (the old top-bar switch is gone; the server derives flows.enabled from this).
+        if (this.stepMeta[step.type].category === 'trigger') {
+            sections.push(this.triggerEnabledSection($body, step.config || {}));
         }
         $columns.append($body, $side);
         $panel.append($top, $columns, $error);
@@ -1567,6 +1722,31 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     private settingsLabel(key: string): any {
         return $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __(`aaxis.ontology.flow_editor.${key}`)});
+    }
+
+    /**
+     * The trigger's Enabled switch — the flow's ONE on/off control (the server derives
+     * flows.enabled from it; a missing/unconfigured trigger reads as disabled). Defaults ON for a
+     * fresh trigger so configuring it is what arms the flow.
+     */
+    private triggerEnabledSection($body: any, initial: Record<string, any>): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        const $check = $('<input/>', {type: 'checkbox'});
+        $check.prop('checked', initial.enabled !== false);
+        const $switch = $('<label/>', {'class': 'aaxis-flow-editor__switch', title: __('aaxis.ontology.flow_editor.trigger_enabled_label')}).append(
+            $check,
+            $('<span/>', {'class': 'aaxis-flow-editor__switch-track'}).append(
+                $('<span/>', {'class': 'aaxis-flow-editor__switch-thumb'})
+            )
+        );
+        $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row aaxis-flow-editor__settings-row--switch'}).append(
+            this.settingsLabel('trigger_enabled_label'),
+            $switch
+        ));
+
+        return {
+            error: () => '',
+            merge: config => ({...config, enabled: $check.is(':checked')})
+        };
     }
 
     /**
@@ -2060,6 +2240,90 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (merged.body !== 'empty') {
                     merged.body_content = bodyContent.value();
                     merged.body_dwl = bodyContent.isDwl();
+                }
+                return merged;
+            },
+            ready: connectorsReady
+        };
+    }
+
+    /**
+     * SQL Query (type `sql_query`): runs SQL against a DATABASE connector, the result under the
+     * destination. Row 1: Name | Connector (database only) | Destination; row 2: the SQL — a DWL
+     * field, so it can be a literal statement or an expression building one; `:name` placeholders
+     * are bound from row 3's Bindings (a context key or DWL expression: an object = one run, an
+     * ARRAY = the query runs once per element).
+     */
+    private sqlQuerySection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+        const $connector = $('<select/>', {'class': 'form-control', disabled: true});
+        $connector.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        const $destination = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 128,
+            value: String(initial.destination || 'payload')
+        });
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.2),
+            this.settingsCol('connector_label', $connector, 1.4),
+            this.settingsCol('destination_label', $destination)
+        ));
+
+        // Database connectors only — this step IS a SQL call.
+        const connectorsReady = this.connectorCatalog()
+            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
+                const current = String(initial.connector || '');
+                $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
+                (data.records || []).filter(c => c.type === 'database').forEach(c => {
+                    $connector.append($('<option/>', {
+                        value: String(c.id),
+                        text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
+                        selected: String(c.id) === current
+                    }));
+                });
+                $connector.prop('disabled', false);
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
+
+        const sql = createDwlField({
+            label: __('aaxis.ontology.flow_editor.sql_label'),
+            value: String(initial.sql || ''),
+            dwl: initial.sql_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea'
+        });
+        $body.append(sql.$el);
+        const binding = createDwlField({
+            label: __('aaxis.ontology.flow_editor.sql_bindings_label'),
+            value: String(initial.binding || ''),
+            dwl: initial.binding_dwl === true,
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+        $body.append(binding.$el);
+        $body.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            text: __('aaxis.ontology.flow_editor.sql_hint')
+        }));
+        panel.classList.add('is-wide');
+
+        return {
+            error: () => {
+                if (String($connector.val() || '') === '') {
+                    return __('aaxis.ontology.flow_editor.reader_connector_required');
+                }
+                if (sql.value().trim() === '') {
+                    return __('aaxis.ontology.flow_editor.sql_required');
+                }
+                return this.destinationError($destination);
+            },
+            merge: config => {
+                const merged: Record<string, any> = {
+                    ...config,
+                    connector: String($connector.val()),
+                    sql: sql.value().trim(),
+                    sql_dwl: sql.isDwl(),
+                    destination: String($destination.val() || '').trim()
+                };
+                if (binding.value().trim() !== '') {
+                    merged.binding = binding.value().trim();
+                    merged.binding_dwl = binding.isDwl();
                 }
                 return merged;
             },
@@ -2594,10 +2858,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 this.syncDirty();
                 return;
             }
-            // Dropped where it already pointed → keep the line exactly as it was. `linkTargetError`
-            // would otherwise call the target "already used" — by this very link.
+            // Dropped where it already pointed → the line stays, but the RELEASE POINT may move
+            // the target's flow-in anchor: dropping the arrow head on another side of the same
+            // tile is the drag way of choosing where lines arrive.
             if (over && over.id === editing.to) {
                 this.links.push(editing);
+                this.dropAnchor(over, 'in', e);
                 this.redrawLinks();
                 return;
             }
@@ -2620,6 +2886,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (!over) {
             return;
         }
+        // Released on its OWN tile: not a link — the gesture moves this port's flow-out anchor
+        // (flow-true/flow-false on a choice) to the side nearest the release point.
+        if (over === from) {
+            this.dropAnchor(from, fromPort, e);
+            return;
+        }
         const error = this.linkTargetError(from, over);
         if (error === null) {
             return;
@@ -2634,6 +2906,31 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.links.push({from: from.id, fromPort, to: over.id});
         this.redrawLinks();
         this.syncDirty();
+    }
+
+    /** The tile side nearest to a viewport point — how a dropped line end picks its new anchor. */
+    private nearestSide(step: PlacedStep, clientX: number, clientY: number): AnchorSide {
+        const rect = step.el.getBoundingClientRect();
+        const distances: Array<[AnchorSide, number]> = [
+            ['north', Math.abs(clientY - rect.top)],
+            ['south', Math.abs(rect.bottom - clientY)],
+            ['west', Math.abs(clientX - rect.left)],
+            ['east', Math.abs(rect.right - clientX)]
+        ];
+        distances.sort((a, b) => a[1] - b[1]);
+        return distances[0][0];
+    }
+
+    /**
+     * Re-anchors one side choice from a drag gesture: applies the side nearest the release point
+     * when it is free and different — a side another anchor holds just leaves things as they are.
+     */
+    private dropAnchor(step: PlacedStep, kind: 'in' | number, e: PointerEvent): void {
+        const side = this.nearestSide(step, e.clientX, e.clientY);
+        const current = kind === 'in' ? this.inSideOf(step) : this.outSideOf(step, kind);
+        if (side !== current && !this.usedAnchorSides(step, kind).has(side)) {
+            this.setAnchorSide(step, kind, side);
+        }
     }
 
     /** The placed step whose tile contains the given viewport point, if any. */
@@ -2755,23 +3052,55 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /** Shared context-menu shell: `populate` adds the items, the shell handles placement/closing. */
-    private showMenuAt(e: PointerEvent, populate: (addItem: (label: string, icon: string, action: () => void) => void) => void): void {
+    private showMenuAt(e: PointerEvent, populate: (addItem: (label: string, icon: string, action: () => void, opts?: {disabled?: boolean; active?: boolean}) => void, addSubmenu?: (label: string, icon: string, children: Array<{label: string; icon: string; action: () => void; disabled?: boolean; active?: boolean}>) => void) => void): void {
         this.closeContextMenu();
         const menu = document.createElement('div');
         menu.className = 'aaxis-flow-editor__menu';
-        const addItem = (label: string, icon: string, action: () => void): void => {
+        const buildItem = (label: string, icon: string, action: () => void, opts?: {disabled?: boolean; active?: boolean}): HTMLButtonElement => {
             const item = document.createElement('button');
             item.type = 'button';
-            item.className = 'aaxis-flow-editor__menu-item';
+            item.className = 'aaxis-flow-editor__menu-item'
+                + (opts?.disabled ? ' aaxis-flow-editor__menu-item--disabled' : '')
+                + (opts?.active ? ' aaxis-flow-editor__menu-item--active' : '');
             item.innerHTML = `<span class="fa ${icon}" aria-hidden="true"></span>`;
             item.appendChild(document.createTextNode(label));
-            item.addEventListener('click', () => {
-                this.closeContextMenu();
-                action();
-            });
-            menu.appendChild(item);
+            if (opts?.disabled) {
+                item.disabled = true;
+            } else {
+                item.addEventListener('click', () => {
+                    this.closeContextMenu();
+                    action();
+                });
+            }
+            return item;
         };
-        populate(addItem);
+        const addItem = (label: string, icon: string, action: () => void, opts?: {disabled?: boolean; active?: boolean}): void => {
+            menu.appendChild(buildItem(label, icon, action, opts));
+        };
+        // A nested submenu revealed on HOVER (pure CSS): the parent row carries a ▸ marker and the
+        // child list opens flush to its right edge.
+        const addSubmenu = (label: string, icon: string, children: Array<{label: string; icon: string; action: () => void; disabled?: boolean; active?: boolean}>): void => {
+            const wrap = document.createElement('div');
+            wrap.className = 'aaxis-flow-editor__menu-sub';
+            const parent = document.createElement('button');
+            parent.type = 'button';
+            parent.className = 'aaxis-flow-editor__menu-item aaxis-flow-editor__menu-item--parent';
+            parent.innerHTML = `<span class="fa ${icon}" aria-hidden="true"></span>`;
+            parent.appendChild(document.createTextNode(label));
+            const caret = document.createElement('span');
+            caret.className = 'fa fa-caret-right aaxis-flow-editor__menu-caret';
+            caret.setAttribute('aria-hidden', 'true');
+            parent.appendChild(caret);
+            const sub = document.createElement('div');
+            sub.className = 'aaxis-flow-editor__menu aaxis-flow-editor__menu--nested';
+            children.forEach(child => sub.appendChild(
+                buildItem(child.label, child.icon, child.action, {disabled: child.disabled, active: child.active})
+            ));
+            wrap.appendChild(parent);
+            wrap.appendChild(sub);
+            menu.appendChild(wrap);
+        };
+        populate(addItem, addSubmenu);
 
         document.body.appendChild(menu);
         const left = Math.min(e.clientX, window.innerWidth - menu.offsetWidth - 8);
@@ -2789,7 +3118,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         const ordered = this.orderedSelection();
 
-        this.showMenuAt(e, addItem => {
+        this.showMenuAt(e, (addItem, addSubmenu) => {
             addItem(__('aaxis.ontology.flow_editor.menu_remove'), 'fa-trash-o', () => this.removeSelection());
             if (ordered.length > 1) {
                 addItem(__('aaxis.ontology.flow_editor.menu_align'), 'fa-arrows-h', () => this.alignSelection());
@@ -2802,7 +3131,38 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 // Sub-flow entry point: only offered while no trigger exists and nothing arrives here.
                 addItem(__('aaxis.ontology.flow_editor.menu_start_here'), 'fa-play', () => this.setStart(step.id));
             }
+            if (ordered.length === 1 && addSubmenu) {
+                // Anchor sides: where flow lines arrive (flow-in) and leave (flow-out; a choice
+                // names its two outputs flow-true/flow-false). Hover reveals the side picker.
+                if (this.stepMeta[step.type].category !== 'trigger') {
+                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_in'), 'fa-sign-in', this.anchorSideChildren(step, 'in'));
+                }
+                if (step.type === 'choice') {
+                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_true'), 'fa-sign-out', this.anchorSideChildren(step, 0));
+                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_false'), 'fa-sign-out', this.anchorSideChildren(step, 1));
+                } else {
+                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_out'), 'fa-sign-out', this.anchorSideChildren(step, 0));
+                }
+            }
         });
+    }
+
+    /**
+     * The side-picker entries for one anchor (flow-in / an output port): the four compass sides,
+     * the CURRENT one checked, sides used by the tile's OTHER anchors disabled — every anchor of
+     * a tile keeps its own side.
+     */
+    private anchorSideChildren(step: PlacedStep, kind: 'in' | number): Array<{label: string; icon: string; action: () => void; disabled?: boolean; active?: boolean}> {
+        const current = kind === 'in' ? this.inSideOf(step) : this.outSideOf(step, kind);
+        const used = this.usedAnchorSides(step, kind);
+        const icons: Record<AnchorSide, string> = {north: 'fa-arrow-up', south: 'fa-arrow-down', west: 'fa-arrow-left', east: 'fa-arrow-right'};
+        return ANCHOR_SIDES.map(side => ({
+            label: __(`aaxis.ontology.flow_editor.side_${side}`),
+            icon: side === current ? 'fa-check' : icons[side],
+            action: () => this.setAnchorSide(step, kind, side),
+            disabled: used.has(side),
+            active: side === current
+        }));
     }
 
     /** Right-click on a flow line: offers to delete that single connection. */
@@ -3049,8 +3409,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * Run Now / Debug availability: hidden without a real trigger (synced in updateReachability),
      * DISABLED while the flow's Enabled switch is off or a debug session is already open.
      */
+    /** The flow's effective enabled state: the trigger step's `enabled` config flag (see server). */
+    private flowEnabled(): boolean {
+        const trigger = this.findTrigger();
+        return Boolean(trigger && trigger.config && trigger.config.enabled === true);
+    }
+
     private syncDebugButtons(): void {
-        const enabled = this.$el.find('[data-role="flow-enabled"]').is(':checked');
+        const enabled = this.flowEnabled();
         // A flow with red (incomplete/invalid) steps cannot run — the server enforces the same
         // gate on every entry point, this just keeps the buttons honest.
         const invalid = this.steps.some(s => s.invalid === true);
@@ -3393,12 +3759,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
     // --- Persistence -----------------------------------------------------------
 
     private save(): void {
-        const name = String(this.$el.find('[data-role="flow-name"]').val() || '').trim();
-        if (name === '') {
-            messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.name_required'));
-            return;
-        }
-
         const url = this.flow === null
             ? routing.generate('aaxis_ontology_flow_api_create')
             : routing.generate('aaxis_ontology_flow_api_update', {id: this.flow.id});
@@ -3409,8 +3769,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
         $save.prepend($spinner);
         this.apiFetch(url, this.flow === null ? 'POST' : 'PUT', {
-            name,
-            enabled: this.$el.find('[data-role="flow-enabled"]').is(':checked'),
             steps: this.steps.map(s => ({type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null})),
             design: this.currentDesign()
         }).then(res => {
