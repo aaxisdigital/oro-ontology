@@ -1186,6 +1186,79 @@
     // background (VB6-style form grid; spacing via the --aaxis-flow-grid custom property set by
     // the component) and is sized by the component to the content extent, so anything placed
     // beyond the visible area brings up scrollbars instead of being clipped away.
+    // The tab bar between the topbar and the canvas: one tab per open flow (title = trigger
+    // name, dot = unsaved, x = close) + the two icon-only ACTION tabs (open / add).
+    &__tabs {
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+        padding: 6px 12px 0;
+        border-bottom: 1px solid #d6dde4;
+        background: #f0f3f6;
+        overflow-x: auto;
+    }
+
+    &__tab {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        max-width: 240px;
+        padding: 7px 10px 6px 12px;
+        border: 1px solid #d6dde4;
+        border-bottom: 0;
+        border-radius: 6px 6px 0 0;
+        background: #e4e9ee;
+        color: #5c6b7a;
+        font-size: 12.5px;
+        cursor: pointer;
+        white-space: nowrap;
+
+        &.is-active {
+            background: #fff;
+            color: #1b3a5b;
+            font-weight: font-weight('bold');
+            // Sits on the border so the active tab fuses with the canvas area below.
+            margin-bottom: -1px;
+            padding-bottom: 7px;
+        }
+
+        &:hover:not(.is-active) {
+            background: #eef1f4;
+        }
+    }
+
+    &__tab-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    &__tab-dirty {
+        color: #b45309;
+        font-size: 16px;
+        line-height: 0;
+    }
+
+    &__tab-close {
+        padding: 2px;
+        color: #8a98a6;
+        font-size: 11px;
+
+        &:hover {
+            color: #c0392b;
+        }
+    }
+
+    &__tab--action {
+        padding: 7px 10px;
+        color: #2b6cb0;
+
+        &:hover {
+            background: #eef1f4;
+            color: #1b3a5b;
+        }
+    }
+
     &__canvas-wrap {
         position: relative;
         display: flex;
@@ -1905,6 +1978,60 @@
         gap: 8px;
     }
 
+    // Searchable combobox (Call Subflow): a text filter over a dropdown of options.
+    &__combo {
+        position: relative;
+    }
+
+    &__combo-list {
+        position: absolute;
+        z-index: 30;
+        top: calc(100% + 2px);
+        left: 0;
+        right: 0;
+        max-height: 220px;
+        overflow-y: auto;
+        background: #fff;
+        border: 1px solid #d6dde4;
+        border-radius: 6px;
+        box-shadow: 0 8px 24px rgba(17, 24, 33, 0.18);
+
+        &[hidden] {
+            display: none;
+        }
+    }
+
+    &__combo-option {
+        display: block;
+        width: 100%;
+        padding: 8px 12px;
+        border: 0;
+        background: transparent;
+        text-align: left;
+        font-size: 13px;
+        color: #2b3a4a;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+
+        &:hover {
+            background: #f0f6ff;
+        }
+
+        &.is-selected {
+            font-weight: font-weight('bold');
+            color: #1b3a5b;
+        }
+    }
+
+    &__combo-empty {
+        padding: 8px 12px;
+        color: #8a98a6;
+        font-size: 12.5px;
+        font-style: italic;
+    }
+
     // A label + switch pair on one line (the trigger's Enabled flag).
     &__settings-row--switch {
         align-items: center;
@@ -1996,5 +2123,55 @@
         justify-content: flex-end;
         gap: 8px;
         padding: 10px 16px 14px;
+    }
+}
+
+// The "open a flow in a new tab" picker (flow editor tab bar).
+.aaxis-flow-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 50vh;
+    overflow-y: auto;
+
+    &__row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 12px;
+        border: 1px solid #e4e9ee;
+        border-radius: 6px;
+        background: #fff;
+        text-align: left;
+        cursor: pointer;
+
+        &:hover {
+            background: #f0f6ff;
+            border-color: #2b6cb0;
+        }
+    }
+
+    &__name {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: font-weight('bold');
+        color: #1b3a5b;
+    }
+
+    &__badge {
+        flex: 0 0 auto;
+        padding: 1px 8px;
+        border-radius: 10px;
+        background: #eaf1f8;
+        color: #2b6cb0;
+        font-size: 11px;
+
+        &--off {
+            background: #fdecea;
+            color: #c0392b;
+        }
     }
 }

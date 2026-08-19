@@ -83,11 +83,26 @@ class FlowStepValidator
      */
     public function structuralErrors(array $steps): array
     {
+        $errors = [];
         $stepNames = array_map(static fn (array $s) => mb_strtolower((string) $s['name']), $steps);
+        if (\count($stepNames) !== \count(array_unique($stepNames))) {
+            $errors[] = $this->trans('step_names_unique');
+        }
+        // The trigger IS the flow's identity (name + enabled) — a definition without one is not
+        // storable, importable or runnable. (The two step-less NATIVE flows never pass through
+        // here: they are read-only.)
+        $hasTrigger = false;
+        foreach ($steps as $step) {
+            if (\in_array($step['type'] ?? null, OntologyFlow::TRIGGER_STEP_TYPES, true)) {
+                $hasTrigger = true;
+                break;
+            }
+        }
+        if (!$hasTrigger) {
+            $errors[] = $this->trans('trigger_required');
+        }
 
-        return \count($stepNames) !== \count(array_unique($stepNames))
-            ? [$this->trans('step_names_unique')]
-            : [];
+        return $errors;
     }
 
     /**
@@ -202,6 +217,11 @@ class FlowStepValidator
         // The DWL on/off toggles (body_dwl / content_dwl) are lenient when absent, bool when set.
         $boolOk = static fn (string $key): bool => !isset($config[$key]) || \is_bool($config[$key]);
 
+        // A trigger holding ONLY its enabled flag counts as "not configured yet" (the editor seeds
+        // {enabled: true} the moment a trigger is dropped, so the flow starts armed without the
+        // fresh tile turning red for the fields the user has not filled in yet).
+        $onlyEnabled = static fn (): bool => array_diff_key($config, ['enabled' => 0]) === [];
+
         // "flowUuid" is reserved (every execution seeds its uuid into the context under it) and so
         // is "choiceResults" (choice steps record their branch verdicts there); the legacy
         // "flow-uuid" spelling stays rejected too.
@@ -246,13 +266,13 @@ class FlowStepValidator
         return match ($step['type']) {
             // Schedule: interval (value + unit) or cron (expression; also the LEGACY shape, which
             // carries no mode). Expression syntax is checked separately with Cron\CronExpression.
-            'cron' => $boolOk('enabled') && match ($config['mode'] ?? 'cron') {
+            'cron' => $boolOk('enabled') && ($onlyEnabled() || match ($config['mode'] ?? 'cron') {
                 'interval' => \is_int($config['value'] ?? null) && $config['value'] >= 1
                     && \in_array($config['unit'] ?? null, ['minute', 'hour', 'day', 'week', 'month', 'year'], true),
                 'cron' => $filled('expression'),
                 default => false,
-            },
-            'entity_change' => $filled('system') && $filled('entity') && $boolOk('enabled'),
+            }),
+            'entity_change' => $boolOk('enabled') && ($onlyEnabled() || ($filled('system') && $filled('entity'))),
             // The remaining triggers carry only the enabled flag (bool when set; a missing flag
             // reads as DISABLED at evaluation, not as invalid — old flows stay green).
             'endpoint', 'subflow' => $boolOk('enabled'),
@@ -268,6 +288,9 @@ class FlowStepValidator
             'file_read', 'file_list', 'file_delete' => $destinationOk() && $fileOpOk(),
             'file_write' => $destinationOk() && $fileOpOk() && $filled('content') && $boolOk('content_dwl'),
             'file_rename' => $destinationOk() && $fileOpOk() && $filled('new_name') && $boolOk('new_name_dwl'),
+            // "Call Subflow": which subflow to invoke (existence/type/enabled are RUNTIME checks —
+            // this validator stays DB-free).
+            'sub_flow' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== '',
             // "SQL Query": a database connector, the (DWL-capable) SQL, optional bindings.
             'sql_query' => $destinationOk()
                 && is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''

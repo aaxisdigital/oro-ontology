@@ -204,6 +204,17 @@ interface FlowRecord {
     type: string;
     steps: FlowStep[] | null;
     design: any;
+    invalidSteps?: string[];
+}
+
+/** One open editor tab: a flow (or a new one) plus its stashed working state while inactive. */
+interface EditorTab {
+    flow: FlowRecord | null;
+    /** The canvas state captured when the tab was last active; null = never activated/stashed. */
+    design: any | null;
+    /** The dirty-tracking baseline captured on stash; null = fresh (baseline set on activation). */
+    savedState: string | null;
+    invalidNames: string[];
 }
 
 /** Bump when the persisted design shape changes — older designs then load as "corrupted". */
@@ -298,6 +309,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private savedState!: string;
 
     private panelDrag!: {pointerId: number; dx: number; dy: number} | null;
+    private tabs!: EditorTab[];
+    private activeTab!: number;
     /**
      * Toolbox → canvas drag. `el` is null until the pointer has actually moved past
      * {@see DRAG_THRESHOLD}: a plain click on a toolbox item must not spawn anything.
@@ -362,6 +375,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      */
     private catalogEntities!: Promise<any> | null;
     private catalogConnectors!: Promise<any> | null;
+    private catalogFlows!: Promise<any> | null;
 
     initialize(options: FlowEditorOptions): void {
         this.$el = options._sourceElement;
@@ -370,6 +384,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.stepMeta = {};
         this.catalogEntities = null;
         this.catalogConnectors = null;
+        this.catalogFlows = null;
         this.steps = [];
         this.links = [];
         this.startId = null;
@@ -427,6 +442,28 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Sync the toggle's active state with however the restore left the toolbox.
         this.setToolboxVisible(!this.toolbox().hidden, false);
         this.markSaved();
+        // The tab bar: the URL's flow is the first tab; more open via the folder/+ action tabs.
+        this.tabs = [{flow: this.flow, design: null, savedState: null, invalidNames: (this.flow as any)?.invalidSteps || []}];
+        this.activeTab = 0;
+        this.renderTabs();
+        this.$el.on('click.aaxisFlowEditor', '[data-role="tab"]', (e: any) => {
+            e.preventDefault();
+            this.switchTab(Number($(e.currentTarget).data('tabIndex')));
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="tab-close"]', (e: any) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.closeTab(Number($(e.currentTarget).closest('[data-role="tab"]').data('tabIndex')));
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="tab-open"]', (e: any) => {
+            e.preventDefault();
+            this.openFlowPicker();
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="tab-add"]', (e: any) => {
+            e.preventDefault();
+            this.tabs.push({flow: null, design: null, savedState: null, invalidNames: []});
+            this.switchTab(this.tabs.length - 1);
+        });
         // Warm the settings catalogs in the background so the first panel opens instantly too.
         this.prefetchCatalogs();
 
@@ -1287,13 +1324,197 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.syncFlowNameDisplay();
     }
 
-    /** The top-bar name is a mirror of the TRIGGER STEP's name (the flow is named by it). */
+    /** The ACTIVE tab mirrors the live canvas (title = trigger name, dirty dot) — re-rendered
+     * through syncDirty so renames/edits show up as they happen. */
     private syncFlowNameDisplay(): void {
-        const trigger = this.findTrigger();
-        const name = (trigger && trigger.name)
-            || (this.flow && this.flow.name)
-            || __('aaxis.ontology.flow_editor.name_unset');
-        this.$el.find('[data-role="flow-name-display"]').text(name);
+        this.renderTabs();
+    }
+
+    /** The title a tab shows: the trigger step's name — live for the active tab, stashed else. */
+    private tabTitle(tab: EditorTab, active: boolean): string {
+        if (active) {
+            const trigger = this.findTrigger();
+            return (trigger && trigger.name) || (this.flow && this.flow.name) || __('aaxis.ontology.flow_editor.name_unset');
+        }
+        const steps = (tab.design && tab.design.steps) || (tab.flow && tab.flow.design && tab.flow.design.steps) || [];
+        const trigger = (steps as any[]).find(st => st && this.stepMeta[st.type] && this.stepMeta[st.type].category === 'trigger');
+        return (trigger && trigger.name) || (tab.flow && tab.flow.name) || __('aaxis.ontology.flow_editor.name_unset');
+    }
+
+    /** Whether a STASHED tab holds unsaved changes (the active tab asks the live snapshot). */
+    private tabDirty(tab: EditorTab, active: boolean): boolean {
+        if (active) {
+            return this.snapshot() !== this.savedState;
+        }
+        return tab.design !== null && tab.savedState !== null
+            && JSON.stringify({design: tab.design}) !== tab.savedState;
+    }
+
+    private renderTabs(): void {
+        const $bar = this.$el.find('[data-role="tabs"]');
+        if (!$bar.length || !this.tabs) {
+            return;
+        }
+        $bar.empty();
+        this.tabs.forEach((tab, index) => {
+            const active = index === this.activeTab;
+            const $tab = $('<button/>', {
+                type: 'button',
+                'class': 'aaxis-flow-editor__tab' + (active ? ' is-active' : ''),
+                'data-role': 'tab',
+                'data-tab-index': index
+            });
+            $tab.append($('<span/>', {'class': 'aaxis-flow-editor__tab-title', text: this.tabTitle(tab, active)}));
+            if (this.tabDirty(tab, active)) {
+                $tab.append($('<span/>', {'class': 'aaxis-flow-editor__tab-dirty', 'aria-hidden': 'true', text: '•'}));
+            }
+            $tab.append($('<span/>', {
+                'class': 'fa fa-times aaxis-flow-editor__tab-close', 'data-role': 'tab-close',
+                title: __('aaxis.ontology.flow_editor.tab_close'), 'aria-label': __('aaxis.ontology.flow_editor.tab_close')
+            }));
+            $bar.append($tab);
+        });
+        // The two ACTION tabs: open an existing flow in a new tab / start a new one.
+        $bar.append($('<button/>', {
+            type: 'button', 'class': 'aaxis-flow-editor__tab aaxis-flow-editor__tab--action', 'data-role': 'tab-open',
+            title: __('aaxis.ontology.flow_editor.tab_open'), 'aria-label': __('aaxis.ontology.flow_editor.tab_open')
+        }).append($('<span/>', {'class': 'fa fa-folder-open-o', 'aria-hidden': 'true'})));
+        $bar.append($('<button/>', {
+            type: 'button', 'class': 'aaxis-flow-editor__tab aaxis-flow-editor__tab--action', 'data-role': 'tab-add',
+            title: __('aaxis.ontology.flow_editor.tab_add'), 'aria-label': __('aaxis.ontology.flow_editor.tab_add')
+        }).append($('<span/>', {'class': 'fa fa-plus', 'aria-hidden': 'true'})));
+    }
+
+    /** Captures the live canvas into the active tab (before switching away). */
+    private stashActiveTab(): void {
+        const tab = this.tabs[this.activeTab];
+        if (!tab) {
+            return;
+        }
+        tab.flow = this.flow;
+        tab.design = this.currentDesign();
+        tab.savedState = this.savedState;
+        tab.invalidNames = this.steps.filter(s => s.invalid === true).map(s => s.name);
+    }
+
+    /** Clears the canvas completely (steps, links, marks, session) for the next tab's content. */
+    private resetCanvas(): void {
+        this.closeDebugSession();
+        this.clearSelection();
+        this.closeContextMenu();
+        this.steps.forEach(s => s.el.remove());
+        this.steps = [];
+        this.links = [];
+        this.startId = null;
+        this.redrawLinks();
+    }
+
+    private switchTab(index: number): void {
+        if (index === this.activeTab || !this.tabs[index]) {
+            return;
+        }
+        this.stashActiveTab();
+        this.activeTab = index;
+        this.loadTab(this.tabs[index]);
+    }
+
+    private loadTab(tab: EditorTab): void {
+        this.resetCanvas();
+        this.flow = tab.flow;
+        if (tab.design !== null) {
+            // The tab was active before — its working state continues exactly where it was.
+            this.restoreFromDesign(tab.design);
+        } else {
+            this.restore();
+        }
+        this.applyInvalidStepNames(tab.invalidNames);
+        // A fresh baseline for a never-stashed tab; a stashed one keeps its dirty state.
+        if (tab.savedState !== null) {
+            this.savedState = tab.savedState;
+        } else {
+            this.markSaved();
+        }
+        // The URL follows the active tab, so refresh/bookmark lands on what is on screen.
+        window.history.replaceState(null, '', this.flow && this.flow.id
+            ? routing.generate('aaxis_ontology_flow_editor', {id: this.flow.id})
+            : routing.generate('aaxis_ontology_flow_editor'));
+        this.syncDirty();
+    }
+
+    /** Closes a tab (confirming when it holds unsaved changes); the editor always keeps one. */
+    private closeTab(index: number): void {
+        const tab = this.tabs[index];
+        if (!tab) {
+            return;
+        }
+        const dirty = this.tabDirty(tab, index === this.activeTab);
+        const doClose = (): void => {
+            this.tabs.splice(index, 1);
+            if (this.tabs.length === 0) {
+                this.tabs.push({flow: null, design: null, savedState: null, invalidNames: []});
+            }
+            if (index === this.activeTab) {
+                this.activeTab = Math.max(0, index - 1);
+                this.loadTab(this.tabs[this.activeTab]);
+            } else {
+                if (index < this.activeTab) {
+                    this.activeTab--;
+                }
+                this.renderTabs();
+            }
+        };
+        if (dirty) {
+            this.confirmDialog(
+                __('aaxis.ontology.flow_editor.tab_close_title'),
+                __('aaxis.ontology.flow_editor.tab_close_question'),
+                __('aaxis.ontology.flow_editor.tab_close_confirm'),
+                doClose
+            );
+        } else {
+            doClose();
+        }
+    }
+
+    /** The "open" action tab: pick any existing (non-native) flow and open it in a NEW tab. */
+    private openFlowPicker(): void {
+        const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.tab_open'), width: '560px'});
+        const $content = dialog.open();
+        const $list = $('<div/>', {'class': 'aaxis-flow-picker'});
+        $content.append($list);
+        $list.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.loading')}));
+        fetch(routing.generate('aaxis_ontology_flow_list'), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .then((data: {records?: FlowRecord[]}) => {
+                $list.empty();
+                const rows = (data.records || []).filter(f => f.type !== 'native');
+                if (!rows.length) {
+                    $list.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.tab_open_empty')}));
+                    return;
+                }
+                rows.forEach(flow => {
+                    const $row = $('<button/>', {type: 'button', 'class': 'aaxis-flow-picker__row'});
+                    $row.append($('<span/>', {'class': 'aaxis-flow-picker__name', text: flow.name || ''}));
+                    $row.append($('<span/>', {'class': 'aaxis-flow-picker__badge', text: flow.type}));
+                    if (!flow.enabled) {
+                        $row.append($('<span/>', {'class': 'aaxis-flow-picker__badge aaxis-flow-picker__badge--off', text: __('aaxis.ontology.flow_editor.tab_open_disabled')}));
+                    }
+                    $row.on('click', () => {
+                        dialog.close();
+                        const already = this.tabs.findIndex(t => t.flow !== null && t.flow.id === flow.id);
+                        if (already >= 0) {
+                            this.switchTab(already);
+                            return;
+                        }
+                        this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
+                        this.switchTab(this.tabs.length - 1);
+                    });
+                    $list.append($row);
+                });
+            })
+            .catch(() => {
+                $list.empty();
+                messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error'));
+            });
     }
 
     /** The full canvas state persisted alongside the logical steps. */
@@ -1524,6 +1745,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     private addStep(type: string, x: number, y: number, name?: string, id?: string, config?: Record<string, any> | null, anchors?: {inSide?: AnchorSide; outSides?: AnchorSide[]}): void {
         const stepName = (name || '').trim() || this.defaultName(type);
+        // A trigger IS the flow's enabled switch — a fresh one arms the flow right away (the old
+        // top-bar switch defaulted ON too); without this, a just-dropped trigger reads as
+        // disabled until the user happens to open its properties once.
+        if (!config && this.stepMeta[type].category === 'trigger') {
+            config = {enabled: true};
+        }
         const pos = this.place(x, y);
         const el = this.buildTile(type, stepName);
         el.style.left = `${pos.x}px`;
@@ -1596,6 +1823,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'sql_query') {
             $top.prop('hidden', false);
             sections.push(this.sqlQuerySection($top, $body, $panel[0], step.config || {}, $input));
+        } else if (step.type === 'sub_flow') {
+            $top.prop('hidden', false);
+            sections.push(this.subFlowSection($top, step.config || {}, $input));
         } else if (step.type.indexOf('file_') === 0) {
             $top.prop('hidden', false);
             sections.push(this.fileOpSection(step.type, $top, $body, $panel[0], step.config || {}, $input));
@@ -2328,6 +2558,95 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 return merged;
             },
             ready: connectorsReady
+        };
+    }
+
+    /**
+     * Call Subflow (type `sub_flow`): just the Name and WHICH subflow to invoke — a searchable
+     * combobox (name-ordered; typing filters until an item is picked; the current flow itself is
+     * never offered). The config stores the subflow's id, so renames don't break the call.
+     */
+    private subFlowSection($top: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+        let selectedId: string = initial.subflow ? String(initial.subflow) : '';
+        let options: Array<{id: number; name: string}> = [];
+
+        const $combo = $('<div/>', {'class': 'aaxis-flow-editor__combo'});
+        const $filter = $('<input/>', {
+            type: 'text', 'class': 'form-control', autocomplete: 'off', spellcheck: false,
+            placeholder: __('aaxis.ontology.flow_editor.subflow_placeholder'), disabled: true
+        });
+        const $list = $('<div/>', {'class': 'aaxis-flow-editor__combo-list', hidden: true});
+        $combo.append($filter, $list);
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.1),
+            this.settingsCol('subflow_label', $combo, 1.4)
+        ));
+
+        const renderList = (): void => {
+            const query = String($filter.val() || '').trim().toLowerCase();
+            $list.empty();
+            const matches = options.filter(o => query === '' || o.name.toLowerCase().indexOf(query) >= 0);
+            if (!matches.length) {
+                $list.append($('<div/>', {'class': 'aaxis-flow-editor__combo-empty', text: __('aaxis.ontology.flow_editor.subflow_none')}));
+            }
+            matches.forEach(o => {
+                const $option = $('<button/>', {
+                    type: 'button',
+                    'class': 'aaxis-flow-editor__combo-option' + (String(o.id) === selectedId ? ' is-selected' : ''),
+                    text: o.name
+                });
+                // pointerdown, not click: the input's blur would hide the list first.
+                $option.on('pointerdown', (e: any) => {
+                    e.preventDefault();
+                    selectedId = String(o.id);
+                    $filter.val(o.name);
+                    $list.prop('hidden', true);
+                });
+                $list.append($option);
+            });
+        };
+
+        $filter.on('focus input', () => {
+            // Typing again REOPENS the choice: nothing counts as selected until an item is picked.
+            if ($filter.is(':focus')) {
+                const typed = String($filter.val() || '');
+                const current = options.find(o => String(o.id) === selectedId);
+                if (!current || current.name !== typed) {
+                    selectedId = '';
+                }
+                renderList();
+                $list.prop('hidden', false);
+            }
+        });
+        $filter.on('blur', () => {
+            window.setTimeout(() => {
+                $list.prop('hidden', true);
+                // Restore the picked name (or clear a half-typed non-selection).
+                const current = options.find(o => String(o.id) === selectedId);
+                $filter.val(current ? current.name : '');
+            }, 120);
+        });
+
+        const ready = this.flowCatalog()
+            .then((data: {records?: Array<{id: number; name: string | null; type: string}>}) => {
+                options = (data.records || [])
+                    .filter(f => f.type === 'subflow' && (!this.flow || f.id !== this.flow.id))
+                    .map(f => ({id: f.id, name: f.name || String(f.id)}))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+                const current = options.find(o => String(o.id) === selectedId);
+                if (current) {
+                    $filter.val(current.name);
+                } else {
+                    selectedId = '';
+                }
+                $filter.prop('disabled', false);
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
+
+        return {
+            error: () => (selectedId === '' ? __('aaxis.ontology.flow_editor.subflow_required') : ''),
+            merge: config => ({...config, subflow: selectedId}),
+            ready
         };
     }
 
@@ -3182,35 +3501,19 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
-     * Aligns the selection on the Y of its first element (the leftmost one) and spreads the tiles
-     * with a constant ONE-tile gap between them, keeping the horizontal sequence.
+     * Aligns the selection FOLLOWING THE FLOW LINES' anchor sides: each linked child is placed one
+     * tile-gap away from its parent ALONG the parent's flow-out direction for that link (east =
+     * to the right, south = below, …), aligned on the perpendicular axis — so a choice with a
+     * green-east/red-south pair lays out as an L, and a fully-default flow reproduces the old
+     * left-to-right row. Chains are walked breadth-first from their heads (heads by X; a pure
+     * cycle enters at its leftmost tile); chain heads and unconnected steps start at the leftmost
+     * selected tile\'s spot, sliding east past occupied cells. A spot already claimed keeps
+     * advancing along the SAME direction until free (walls slide east so the walk always ends).
      */
     private alignSelection(): void {
-        const ordered = this.alignOrderedSelection();
-        if (ordered.length < 2) {
+        if (this.selection.size < 2) {
             return;
         }
-        // The row still starts where the leftmost selected tile sits (its x AND y), whatever
-        // position the ordering gave that tile in the sequence.
-        const anchor = [...ordered].sort((a, b) => a.x - b.x || a.y - b.y)[0];
-        ordered.forEach((step, i) => {
-            const pos = this.place(anchor.x + i * 2 * this.tileSize, anchor.y);
-            step.x = pos.x;
-            step.y = pos.y;
-            step.el.style.left = `${pos.x}px`;
-            step.el.style.top = `${pos.y}px`;
-        });
-        this.redrawLinks();
-        this.syncDirty();
-    }
-
-    /**
-     * Align's ordering: steps already CHAINED by flow lines (links between selected pairs) keep
-     * their flow sequence — chains first, each walked breadth-first from its head (heads by X
-     * position, choice branches by port order) — then every unconnected step follows, by X.
-     * With no links inside the selection this degrades to the plain X ordering.
-     */
-    private alignOrderedSelection(): PlacedStep[] {
         const byId = new Map(Array.from(this.selection).map(s => [s.id, s]));
         const inner = this.links.filter(l => byId.has(l.from) && byId.has(l.to));
         const linked = new Set<string>();
@@ -3226,38 +3529,72 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         const hasIncoming = new Set(inner.map(l => l.to));
         const byPosition = (a: PlacedStep, b: PlacedStep): number => a.x - b.x || a.y - b.y;
+        const anchor = Array.from(this.selection).sort(byPosition)[0];
+        const anchorPos = this.place(anchor.x, anchor.y);
 
-        const ordered: PlacedStep[] = [];
+        const stepGap = 2 * this.tileSize; // one tile + one tile-wide gap
+        const occupied = new Set<string>();
+        /** Claims the first FREE snapped spot from (x, y) advancing along (dx, dy). */
+        const claim = (step: PlacedStep, x: number, y: number, dx: number, dy: number): void => {
+            let pos = this.place(x, y);
+            let guard = 0;
+            while (occupied.has(`${pos.x},${pos.y}`) && guard++ < 128) {
+                const next = this.place(pos.x + dx * stepGap, pos.y + dy * stepGap);
+                if (next.x === pos.x && next.y === pos.y) {
+                    // Clamped into a wall (west/north at the canvas edge): switch PERMANENTLY to
+                    // east scanning — flipping back would ping-pong against the wall forever and
+                    // exhaust the guard on an occupied cell.
+                    dx = 1;
+                    dy = 0;
+                    pos = this.place(pos.x + stepGap, pos.y);
+                } else {
+                    pos = next;
+                }
+            }
+            occupied.add(`${pos.x},${pos.y}`);
+            step.x = pos.x;
+            step.y = pos.y;
+            step.el.style.left = `${pos.x}px`;
+            step.el.style.top = `${pos.y}px`;
+        };
+
         const visited = new Set<string>();
-        const walk = (id: string): void => {
-            visited.add(id);
-            const queue = [id];
+        const walkFrom = (head: PlacedStep): void => {
+            visited.add(head.id);
+            claim(head, anchorPos.x, anchorPos.y, 1, 0);
+            const queue: PlacedStep[] = [head];
             while (queue.length > 0) {
-                const current = queue.shift() as string;
-                ordered.push(byId.get(current) as PlacedStep);
-                (outgoing.get(current) || []).forEach(l => {
-                    if (!visited.has(l.to)) {
-                        visited.add(l.to);
-                        queue.push(l.to);
+                const parent = queue.shift() as PlacedStep;
+                for (const link of outgoing.get(parent.id) || []) {
+                    if (visited.has(link.to)) {
+                        continue;
                     }
-                });
+                    visited.add(link.to);
+                    const child = byId.get(link.to) as PlacedStep;
+                    // The child sits along the parent\'s flow-out direction for THIS link.
+                    const v = SIDE_VECTOR[this.outSideOf(parent, link.fromPort)];
+                    claim(child, parent.x + v.dx * stepGap, parent.y + v.dy * stepGap, v.dx, v.dy);
+                    queue.push(child);
+                }
             }
         };
+
         // Chain heads: linked steps with no incoming selected link, leftmost chain first.
         Array.from(this.selection).filter(s => linked.has(s.id) && !hasIncoming.has(s.id))
-            .sort(byPosition).forEach(s => walk(s.id));
+            .sort(byPosition).forEach(s => walkFrom(s));
         // A pure cycle has no head — enter it at its leftmost tile so nothing is dropped.
         Array.from(this.selection).filter(s => linked.has(s.id) && !visited.has(s.id))
             .sort(byPosition).forEach(s => {
                 if (!visited.has(s.id)) {
-                    walk(s.id);
+                    walkFrom(s);
                 }
             });
-        // Then everything without a selected connection, by X position.
+        // Then everything without a selected connection — each takes the next free east slot.
         Array.from(this.selection).filter(s => !linked.has(s.id)).sort(byPosition)
-            .forEach(s => ordered.push(s));
+            .forEach(s => claim(s, anchorPos.x, anchorPos.y, 1, 0));
 
-        return ordered;
+        this.redrawLinks();
+        this.syncDirty();
     }
 
     /** Chains the selection in its horizontal sequence: first → second → … → last. */
@@ -3759,6 +4096,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
     // --- Persistence -----------------------------------------------------------
 
     private save(): void {
+        // The trigger IS the flow's identity (name + enabled) — nothing to save without one.
+        if (!this.findTrigger()) {
+            messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.trigger_required'));
+            return;
+        }
         const url = this.flow === null
             ? routing.generate('aaxis_ontology_flow_api_create')
             : routing.generate('aaxis_ontology_flow_api_update', {id: this.flow.id});
@@ -3777,6 +4119,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
             const created = this.flow === null;
             this.flow = res.data.flow as FlowRecord;
+            if (this.tabs[this.activeTab]) {
+                this.tabs[this.activeTab].flow = this.flow; // the tab now points at the saved flow
+            }
             this.applyInvalidStepNames((res.data.flow && res.data.flow.invalidSteps) || []);
             if (created && this.flow && this.flow.id) {
                 // Refreshing after the first save must reopen THIS flow, not a fresh editor.
@@ -3831,6 +4176,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
             });
 
         return this.catalogConnectors;
+    }
+
+    /** Flows for the Call Subflow picker. Same caching contract as the other catalogs. */
+    private flowCatalog(): Promise<any> {
+        this.catalogFlows ??= fetch(routing.generate('aaxis_ontology_flow_list'), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .catch((err: any) => {
+                this.catalogFlows = null;
+                throw err;
+            });
+
+        return this.catalogFlows;
     }
 
     /**

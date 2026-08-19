@@ -54,6 +54,9 @@ class FlowDebugExecutor
     /** @var array<int, string> step ids the LAST run executed successfully, in order */
     private array $lastExecutedIds = [];
 
+    /** @var array<int, int> flow ids currently on the CALL SUBFLOW stack (cycle/depth guard) */
+    private array $subflowStack = [];
+
     private const int TIMEOUT = 30;
 
     public function __construct(
@@ -98,7 +101,7 @@ class FlowDebugExecutor
      *
      * @throws \RuntimeException with a user-readable message when a step cannot execute
      */
-    public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null): array
+    public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null, ?array $seedContext = null): array
     {
         $this->assertRunnable($steps);
         $order = $this->executionOrder($steps, $links);
@@ -110,7 +113,9 @@ class FlowDebugExecutor
         // Minted only for a top-level run: a sub-flow inherits its caller's uuid via the param.
         $executionUuid ??= $this->dataApi->generateUuid();
 
-        $context = $this->initialContext($order[0], $input, $executionUuid);
+        // A CALL SUBFLOW run seeds the CALLER's context — the subflow reads and extends it, and
+        // the caller continues with the result (shared-context semantics).
+        $context = $seedContext ?? $this->initialContext($order[0], $input, $executionUuid);
         $this->lastExecutedIds = [];
         try {
             // The order is re-derived after every choice: its verdict (just recorded in the
@@ -390,7 +395,7 @@ class FlowDebugExecutor
         $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
         if (!\in_array(
             $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query'], $fileOps),
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow'], $fileOps),
             true
         )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
@@ -400,6 +405,15 @@ class FlowDebugExecutor
         if (!\is_array($config)) {
             throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
         }
+
+        // Call Subflow has no destination of its own: the subflow runs over the caller's context
+        // and whatever it wrote there is what the next main-flow element sees.
+        if ($step['type'] === 'sub_flow') {
+            $context = $this->callSubflow($step['name'], $config, $context, $executionUuid);
+
+            return;
+        }
+
         $destination = trim((string) ($config['destination'] ?? ''));
         if ($destination === '') {
             throw new \RuntimeException(sprintf('Step "%s" has no destination.', $step['name']));
@@ -660,6 +674,72 @@ class FlowDebugExecutor
         }
 
         return $context[$contentSource];
+    }
+
+    /**
+     * The "Call Subflow" step: runs the invoked subflow's WHOLE graph (from its Subflow trigger,
+     * breadth-first, choices and all) over the CALLER's context, then hands the resulting context
+     * back so the main flow continues at its next element. The callee inherits the caller's
+     * flowUuid (its writers group under the same run identity) and stamps its own
+     * last_executed/last_finished. FAILS when the target is missing, is not a subflow, has no
+     * design, is DISABLED, or would recurse (a flow already on the call stack / depth > 10).
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array<string, mixed> the context after the subflow ran
+     */
+    private function callSubflow(string $stepName, array $config, array $context, string $executionUuid): array
+    {
+        $id = (int) ($config['subflow'] ?? 0);
+        /** @var OntologyFlow|null $target */
+        $target = $id > 0 ? $this->doctrine->getRepository(OntologyFlow::class)->find($id) : null;
+        if ($target === null) {
+            throw new \RuntimeException(sprintf('Step "%s": the configured subflow no longer exists.', $stepName));
+        }
+        if ($target->getType() !== OntologyFlow::TYPE_SUBFLOW) {
+            throw new \RuntimeException(sprintf(
+                'Step "%s": "%s" is not a subflow (its trigger makes it a regular flow).',
+                $stepName,
+                (string) $target->getName()
+            ));
+        }
+        if (!$target->isEnabled()) {
+            throw new \RuntimeException(sprintf(
+                'Step "%s": the subflow "%s" is disabled.',
+                $stepName,
+                (string) $target->getName()
+            ));
+        }
+        $design = $target->getDesign();
+        $subSteps = \is_array($design['steps'] ?? null) ? $design['steps'] : null;
+        $subLinks = \is_array($design['links'] ?? null) ? $design['links'] : [];
+        if ($subSteps === null || $subSteps === []) {
+            throw new \RuntimeException(sprintf('Step "%s": the subflow "%s" has no steps.', $stepName, (string) $target->getName()));
+        }
+        if (\in_array($id, $this->subflowStack, true)) {
+            throw new \RuntimeException(sprintf(
+                'Step "%s": circular subflow call — "%s" is already running in this execution.',
+                $stepName,
+                (string) $target->getName()
+            ));
+        }
+        if (\count($this->subflowStack) >= 10) {
+            throw new \RuntimeException(sprintf('Step "%s": subflow calls nested deeper than 10 levels.', $stepName));
+        }
+
+        // The nested run resets the executed-ids trail (its step ids belong to ANOTHER canvas) —
+        // preserve the caller's so the editor keeps painting the right tiles.
+        $outerTrail = $this->lastExecutedIds;
+        $this->subflowStack[] = $id;
+        try {
+            return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context);
+        } catch (\RuntimeException $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+        } finally {
+            array_pop($this->subflowStack);
+            $this->lastExecutedIds = $outerTrail;
+        }
     }
 
     /**

@@ -16,16 +16,7 @@
             <div class="aaxis-flow-editor" data-role="editor">
                 <div class="aaxis-flow-editor__topbar">
                     {# Labels sit ABOVE their controls to keep the left side narrow. #}
-                    <div class="aaxis-flow-editor__name">
-                        <div class="aaxis-flow-editor__field">
-                            <span class="aaxis-flow-editor__field-label">
-                                {{ 'aaxis.ontology.flow_editor.name_label'|trans }}
-                            </span>
-                            {# Read-only: the flow is NAMED BY ITS TRIGGER STEP — rename the trigger
-                               to rename the flow (kept in sync by the component). #}
-                            <div class="aaxis-flow-editor__name-display" data-role="flow-name-display"></div>
-                        </div>
-                    </div>
+                    {# The flow's name lives on its TRIGGER STEP and shows as the TAB title below. #}
                     {# Every button: icon + a text span that a <1200px viewport hides (icon-only mode). #}
                     <div class="aaxis-flow-editor__controls">
                         <button type="button" class="btn" data-role="toolbox-toggle"
@@ -72,6 +63,10 @@
                    scroll). The toolbox floats OUTSIDE the scroller so it stays viewport-pinned.
                    The debugger sidebar (left of the design area) is filled and shown by the
                    component while a Debug / Run Now session is active. #}
+                {# One tab per open flow (title = trigger name, • = unsaved, × = close) plus the
+                   two ACTION tabs: open an existing flow / start a new one. #}
+                <div class="aaxis-flow-editor__tabs" data-role="tabs"></div>
+
                 <div class="aaxis-flow-editor__canvas-wrap">
                     <aside class="aaxis-flow-editor__debugger" data-role="debugger" hidden></aside>
                     <div class="aaxis-flow-editor__canvas" data-role="canvas-viewport">

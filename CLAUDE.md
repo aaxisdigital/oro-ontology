@@ -423,8 +423,12 @@ fataled with "Call to undefined method deleteEntity()". It shows the flow name (
 whose spacing comes from `aaxis_ontology.flow_editor_grid_spacing` (System Configuration →
 Aaxis Ontology → Flows, default 10px, exposed to CSS as the `--aaxis-flow-grid` custom property).
 **ENABLED moved onto the TRIGGER**: there is no top-bar enabled switch anymore — every trigger's
-properties popup carries an Enabled switch (`triggerEnabledSection`, config key `enabled`,
-defaults ON for a fresh trigger), and `flows.enabled` is DERIVED on every save
+properties popup carries an Enabled switch (`triggerEnabledSection`, config key `enabled`), a
+freshly DROPPED trigger is SEEDED with `{enabled: true}` right in `addStep()` — without the seed
+a new flow read as disabled until the user happened to open the trigger's properties once — and
+the validator treats an enabled-only config as "not configured yet" (`$onlyEnabled`), so the
+fresh tile stays green while cron/entity_change wait for their real fields. `flows.enabled` is
+DERIVED on every save
 (`OntologyFlow::computeEnabled()`: true only when a trigger exists AND carries `enabled: true` —
 a missing/unconfigured trigger or a missing flag reads as DISABLED, so a broken entry point never
 runs; the column stays synced for the grid and the scheduler's plain WHERE). The client mirror is
@@ -446,9 +450,18 @@ top-left now — tiles may grow the plane). The toolbox lives in `__canvas-wrap`
 scroller, so it stays viewport-pinned; its drag/clamp math uses the viewport. The editor fills
 the page via `fitEditorHeight()` (measured top → viewport bottom, refreshed on window resize —
 the CSS `min-height` calc is only a fallback; the resize handler also re-clamps the toolbox).
-Topbar: the flow NAME on the left is a READ-ONLY mirror of the TRIGGER STEP's name
-(`syncFlowNameDisplay`, "unnamed — add a trigger" until one exists): the flow is NAMED BY ITS
-TRIGGER — rename the trigger to rename the flow. The save payload carries no name; the server
+**TABS**: the editor is multi-flow — one CANVAS, one tab per open flow (`EditorTab[]`: the
+active tab mirrors the live canvas; switching STASHES the working state — `currentDesign()` +
+dirty baseline + red-mark names — and restores the target's, reusing the design
+serialize/restore machinery; the URL replaceState-follows the active tab). Tab title = the
+TRIGGER STEP's name ("unnamed — add a trigger" until one exists — the flow is NAMED BY ITS
+TRIGGER; there is no top-bar name display anymore), a • marks unsaved changes, × closes (confirm
+when dirty; the editor always keeps at least one tab). Two ICON ACTION tabs sit at the end:
+folder = open any existing non-native flow in a NEW tab (picker over `aaxis_ontology_flow_list`;
+an already-open flow just focuses its tab), + = a new empty flow tab. Switching tabs closes any
+debug session. A TRIGGER IS REQUIRED TO SAVE (`structuralErrors`: `trigger_required` — blocks
+save, import and the run gate alike; client pre-checks with a flash; the step-less NATIVE flows
+never pass through save). The save payload carries no name; the server
 derives it (`deriveFlowName()`: trigger step name → stored name → generated `new_flow_<hex>`),
 re-checking uniqueness against the derived value, and `FlowPortability::import()` derives it the
 same way (document name only as the legacy triggerless fallback, re-checked for collisions).
@@ -594,6 +607,27 @@ rows as a list of objects, plain DML yields `{affected: n}`. Binding values must
 (typed PDO binds); a missing key or a SQL failure aborts the step naming it. Validator arm:
 connector + `sql` (+ `sql_dwl`/`binding`/`binding_dwl` shapes), both texts DWL-syntax-checked when
 their toggle is on.
+**sub_flow** ("Call Subflow", `subFlowSection`) invokes another flow of TYPE `subflow` inline:
+settings are just `Name | Subflow` — the Subflow picker is a SEARCHABLE combobox
+(`.aaxis-flow-editor__combo`: a text input filtering a dropdown of every `type === 'subflow'`
+flow except the one being edited, alphabetized, fed by `flowCatalog()` — a cached
+`aaxis_ontology_flow_list` fetch mirroring `connectorCatalog()`'s contract; options select on
+POINTERDOWN because blur hides the list before click would land; typing clears the selection
+until an option is picked, blur restores the picked name). Config stores `{subflow: <flow id>}`;
+validator arm only checks the key is a non-empty scalar (existence/type/enabled are RUNTIME
+checks — the target can change after save). Executor: `callSubflow()` loads the target and FAILS
+the run when it is missing ("no longer exists"), not TYPE_SUBFLOW, DISABLED (the flow-level
+derived flag, i.e. its `subflow` trigger's enabled switch — a disabled subflow is a FAILED
+execution by requirement), or has no design steps; then re-enters `execute()` with the target's
+design.steps/links, the SAME executionUuid and the CALLER'S CONTEXT as `$seedContext`
+(`execute()`'s optional 5th param — seed wins over `initialContext()`), so subflow steps read
+payload/vars the caller built and everything they write flows back (the arm ASSIGNS the returned
+context, then the main flow continues at the next link). Guards: `$subflowStack` (flow ids)
+rejects CIRCULAR call chains and caps nesting DEPTH at 10; `lastExecutedIds` is saved/restored
+around the nested run (finally) so the caller's debug trail keeps CALLER step ids only, and
+nested failures are re-wrapped `Step "<caller step>": <inner message>`. The nested run's inner
+trigger step is a no-op (triggers are skipped as entry markers), and `touchLastExecuted/`
+`touchLastFinished` stamp the SUBFLOW row too (it ran).
 Every visibility
 toggle calls `reposition()` and the panel is viewport-capped (`max-height` + scrolling middle) so
 Cancel/Confirm always stay reachable. The modal blocks Confirm on missing
@@ -619,10 +653,14 @@ rubber-bands a multi-selection (macOS style, blue ring = selected), any outside 
 dragging a tile that belongs to a multi-selection moves the WHOLE selection (relative offsets
 preserved — the leader is clamped so the entire group stays on the canvas).
 **Right-click** on a tile opens a context menu: Remove (deletes the selection + its links); with a
-multi-selection also Align (one row anchored at the leftmost tile's x/y with exactly one tile
-width of gap; ORDER per `alignOrderedSelection()` — steps chained by flow lines WITHIN the
-selection keep their flow sequence, chains first walked BFS from their heads (heads by X, cycle
-fallback enters at the leftmost), then every unconnected step by X-then-Y — so a link-free
+multi-selection also Align (DIRECTION-AWARE since the anchor-sides feature: each linked child is
+placed one tile-gap from its parent ALONG the parent's flow-out side for that link — east=right,
+south=below, … — so a green-east/red-south choice lays out as an L and all-default flows
+reproduce the old left-to-right row; chains walk BFS from their heads (heads by X, cycle fallback
+enters at the leftmost), heads and unconnected steps start at the leftmost selected tile's spot
+sliding east past occupied cells, and an occupied target keeps advancing along ITS direction —
+`claim()`, which switches PERMANENTLY to east scanning when clamped into a canvas wall, or a
+west/north walk would ping-pong forever and overlap; so a link-free
 selection degrades to the old X ordering) and — only when every element after the first receives
 no line, none after the first is a trigger and none except the last is a Choice — Connect (chains
 the selection in sequence, port 0 re-wired if used). Right-clicking a flow LINE offers Remove for
@@ -943,8 +981,11 @@ KNOWN GAPS (deliberate, surfaced to the user): a referenced entity/system that e
 DISABLED imports clean and 422s on the first run — reporting it needs a warnings channel the
 response shape does not have yet; export does not detect ambiguity in the SOURCE environment
 (connector names are not unique — no unique index on `(system_id, name, type)`); and `sub_flow`
-references nothing today, so the day it gains an id-bearing config key, `rewriteStepList`
-would ship it verbatim — a per-type config-key allowlist would catch that. (`invoke`'s
+NOW carries an id-bearing key — `config.subflow`, the target flow's numeric id — which
+`rewriteStepList` ships VERBATIM: imported into another environment it points at whatever flow
+holds that id THERE (or nothing — runtime "no longer exists" failure, never a wrong-type run
+since `callSubflow` re-checks TYPE_SUBFLOW). Fixing it needs a subflowRef-by-name rewrite like
+the connector one, plus an import order story for flow↔subflow pairs. (`invoke`'s
 `connector` id and entity_read/entity_write's system+entity ARE covered: the connector ⇄
 connectorRef rewrite and the entity manifest match by config KEY, not by step type.)
 

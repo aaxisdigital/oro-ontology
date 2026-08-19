@@ -239,6 +239,7 @@ aaxis:
         flow_manager:
             name_required: 'Please enter a name.'
             name_unique: 'A flow with this name already exists.'
+            trigger_required: 'The flow needs a trigger element (Schedule, Endpoint, Entity change or Subflow) — add one before saving.'
             edit_builtin_forbidden: 'This is a built-in flow and cannot be edited.'
             delete_builtin_forbidden: 'This is a built-in flow and cannot be deleted.'
             step_names_unique: 'Step names must be unique within the flow.'
