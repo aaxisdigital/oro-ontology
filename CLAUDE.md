@@ -545,9 +545,10 @@ subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call S
 `sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop
 (`foreach`, PLACEHOLDER — name-only settings, no-op at runtime) · Operations: DWL transform/Entity
 Read/Entity Write/HTTP Request/SQL Query/Invoke PHP (`invoke_php`, PLACEHOLDER) · File Operations:
-Read File/Write File/List Folder/Delete/Rename · Notification: Logger (`logger`, IMPLEMENTED —
-see the step docs) /Event/Email/MS Teams (`event`/`email`/`ms_teams` — PLACEHOLDERS like foreach:
-toolbox tile + name-only settings, valid with any config, no-op at runtime)) is the step palette — each SECTION collapses via the
+Read File/Write File/List Folder/Delete/Rename · Notification: Logger + MS Teams (`logger`,
+`ms_teams` — IMPLEMENTED, see the step docs) /Event/Email (`event`/`email` — PLACEHOLDERS like
+foreach: toolbox tile + name-only settings, valid with any config, no-op at runtime)) is the step
+palette — each SECTION collapses via the
 +/- at the right of its title (`data-role="toolbox-section-toggle"` → `.is-collapsed` hides the
 items; in-memory only, every load starts expanded). The toolbox's position/visibility are a
 WORKSPACE preference, NOT flow state: saved to localStorage (`aaxis.ontology.flowEditor.toolbox`,
@@ -702,6 +703,16 @@ results go verbatim, everything else JSON-encoded). It logs through its OWN mono
 `%kernel.logs_dir%/%kernel.environment%.log` at info) — NOT '@logger', because Oro's LoggerBundle
 keeps the default handlers at ERROR unless the temporary "detailed logs" level is raised, which
 would silently swallow the lines.
+**ms_teams** ("MS Teams", `msTeamsSection`) posts a message into a Teams chat/channel through a
+Power Automate webhook: settings `Name | Message variable` + the Webhook URL (a PLAIN textarea,
+not DWL — validator arm: `message` filled + a `filter_var`-valid URL starting https://, domain
+deliberately NOT restricted to powerplatform.com). Executor arm (`msTeamsNotify`, no destination —
+before the destination gate): reads the NAMED context variable (undefined = step failure),
+stringifies non-strings (scalars via var_export, structures as pretty JSON) and POSTs the stock
+Teams-workflow envelope — `{type: message, attachments: [adaptive card]}` with one wrapped
+TextBlock — the shape the standard "post a card when a webhook request is received" Power
+Automate template consumes (it answers 202 on accept); HTTP >= 400 or a transport error fails the
+step, and the flow continues past it on success.
 **sub_flow** ("Call Subflow", `subFlowSection`) invokes another flow of TYPE `subflow` inline:
 settings are just `Name | Subflow` — the Subflow picker is a SEARCHABLE combobox
 (`.aaxis-flow-editor__combo`: a text input filtering a dropdown of every `type === 'subflow'`

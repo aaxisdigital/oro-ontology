@@ -242,7 +242,7 @@ const ENDPOINT_RESPONSE_EXAMPLE = '{\n    statusCode: 200,\n    body: payload\n}
  * placeholder types are valid empty and start clean.
  */
 const REQUIRES_CONFIG = new Set([
-    'choice', 'sub_flow', 'logger',
+    'choice', 'sub_flow', 'logger', 'ms_teams',
     'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query',
     'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'
 ]);
@@ -1904,6 +1904,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'logger') {
             $top.prop('hidden', false);
             sections.push(this.loggerSection($top, $body, $panel[0], step.config || {}, $input));
+        } else if (step.type === 'ms_teams') {
+            $top.prop('hidden', false);
+            sections.push(this.msTeamsSection($top, $body, step.config || {}, $input));
         } else if (step.type === 'cron') {
             // Schedule owns the first row too (Enabled | Name | Mode).
             $top.prop('hidden', false);
@@ -2070,6 +2073,63 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * currently editing (updates as the input/caret changes). Legacy configs ({expression} only)
      * open in Cron mode.
      */
+    /**
+     * MS Teams notification — Name | Message variable on the first row, the Power Automate
+     * webhook URL (plain text, NOT DWL) below: the step sends the named context variable's value
+     * as a Teams Adaptive Card message (stringified when not a string). Only well-formed
+     * https:// URLs are accepted (any domain).
+     */
+    private msTeamsSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        // The context variable whose value becomes the message (stringified when not a string).
+        const $message = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 128, placeholder: 'payload'});
+        $message.val(String(initial.message || ''));
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.4),
+            this.settingsCol('msteams_message_label', $message)
+        ));
+
+        const $webhook = $('<textarea/>', {
+            'class': 'form-control aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact',
+            rows: 3, spellcheck: false,
+            placeholder: 'https://…powerplatform.com/…/invoke?…'
+        });
+        $webhook.val(String(initial.webhook || ''));
+        $body.append(
+            this.settingsLabel('msteams_webhook_label'),
+            $webhook
+        );
+        $body.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            html: __('aaxis.ontology.flow_editor.msteams_hint')
+        }));
+
+        const httpsOk = (value: string): boolean => {
+            try {
+                return new URL(value).protocol === 'https:';
+            } catch {
+                return false;
+            }
+        };
+
+        return {
+            error: () => {
+                if (String($message.val() || '').trim() === '') {
+                    return __('aaxis.ontology.flow_editor.msteams_message_required');
+                }
+                const webhook = String($webhook.val() || '').trim();
+                if (webhook === '') {
+                    return __('aaxis.ontology.flow_editor.msteams_webhook_required');
+                }
+                return httpsOk(webhook) ? '' : __('aaxis.ontology.flow_editor.msteams_webhook_invalid');
+            },
+            merge: config => ({
+                ...config,
+                message: String($message.val() || '').trim(),
+                webhook: String($webhook.val() || '').trim()
+            })
+        };
+    }
+
     /**
      * Endpoint trigger: Enabled | Name | Public on the first row, Method | Path on the second,
      * and the optional Response binding (always-DWL) on the third. The path is matched under

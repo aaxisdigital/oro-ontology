@@ -419,7 +419,7 @@ class FlowDebugExecutor
         $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
         if (!\in_array(
             $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'logger'], $fileOps),
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'logger', 'ms_teams'], $fileOps),
             true
         )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
@@ -459,6 +459,14 @@ class FlowDebugExecutor
                     : (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             }
             $this->logger->info(sprintf('[Aaxis Flow - %s] %s', $flow?->getName() ?? 'unsaved', $text));
+
+            return;
+        }
+
+        // MS Teams has no destination either: it fires the configured Power Automate webhook
+        // with the current payload as a Teams message and the flow simply continues.
+        if ($step['type'] === 'ms_teams') {
+            $this->msTeamsNotify($step['name'], $config, $context);
 
             return;
         }
@@ -678,6 +686,62 @@ class FlowDebugExecutor
      *
      * @param array<string, mixed> $context
      */
+    /**
+     * "MS Teams" notification: POSTs the standard Teams-workflow envelope (an Adaptive Card with
+     * one wrapped TextBlock) to the step's Power Automate webhook — the shape the stock
+     * "post a card to a chat or channel when a webhook request is received" template consumes.
+     * The message text comes from the CONFIGURED context variable (`config.message`): strings go
+     * verbatim, any other value is stringified (scalars via cast, structures as pretty JSON); an
+     * undefined variable fails the step. Power Automate answers 202 when the automation starts;
+     * any HTTP >= 400 or transport error fails the step too.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     */
+    private function msTeamsNotify(string $stepName, array $config, array $context): void
+    {
+        $webhook = trim((string) ($config['webhook'] ?? ''));
+        $variable = trim((string) ($config['message'] ?? ''));
+        if ($webhook === '' || $variable === '' || !str_starts_with(strtolower($webhook), 'https://')) {
+            throw new \RuntimeException(sprintf('Step "%s" is not configured.', $stepName));
+        }
+        if (!\array_key_exists($variable, $context)) {
+            throw new \RuntimeException(sprintf('Step "%s": the variable "%s" is not defined.', $stepName, $variable));
+        }
+        $value = $context[$variable];
+        $text = match (true) {
+            \is_string($value) => $value,
+            $value === null => 'null',
+            \is_scalar($value) => var_export($value, true),
+            default => (string) json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        };
+
+        try {
+            $response = $this->httpClient->request('POST', $webhook, [
+                'json' => [
+                    'type' => 'message',
+                    'attachments' => [[
+                        'contentType' => 'application/vnd.microsoft.card.adaptive',
+                        'content' => [
+                            '$schema' => 'http://adaptivecards.io/schemas/adaptive-card.json',
+                            'type' => 'AdaptiveCard',
+                            'version' => '1.4',
+                            'body' => [['type' => 'TextBlock', 'text' => $text, 'wrap' => true]],
+                        ],
+                    ]],
+                ],
+                'timeout' => self::TIMEOUT,
+            ]);
+            $status = $response->getStatusCode();
+            $response->getContent(false);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+        }
+        if ($status >= 400) {
+            throw new \RuntimeException(sprintf('Step "%s": the webhook responded HTTP %d.', $stepName, $status));
+        }
+    }
+
     private function resolveDwlText(string $stepName, string $what, string $raw, bool $isDwl, array $context): string
     {
         if (!$isDwl) {

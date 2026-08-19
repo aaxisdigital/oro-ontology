@@ -314,6 +314,13 @@ class FlowStepValidator
             'sub_flow' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== '',
             // "Logger": the message text (DWL-capable via its toggle).
             'logger' => $filled('message') && $boolOk('message_dwl'),
+            // "MS Teams": the context variable holding the message (stringified at run time)
+            // plus the Power Automate webhook — a well-formed HTTPS URL (plain text, not DWL;
+            // the domain is deliberately NOT restricted to powerplatform.com).
+            'ms_teams' => $filled('message')
+                && \is_string($config['webhook'] ?? null)
+                && filter_var(trim($config['webhook']), FILTER_VALIDATE_URL) !== false
+                && str_starts_with(strtolower(trim($config['webhook'])), 'https://'),
             // "SQL Query": a database connector, the (DWL-capable) SQL, optional bindings.
             'sql_query' => $destinationOk()
                 && is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
