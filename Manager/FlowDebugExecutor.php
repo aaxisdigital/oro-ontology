@@ -69,6 +69,7 @@ class FlowDebugExecutor
         private readonly FlowStepValidator $stepValidator,
         private readonly DatabaseQueryRunner $database,
         private readonly LoggerInterface $logger,
+        private readonly PhpMethodInvoker $phpInvoker,
     ) {
     }
 
@@ -419,7 +420,7 @@ class FlowDebugExecutor
         $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
         if (!\in_array(
             $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'logger', 'ms_teams'], $fileOps),
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'logger', 'ms_teams', 'invoke_php'], $fileOps),
             true
         )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
@@ -478,6 +479,14 @@ class FlowDebugExecutor
 
         if (\in_array($step['type'], $fileOps, true)) {
             $context[$destination] = $this->fileOperation($step['type'], $step['name'], $config, $context);
+
+            return;
+        }
+
+        // "Invoke PHP": one public method of an app-namespace service, parameters bound by name
+        // from the step's DWL object, return value under the destination (see PhpMethodInvoker).
+        if ($step['type'] === 'invoke_php') {
+            $context[$destination] = $this->phpInvoker->invoke($step['name'], $config, $context);
 
             return;
         }

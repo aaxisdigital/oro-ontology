@@ -544,7 +544,8 @@ hides it). The draggable toolbox
 subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call Subflow" action
 `sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop
 (`foreach`, PLACEHOLDER — name-only settings, no-op at runtime) · Operations: DWL transform/Entity
-Read/Entity Write/HTTP Request/SQL Query/Invoke PHP (`invoke_php`, PLACEHOLDER) · File Operations:
+Read/Entity Write/HTTP Request/SQL Query/Invoke PHP (`invoke_php`, IMPLEMENTED — see the step
+docs) · File Operations:
 Read File/Write File/List Folder/Delete/Rename · Notification: Logger + MS Teams (`logger`,
 `ms_teams` — IMPLEMENTED, see the step docs) /Event/Email (`event`/`email` — PLACEHOLDERS like
 foreach: toolbox tile + name-only settings, valid with any config, no-op at runtime)) is the step
@@ -692,6 +693,40 @@ rows as a list of objects, plain DML yields `{affected: n}`. Binding values must
 (typed PDO binds); a missing key or a SQL failure aborts the step naming it. Validator arm:
 connector + `sql` (+ `sql_dwl`/`binding`/`binding_dwl` shapes), both texts DWL-syntax-checked when
 their toggle is on.
+**invoke_php** ("Invoke PHP", `invokePhpSection`) calls ONE public method of an APP-NAMESPACE
+SERVICE: settings `Name | Destination` + `Class | Method` (both `stringCombo` type-aheads — the
+generic string flavor of the subflow picker; methods load after the class is picked and PICKING a
+method pre-fills the Parameters with a template of its REQUIRED parameters, one per-type
+placeholder each — reopening a saved step never overwrites the stored expression) + the always-DWL
+Parameters object. The callable universe is TWO-LAYERED. Compile time
+(`DependencyInjection/Compiler/InvokableServicesPass`, registered in `build()` at
+TYPE_BEFORE_OPTIMIZATION priority -2048 — it must run LAST in its phase because other bundles
+CREATE services in their passes, e.g. Oro's per-scope config managers like `oro_config.global`,
+and collecting earlier reads references to them as dangling): EVERY service with a resolvable,
+existing class goes into a class-name-keyed service locator (~12k classes here; private services
+stay private), skipping dot-ids, abstract/synthetic defs, decorators (their ".inner" is unresolved
+at this point), classes whose autoload fatals (broken vendor inheritance), and definitions with
+dangling required references or AbstractArguments (prune-by-design framework services like
+`translator.logging` / `name_based_uuid.factory` — keeping them alive fails compilation). A
+SECOND pass (`InvokableServicesCleanupPass`, TYPE_AFTER_REMOVING priority -2048, handles the
+locator both as a Reference and INLINED into the invoker's argument) strips entries whose services
+other bundles' passes removed later (feature toggles) — without it the PhpDumper dies on the
+dangling factory. RUNTIME: which of those classes flows may actually call is the System
+Configuration setting `aaxis_ontology.invoke_php_namespaces` (Aaxis Ontology → Flows; textarea,
+one namespace prefix per line, commas ok, leading backslashes normalized; DEFAULT `Aaxis\`) —
+`PhpMethodInvoker::invokableClasses()/isInvokable()` filter `getProvidedServices()` by it, so
+admins expose `Edge\` or one specific Oro bundle WITHOUT a container rebuild. The
+`aaxis_ontology_flow_php_classes` / `_php_methods` endpoints (GET, exposed, flow-view ACL; the
+methods endpoint returns each public method WITH its parameter shapes so the editor builds
+templates without a third request) go through the invoker, so the type-ahead follows the setting
+live.
+`PhpMethodInvoker` binds the DWL object BY NAME with STRICT types (missing required / unknown
+name / wrong type all fail with messages naming the parameter; int passes where float is
+expected, numeric strings do NOT pass as numbers, null only into nullables, class-typed
+parameters are never satisfiable from flow data), invokes on the service instance, wraps any
+thrown exception as a step failure, and normalizes the return value through a JSON round trip
+(objects with private state may come back empty) into the step's destination. Validator arm is
+container-free (class/method/destination filled, params DWL-parse-checked via stepDwlSnippets).
 **logger** ("Logger", `loggerSection`) writes ONE line into the PHP application log: settings are
 `Name` plus the Message — a TOGGLEABLE text/DWL field like a file path (config keys `message` +
 `message_dwl`; DWL-parse-checked via `stepDwlSnippets` only while the toggle is ON — plain mode

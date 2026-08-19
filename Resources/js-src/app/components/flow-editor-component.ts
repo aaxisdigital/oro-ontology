@@ -242,7 +242,7 @@ const ENDPOINT_RESPONSE_EXAMPLE = '{\n    statusCode: 200,\n    body: payload\n}
  * placeholder types are valid empty and start clean.
  */
 const REQUIRES_CONFIG = new Set([
-    'choice', 'sub_flow', 'logger', 'ms_teams',
+    'choice', 'sub_flow', 'logger', 'ms_teams', 'invoke_php',
     'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query',
     'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'
 ]);
@@ -400,6 +400,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private catalogEntities!: Promise<any> | null;
     private catalogConnectors!: Promise<any> | null;
     private catalogFlows!: Promise<any> | null;
+    private catalogPhpClasses!: Promise<any> | null;
+    private phpMethodsCache!: Record<string, Promise<any>>;
 
     initialize(options: FlowEditorOptions): void {
         this.$el = options._sourceElement;
@@ -409,6 +411,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.catalogEntities = null;
         this.catalogConnectors = null;
         this.catalogFlows = null;
+        this.catalogPhpClasses = null;
+        this.phpMethodsCache = {};
         this.steps = [];
         this.links = [];
         this.startId = null;
@@ -1907,6 +1911,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'ms_teams') {
             $top.prop('hidden', false);
             sections.push(this.msTeamsSection($top, $body, step.config || {}, $input));
+        } else if (step.type === 'invoke_php') {
+            $top.prop('hidden', false);
+            sections.push(this.invokePhpSection($top, $body, $panel[0], step.config || {}, $input));
         } else if (step.type === 'cron') {
             // Schedule owns the first row too (Enabled | Name | Mode).
             $top.prop('hidden', false);
@@ -2073,6 +2080,205 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * currently editing (updates as the input/caret changes). Legacy configs ({expression} only)
      * open in Cron mode.
      */
+    /**
+     * A type-ahead combobox over plain string options (the subflow picker's interaction:
+     * pointerdown selection so the input's blur cannot swallow the click, typing reopens the
+     * choice, blur restores the picked value).
+     */
+    private stringCombo(placeholderKey: string, onPick: (value: string) => void): {$combo: any; setOptions: (o: string[]) => void; value: () => string; setValue: (v: string) => void; setEnabled: (on: boolean) => void} {
+        let selected = '';
+        let options: string[] = [];
+        const $combo = $('<div/>', {'class': 'aaxis-flow-editor__combo'});
+        const $filter = $('<input/>', {
+            type: 'text', 'class': 'form-control', autocomplete: 'off', spellcheck: false,
+            placeholder: __('aaxis.ontology.flow_editor.' + placeholderKey), disabled: true
+        });
+        const $list = $('<div/>', {'class': 'aaxis-flow-editor__combo-list', hidden: true});
+        $combo.append($filter, $list);
+
+        const renderList = (): void => {
+            const query = String($filter.val() || '').trim().toLowerCase();
+            $list.empty();
+            const matches = options.filter(o => query === '' || o.toLowerCase().indexOf(query) >= 0);
+            if (!matches.length) {
+                $list.append($('<div/>', {'class': 'aaxis-flow-editor__combo-empty', text: __('aaxis.ontology.flow_editor.combo_no_match')}));
+            }
+            matches.forEach(o => {
+                const $option = $('<button/>', {
+                    type: 'button',
+                    'class': 'aaxis-flow-editor__combo-option' + (o === selected ? ' is-selected' : ''),
+                    text: o
+                });
+                $option.on('pointerdown', (e: any) => {
+                    e.preventDefault();
+                    selected = o;
+                    $filter.val(o);
+                    $list.prop('hidden', true);
+                    onPick(o);
+                });
+                $list.append($option);
+            });
+        };
+
+        $filter.on('focus input', () => {
+            if ($filter.is(':focus')) {
+                if (String($filter.val() || '') !== selected) {
+                    selected = '';
+                }
+                renderList();
+                $list.prop('hidden', false);
+            }
+        });
+        $filter.on('blur', () => {
+            window.setTimeout(() => {
+                $list.prop('hidden', true);
+                $filter.val(selected);
+            }, 120);
+        });
+
+        return {
+            $combo,
+            setOptions: o => {
+                options = o;
+            },
+            value: () => selected,
+            setValue: v => {
+                selected = v;
+                $filter.val(v);
+            },
+            setEnabled: on => {
+                $filter.prop('disabled', !on);
+            }
+        };
+    }
+
+    /**
+     * Invoke PHP — Name | Destination, then Class | Method (both type-ahead comboboxes: classes
+     * are the app-namespace services collected by InvokableServicesPass, methods load after the
+     * class is picked), then the always-DWL Parameters object. Picking a method PRE-FILLS the
+     * parameters with a template of its REQUIRED parameters (one placeholder per declared type);
+     * reopening a saved step keeps the stored expression untouched.
+     */
+    private invokePhpSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+        const $destination = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 128,
+            value: String(initial.destination || 'payload')
+        });
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.2),
+            this.settingsCol('destination_label', $destination)
+        ));
+
+        let methodsByName: Record<string, {name: string; params: Array<{name: string; type: string; required: boolean}>}> = {};
+
+        const params = createDwlField({
+            label: __('aaxis.ontology.flow_editor.invoke_php_params_label'),
+            value: String(initial.params || ''),
+            dwl: true,
+            fixed: true, // the parameters object IS DWL — no pure-text mode
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+
+        // Picking a method replaces the parameters with its REQUIRED-parameters template.
+        const applyTemplate = (methodName: string): void => {
+            const spec = methodsByName[methodName];
+            if (!spec) {
+                return;
+            }
+            const placeholder = (type: string): string => {
+                const base = type.replace(/^\?/, '');
+                if (base === 'int') {
+                    return '0';
+                }
+                if (base === 'float') {
+                    return '0.0';
+                }
+                if (base === 'string') {
+                    return "''";
+                }
+                if (base === 'bool') {
+                    return 'false';
+                }
+                if (base === 'array' || base === 'iterable') {
+                    return '[]';
+                }
+                return 'null';
+            };
+            const required = spec.params.filter(p => p.required);
+            params.$textarea.val(required.length
+                ? '{\n' + required.map(p => `    ${p.name}: ${placeholder(p.type)}`).join(',\n') + '\n}'
+                : '');
+        };
+
+        const methodCombo = this.stringCombo('invoke_php_method_placeholder', m => applyTemplate(m));
+        const loadMethods = (className: string, fromPick: boolean): Promise<void> => this.phpMethods(className)
+            .then(methods => {
+                methodsByName = {};
+                methods.forEach(m => {
+                    methodsByName[m.name] = m;
+                });
+                methodCombo.setOptions(methods.map(m => m.name));
+                methodCombo.setEnabled(true);
+                if (fromPick) {
+                    // A new class invalidates the previous method choice and its template.
+                    methodCombo.setValue('');
+                    params.$textarea.val('');
+                }
+            });
+        const classCombo = this.stringCombo('invoke_php_class_placeholder', c => {
+            void loadMethods(c, true);
+        });
+
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('invoke_php_class_label', classCombo.$combo, 1.5),
+            this.settingsCol('invoke_php_method_label', methodCombo.$combo)
+        ));
+
+        $body.append(params.$el);
+        $body.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            html: __('aaxis.ontology.flow_editor.invoke_php_hint')
+        }));
+        panel.classList.add('is-wide');
+
+        const ready = this.phpClasses().then(classes => {
+            classCombo.setOptions(classes);
+            classCombo.setEnabled(true);
+            if (initial.class) {
+                classCombo.setValue(String(initial.class));
+                return loadMethods(String(initial.class), false).then(() => {
+                    if (initial.method) {
+                        methodCombo.setValue(String(initial.method));
+                    }
+                });
+            }
+            return undefined;
+        });
+
+        return {
+            error: () => {
+                if (String($destination.val() || '').trim() === '') {
+                    return __('aaxis.ontology.flow_editor.destination_required');
+                }
+                if (classCombo.value() === '') {
+                    return __('aaxis.ontology.flow_editor.invoke_php_class_required');
+                }
+                if (methodCombo.value() === '') {
+                    return __('aaxis.ontology.flow_editor.invoke_php_method_required');
+                }
+                return '';
+            },
+            merge: config => ({
+                ...config,
+                destination: String($destination.val() || '').trim(),
+                class: classCombo.value(),
+                method: methodCombo.value(),
+                params: params.value().trim()
+            }),
+            ready
+        };
+    }
+
     /**
      * MS Teams notification — Name | Message variable on the first row, the Power Automate
      * webhook URL (plain text, NOT DWL) below: the step sends the named context variable's value
@@ -4517,6 +4723,35 @@ class OntologyFlowEditorComponent extends BaseComponent {
             });
 
         return this.catalogFlows;
+    }
+
+    /** The "Invoke PHP" class type-ahead: every app-namespace service class (cached). */
+    private phpClasses(): Promise<string[]> {
+        this.catalogPhpClasses ??= fetch(routing.generate('aaxis_ontology_flow_php_classes'), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .then((data: {classes?: string[]}) => data.classes || [])
+            .catch((err: any) => {
+                this.catalogPhpClasses = null;
+                throw err;
+            });
+
+        return this.catalogPhpClasses;
+    }
+
+    /** One class's public methods + parameter shapes (cached per class). */
+    private phpMethods(className: string): Promise<Array<{name: string; params: Array<{name: string; type: string; required: boolean}>}>> {
+        this.phpMethodsCache[className] ??= fetch(
+            routing.generate('aaxis_ontology_flow_php_methods') + '?class=' + encodeURIComponent(className),
+            {credentials: 'same-origin'}
+        )
+            .then(r => r.json())
+            .then((data: {methods?: any[]}) => data.methods || [])
+            .catch((err: any) => {
+                delete this.phpMethodsCache[className];
+                throw err;
+            });
+
+        return this.phpMethodsCache[className];
     }
 
     /**

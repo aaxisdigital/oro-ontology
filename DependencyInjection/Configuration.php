@@ -27,6 +27,10 @@ class Configuration implements ConfigurationInterface
             'flow_editor_grid_spacing' => ['type' => 'integer', 'value' => 10],
             // Flow editor: step tile size, as a multiple of the dot spacing (tile = factor × spacing px).
             'flow_editor_step_size_factor' => ['type' => 'integer', 'value' => 8],
+            // "Invoke PHP" flow step: namespace prefixes whose container services may be called
+            // (one per line). The compile-time locator holds EVERY service; this runtime filter
+            // decides what flows may actually reach.
+            'invoke_php_namespaces' => ['type' => 'string', 'value' => 'Aaxis\\'],
 
             // Data HTTP API (read / upsert / query). Disabled by default — opt-in per environment.
             'api_read_enabled' => ['type' => 'boolean', 'value' => false],

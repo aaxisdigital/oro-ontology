@@ -69,6 +69,18 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator'
             - '@Aaxis\Bundle\OntologyBundle\Manager\DatabaseQueryRunner'
             - '@aaxis_ontology.flow_logger'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker'
+
+    # The "Invoke PHP" step's engine. The first argument is a placeholder: InvokableServicesPass
+    # replaces it with a class-keyed service locator over EVERY container service; the System
+    # Configuration setting aaxis_ontology.invoke_php_namespaces decides at runtime which of
+    # those classes flows may actually call.
+    Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker:
+        public: true
+        arguments:
+            - ~
+            - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
+            - '@oro_config.global'
 
     # The rules a flow's steps must clear to be stored — shared by the editor's save endpoint and
     # the importer, so an imported flow is exactly as valid as a hand-built one.

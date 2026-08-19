@@ -11,6 +11,7 @@ use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowPortability;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator;
+use Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Psr\Cache\CacheItemPoolInterface;
@@ -93,6 +94,49 @@ class OntologyFlowController extends AbstractOntologyController
         return new JsonResponse([
             'records' => array_map($this->serialize(...), $flows),
         ]);
+    }
+
+    /** The "Invoke PHP" step's class type-ahead: every app-namespace service class. */
+    #[Route(path: '/flows/api/php-classes', name: 'aaxis_ontology_flow_php_classes', options: ['expose' => true], methods: ['GET'])]
+    #[AclAncestor('aaxis_ontology_flow_view')]
+    public function phpClassesAction(): JsonResponse
+    {
+        return new JsonResponse(['classes' => $this->container->get(PhpMethodInvoker::class)->invokableClasses()]);
+    }
+
+    /**
+     * The "Invoke PHP" step's method type-ahead: the PUBLIC methods of one invokable class, each
+     * with its parameter shapes so the editor can pre-fill the DWL parameters template
+     * client-side (no third round trip).
+     */
+    #[Route(path: '/flows/api/php-methods', name: 'aaxis_ontology_flow_php_methods', options: ['expose' => true], methods: ['GET'])]
+    #[AclAncestor('aaxis_ontology_flow_view')]
+    public function phpMethodsAction(Request $request): JsonResponse
+    {
+        $class = ltrim(trim((string) $request->query->get('class', '')), '\\');
+        if (!$this->container->get(PhpMethodInvoker::class)->isInvokable($class)) {
+            return new JsonResponse(['error' => 'Unknown class.'], 404);
+        }
+
+        $methods = [];
+        foreach ((new \ReflectionClass($class))->getMethods(\ReflectionMethod::IS_PUBLIC) as $method) {
+            if ($method->isAbstract() || $method->isConstructor() || $method->isDestructor()
+                || str_starts_with($method->getName(), '__')
+            ) {
+                continue;
+            }
+            $methods[] = [
+                'name' => $method->getName(),
+                'params' => array_map(static fn (\ReflectionParameter $p): array => [
+                    'name' => $p->getName(),
+                    'type' => $p->getType() instanceof \ReflectionType ? (string) $p->getType() : 'mixed',
+                    'required' => !$p->isDefaultValueAvailable(),
+                ], $method->getParameters()),
+            ];
+        }
+        usort($methods, static fn (array $a, array $b): int => strcmp($a['name'], $b['name']));
+
+        return new JsonResponse(['methods' => $methods]);
     }
 
     #[Route(path: '/flows/api', name: 'aaxis_ontology_flow_api_create', options: ['expose' => true], methods: ['POST'])]
@@ -607,6 +651,7 @@ class OntologyFlowController extends AbstractOntologyController
             FlowDebugExecutor::class,
             FlowPortability::class,
             FlowStepValidator::class,
+            PhpMethodInvoker::class,
             DwlTransformer::class,
             CacheItemPoolInterface::class,
         ]);

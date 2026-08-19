@@ -32,6 +32,9 @@ aaxis:
             enabled:
                 label: Enabled
             flows:
+                invoke_php_namespaces:
+                    label: 'Invoke PHP: allowed class prefixes'
+                    tooltip: 'Namespace prefixes (one per line) whose container services the "Invoke PHP" flow step may call — e.g. Aaxis\ or Edge\ or a specific Oro\Bundle\SomeBundle\ one.'
                 title: 'Flows'
                 editor_grid_spacing:
                     label: 'Editor grid spacing (px)'

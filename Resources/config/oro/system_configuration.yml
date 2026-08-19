@@ -34,6 +34,14 @@ system_configuration:
                 tooltip: aaxis.ontology.config.flows.editor_step_size_factor.tooltip
                 required: false
 
+        aaxis_ontology.invoke_php_namespaces:
+            data_type: string
+            type: Symfony\Component\Form\Extension\Core\Type\TextareaType
+            options:
+                label: aaxis.ontology.config.flows.invoke_php_namespaces.label
+                tooltip: aaxis.ontology.config.flows.invoke_php_namespaces.tooltip
+                required: false
+
         # --- Data HTTP API ---
         aaxis_ontology.api_read_enabled:
             data_type: boolean
@@ -96,6 +104,7 @@ system_configuration:
                                         children:
                                             - aaxis_ontology.flow_editor_grid_spacing
                                             - aaxis_ontology.flow_editor_step_size_factor
+                                            - aaxis_ontology.invoke_php_namespaces
                                     aaxis_ontology_api:
                                         priority: 80
                                         children:

@@ -189,6 +189,10 @@ class FlowStepValidator
         if ($step['type'] === 'choice' && \is_string($config['expression'] ?? null) && trim($config['expression']) !== '') {
             $snippets[] = $config['expression'];
         }
+        // Invoke PHP: the parameters object is ALWAYS a DWL expression.
+        if ($step['type'] === 'invoke_php' && \is_string($config['params'] ?? null) && trim($config['params']) !== '') {
+            $snippets[] = $config['params'];
+        }
         // Endpoint trigger: the optional response binding is ALWAYS a DWL expression.
         if ($step['type'] === 'endpoint' && \is_string($config['response'] ?? null) && trim($config['response']) !== '') {
             $snippets[] = $config['response'];
@@ -312,6 +316,10 @@ class FlowStepValidator
             // "Call Subflow": which subflow to invoke (existence/type/enabled are RUNTIME checks —
             // this validator stays DB-free).
             'sub_flow' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== '',
+            // "Invoke PHP": the service class + method (existence/callability are RUNTIME
+            // checks — this validator stays container-free) and the optional parameters DWL.
+            'invoke_php' => $destinationOk() && $filled('class') && $filled('method')
+                && (!isset($config['params']) || \is_string($config['params'])),
             // "Logger": the message text (DWL-capable via its toggle).
             'logger' => $filled('message') && $boolOk('message_dwl'),
             // "MS Teams": the context variable holding the message (stringified at run time)
