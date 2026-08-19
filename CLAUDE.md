@@ -45,17 +45,58 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 
 OAuth-authenticated REST endpoints over `OntologyData`, addressed by **system name + entity name**.
 **Requests and responses deal in the raw payload only** (no record envelope):
-- `GET  /admin/api/aaxis/ontology/{systemName}/{entityName}/uid/{uniqueId}` — read; returns the
+- `GET  /admin/api/aaxis/ontology/data/{systemName}/{entityName}/uid/{uniqueId}` — read; returns the
   record's **payload object** (`{}` if empty).
-- `POST /admin/api/aaxis/ontology/{systemName}/{entityName}/upsert` — upsert; the **request body is
+- `POST /admin/api/aaxis/ontology/data/{systemName}/{entityName}/upsert` — upsert; the **request body is
   the payload** (a single JSON object = one record, a JSON array = a batch). The unique id of each
   record is **inferred from the payload** via the entity's `unique_attribute` (no id in the URL); the
   API generates the uuid. Validates, then publishes one message to the existing
   `aaxis_ontology_data_upsert` topic (the processor does the real write); returns
   `202 {success, uuid, count}`.
-- `POST /admin/api/aaxis/ontology/{systemName}/{entityName}/query?page=&page_size=` — query;
+- `POST /admin/api/aaxis/ontology/data/{systemName}/{entityName}/query?page=&page_size=` — query;
   body `{filter:[{attribute,compare:EQ|LIKE|<|>,value}], orderBy:"attr ASC|DESC"}`, returns
   `{items, page, page_size}` where **items is a list of payload objects** (default order `id ASC`).
+
+The `/data/` segment was added when the FLOW-ENDPOINT API arrived — the two share the
+`/admin/api/aaxis/ontology/` root: `data/` = the record API above, `flow/` = the Endpoint-trigger
+API below. There is no legacy alias: the old un-segmented data paths 404.
+
+## Flow-endpoint HTTP API — `Api/OntologyFlowApiController` + `Manager/EndpointFlowRunner`
+
+`ANY /admin/api/aaxis/ontology/flow/{path}` (one catch-all route; methods GET/POST/PUT/QUERY/
+PATCH/DELETE = `EndpointFlowRunner::METHODS`) runs the ENABLED flow whose **Endpoint trigger**
+matches the request's method + path. `EndpointFlowRunner` mirrors `ScheduledFlowRunner` (same
+design-rebuild via `parseDesign`, same executor — flowUuid, last_executed, event rows identical);
+candidates come from the denormalized columns (`type=flow AND enabled AND trigger_type=endpoint`).
+Trigger config `{enabled, method, path, public}`; the path is SEGMENT-matched — literal segments
+verbatim, `{param}` matches any one segment and captures it — and when several flows match, MOST
+LITERAL SEGMENTS wins (tie: lowest id), so `orders/latest` beats `orders/{id}`. Stored paths may carry a
+leading "/" (kept as typed — matching and validation trim slashes on both sides). The flow sees the
+request as context variables (seeded by `initialContext`'s endpoint arm): each captured `{param}`
+under its own name, the body as `body` (JSON-decoded when parseable, raw text otherwise, null when
+empty), the query string as `queryParams` (an object, {} when none), the headers as `headers`
+(lowercased; authorization/cookie/php-auth-* STRIPPED so
+credentials never enter contexts or event rows) and — on ANY AUTHENTICATED call, public
+endpoints included — `OAuthApplication`: the NAME of the OAuth application behind the bearer
+token (the OAuth2Token's `client` attribute; null when the caller authenticated another way,
+e.g. a back-office session). Anonymous calls define no such variable. The trigger's optional RESPONSE binding
+(`config.response`, always-DWL, `EndpointFlowRunner::respond()`) is evaluated against the FINAL
+context and must produce `{statusCode, body}` — either element fixed or a variable, e.g.
+`{statusCode: 200, body: payload}` or `{statusCode: code, body: 'the end'}`; statusCode defaults
+to 200 when absent and must be 100–599, body is JSON-encoded as-is, a non-object result or a
+failing expression = `422 flow_failed`. Responses without a binding: `200 {success, flowUuid,
+context}`,
+`404 endpoint_not_found`, `401 unauthenticated`, `403 forbidden` (authenticated but holding
+neither `aaxis_ontology_api_access_flow` nor `aaxis_ontology_api_access_all` — the guard twin of
+the data API's), `422 flow_failed` (+failedStepId). AUTH: the
+bundle's `Resources/config/oro/app.yml` grants the prefix PUBLIC_ACCESS **under the `oro_security`
+scope** (plain `security:` access_control in a bundle app.yml is rejected by OroPlatformExtension;
+the rule lands before the `^/admin` catch-all and Oro prepends the backend prefix) — a bearer
+token still authenticates when present, and the CONTROLLER 401s a non-public trigger without an
+authenticated user. NOTE: Oro's API error renderer WRAPS non-2xx JSON responses under /api in its
+problem format (our JSON body lands in `detail`); status codes stay correct. Controllers under
+`Api/` must be registered in `controllers.yml` (setContainer + service_subscriber tag) and the
+routing resource is the whole `@AaxisOntologyBundle/Api` DIRECTORY.
 
 Key facts:
 - **Reusable core** is `Manager/OntologyDataApiManager` (`read`/`upsert`/`query`) — call it directly
@@ -141,6 +182,8 @@ Key facts:
   `routing.yml` and as a service in `controllers.yml`.
 - **ACLs** (action capabilities, `acls.yml`): `aaxis_ontology_api_access_all` (read+upsert+query) and
   `aaxis_ontology_api_access_read` (read+query). Read/query need either; upsert needs `_all`.
+  The flow-endpoint API adds `aaxis_ontology_api_access_flow`: a NON-PUBLIC Endpoint trigger needs
+  `_flow` OR `_all` (public ones need nothing).
   Administrator gets `_all` via `Migrations/Data/ORM/LoadAaxisOntologyApiAdminPermissions`
   (run `oro:migration:data:load`).
 - **Config** (System Config → Aaxis → General → Aaxis Ontology → Data API; the tree hangs under
@@ -362,6 +405,16 @@ proportions as sftp's auth row) over a 50/50 user/password row. The
 popups use the shared `RecordFormModal` `password` field type (show/hide toggle inside the input),
 `hint` lines, `disabled` fields and number `min`/`max` — documented in `../CommonBundle/CLAUDE.md`.
 
+**"Test" on the VIEW page**: the connector view page's title bar carries a Test button
+(`data-role="connector-test-stored"` in view.html.twig's navButtons) probing the SAVED config via
+`aaxis_ontology_connector_test_stored` (`POST /connectors/test-stored/{id}`, CSRF-protected,
+plain VIEW ACL — no config travels in either direction, so unlike test-config there is nothing to
+probe arbitrarily and no edit grant is needed). `connector-view-test-component.ts` (document-
+delegated click: the button sits OUTSIDE the component element) renders the same overall +
+per-step lines under the Configuration block (`.aaxis-connector-test` in ontology.scss — the
+popup's `.aaxis-rfm__test-*` styles are scoped inside the fixed-overlay modal root and can't be
+reused). Same `ConnectorTester` backend as the popup below.
+
 **"Test" in the popups**: every Configure popup has a widget `testAction` (button on the LEFT of
 Cancel/Submit) that POSTs the CURRENT popup values as `{type, config, id?}` to
 `aaxis_ontology_connector_test` (`/connectors/test-config`, CSRF-protected, view ACL + a manual
@@ -423,11 +476,23 @@ fataled with "Call to undefined method deleteEntity()". It shows the flow name (
 whose spacing comes from `aaxis_ontology.flow_editor_grid_spacing` (System Configuration →
 Aaxis Ontology → Flows, default 10px, exposed to CSS as the `--aaxis-flow-grid` custom property).
 **ENABLED moved onto the TRIGGER**: there is no top-bar enabled switch anymore — every trigger's
-properties popup carries an Enabled switch (`triggerEnabledSection`, config key `enabled`), a
+properties popup LEADS ITS FIRST ROW with the Enabled switch, before the name (`enabledSwitch()`
+returning a settingsCol built on the shared `plainSwitch()` markup — the old body-row
+`triggerEnabledSection` is gone; config key `enabled`). Rows: cron `Enabled | Name | Mode`,
+endpoint `Enabled | Name | Public` + `Method | Path` + the optional always-DWL Response binding,
+entity_change/subflow `Enabled | Name`. A
 freshly DROPPED trigger is SEEDED with `{enabled: true}` right in `addStep()` — without the seed
 a new flow read as disabled until the user happened to open the trigger's properties once — and
 the validator treats an enabled-only config as "not configured yet" (`$onlyEnabled`), so the
-fresh tile stays green while cron/entity_change wait for their real fields. `flows.enabled` is
+fresh tile stays green while cron/entity_change/endpoint wait for their real fields. The Endpoint
+trigger (`endpointSection`) configures `{method: GET|POST|PUT|QUERY|PATCH|DELETE, path, public}` —
+path segments literal or `{param}` (identifier, NOT a reserved context name: body/headers/
+queryParams/OAuthApplication/flowUuid/choiceResults/payload — `FlowStepValidator::endpointPathOk` server-side, mirrored in the
+section's error()); `public` defaults OFF (= requires auth); `response` optional always-DWL
+(parse-checked via stepDwlSnippets), binding {statusCode, body} onto the HTTP answer at run end —
+a fresh endpoint DROP seeds the example shape (`ENDPOINT_RESPONSE_EXAMPLE`), and `$onlyEnabled()`
+ignores BOTH `enabled` and `response` so the seeded tile still counts as "not configured yet".
+See "Flow-endpoint HTTP API". `flows.enabled` is
 DERIVED on every save
 (`OntologyFlow::computeEnabled()`: true only when a trigger exists AND carries `enabled: true` —
 a missing/unconfigured trigger or a missing flag reads as DISABLED, so a broken entry point never
@@ -479,8 +544,10 @@ hides it). The draggable toolbox
 subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call Subflow" action
 `sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop
 (`foreach`, PLACEHOLDER — name-only settings, no-op at runtime) · Operations: DWL transform/Entity
-Read/Entity Write/HTTP Request/SQL Query · File Operations: Read
-File/Write File/List Folder/Delete/Rename) is the step palette — each SECTION collapses via the
+Read/Entity Write/HTTP Request/SQL Query/Invoke PHP (`invoke_php`, PLACEHOLDER) · File Operations:
+Read File/Write File/List Folder/Delete/Rename · Notification: Logger (`logger`, IMPLEMENTED —
+see the step docs) /Event/Email/MS Teams (`event`/`email`/`ms_teams` — PLACEHOLDERS like foreach:
+toolbox tile + name-only settings, valid with any config, no-op at runtime)) is the step palette — each SECTION collapses via the
 +/- at the right of its title (`data-role="toolbox-section-toggle"` → `.is-collapsed` hides the
 items; in-memory only, every load starts expanded). The toolbox's position/visibility are a
 WORKSPACE preference, NOT flow state: saved to localStorage (`aaxis.ontology.flowEditor.toolbox`,
@@ -499,7 +566,24 @@ by a real drag out of the toolbox: `startGhostDrag()` merely arms the gesture an
 is materialised on the first move past `DRAG_THRESHOLD` (5px), so a plain click adds nothing, and
 `dropGhost()` additionally rejects a release still inside the toolbox — it floats **above** the
 canvas, so its bounds would otherwise pass the in-canvas test. Consequence to keep in mind:
-`ghostDrag.el` is nullable while a drag is armed. Each tile shows its
+`ghostDrag.el` is nullable while a drag is armed. Drops land through `addStepFromDrop()`:
+released ONTO an existing tile that still has a FREE flow-out port (first free port; triggers
+never chain — they take no in-line), the new tile becomes that element's NEXT step — placed one
+Align-gap (2×tileSize) along that port's flow-out side (occupied cells advance along the
+direction, wall-clamps switch to east-scan, exactly like Align's `claim()`), linked immediately,
+and its in-anchor faces the parent (opposite of the parent's out side, skipped when that would
+collide with the fresh tile's own default out sides). Fresh drops of types needing configuration
+START RED: the module-level `REQUIRES_CONFIG` set mirrors the server's isStepConfigValid arms
+(triggers + parameterless placeholders excluded) — keep the two in sync when adding step types.
+**Unsaved-changes guards** (ANY open tab dirty, `anyTabDirty()`): `beforeunload` (close /
+reload / external URL — native browser prompt), mediator `openLink:before` (Oro's in-app
+pushState navigation — same hook PageStateView uses for forms) and `page:beforeRefresh`
+(deferred into the refresh queue), plus a `pageStateChecker.registerChecker()` registration so
+grid inline-editing / config-form / hidden-redirect checks see the editor too; all use Oro's
+`oro.ui.leave_page_with_unsaved_data_confirm` message and every hook is removed in dispose().
+The editor's own cancel button (labelled "Discard" while dirty, "Close" when clean) is an
+EXPLICIT discard: it sets `discarding = true` before navigating, which makes `anyTabDirty()`
+answer false so none of the guards fire on that exit. Each tile shows its
 icon with the step **name** centered below (up to two rows, breaking only at word boundaries):
 names default to `<type>-<n>` (first free n) and are unique per flow (client + server enforced).
 ⚠️ **Settings-panel catalogs are cached in memory** (`entityCatalog()` / `connectorCatalog()`, warmed
@@ -607,6 +691,17 @@ rows as a list of objects, plain DML yields `{affected: n}`. Binding values must
 (typed PDO binds); a missing key or a SQL failure aborts the step naming it. Validator arm:
 connector + `sql` (+ `sql_dwl`/`binding`/`binding_dwl` shapes), both texts DWL-syntax-checked when
 their toggle is on.
+**logger** ("Logger", `loggerSection`) writes ONE line into the PHP application log: settings are
+`Name` plus the Message — a TOGGLEABLE text/DWL field like a file path (config keys `message` +
+`message_dwl`; DWL-parse-checked via `stepDwlSnippets` only while the toggle is ON — plain mode
+text may legally look like DWL). Executor arm (no destination — before the destination gate, like
+sub_flow): plain mode logs the text verbatim, DWL mode resolves it against the context; emits
+`[Aaxis Flow - <flow name>] <text>` (a null $flow — unsaved debug — logs as "unsaved"; string
+results go verbatim, everything else JSON-encoded). It logs through its OWN monolog channel
+(`aaxis_ontology.flow_logger`, channel name `aaxis_flow`, a manually-wired StreamHandler on
+`%kernel.logs_dir%/%kernel.environment%.log` at info) — NOT '@logger', because Oro's LoggerBundle
+keeps the default handlers at ERROR unless the temporary "detailed logs" level is raised, which
+would silently swallow the lines.
 **sub_flow** ("Call Subflow", `subFlowSection`) invokes another flow of TYPE `subflow` inline:
 settings are just `Name | Subflow` — the Subflow picker is a SEARCHABLE combobox
 (`.aaxis-flow-editor__combo`: a text input filtering a dropdown of every `type === 'subflow'`
@@ -639,7 +734,11 @@ EXECUTOR enforces the same bar on every entry point (`FlowDebugExecutor::assertR
 execute()/executeFrom() start — UI, scheduler and future triggers all pass through it, throwing
 the first problem BEFORE lastExecuted is stamped). The red set is server-computed
 (`invalidStepNames()`, shipped as `invalidSteps` in the flow serialization — applied at editor
-load and after every save) and locally updated on each popup Confirm.
+load and after every save) and locally updated on each popup Confirm. A NULL (never-confirmed)
+config is NOT a free pass: `isStepConfigValid` swaps it for `[]` and runs the type's arm, so a
+freshly-dropped dwl_transform/choice/file op/… is exactly as red and run-blocking as a
+half-confirmed one (triggers pass via `$onlyEnabled()`, parameterless placeholders via the
+default arm) — the editor pre-marks those drops red client-side via `REQUIRES_CONFIG`.
 **`Manager/FlowStepValidator` owns those step rules**, now split by consumer:
 `structuralErrors()` (duplicate names — the only thing that BLOCKS the editor's `save()`),
 `stepErrors()` (per-step map name → first problem: completeness `isStepConfigValid`, `Cron\\
@@ -673,7 +772,9 @@ over/under a tile and deviates before reaching one. Where a horizontal run of on
 crosses a vertical run of ANOTHER, the horizontal one draws a small semicircular "jump" arc
 (radius ≈ spacing/2, skipped within 2r of corners). Tile drags re-route via a rAF-coalesced
 redraw (`scheduleRedraw`). Only one **trigger** step is allowed — dropping a second one
-asks to replace the existing trigger. **Reachability marking**: tiles not reachable from the
+asks to replace the existing trigger, and the replacement TAKES THE OLD ONE'S PLACE: same spot,
+same out-anchor sides, the old trigger's outgoing links rewritten onto the new step (the drop
+position was only the gesture) — fresh name/config as usual (`{enabled: true}` seed applies). **Reachability marking**: tiles not reachable from the
 trigger via the directed links gray out (`is-unreachable`, BFS in `updateReachability()` — no
 trigger = everything gray), refreshed on every step/link mutation via addStep + redrawLinks.
 **Sub-flow "Start here"**: with no trigger on the canvas, right-clicking an element with no
@@ -955,11 +1056,13 @@ JSON_THROW_ON_ERROR and depth 64 — the client posts the file TEXT and the serv
 malformed file fails the same way as any bad document).
 
 WHY it is not just "dump the jsonb": a flow already names systems/entities rather than pointing at
-ids, but connector steps hold the numeric `config.connector`, which is meaningless elsewhere. Export
-rewrites it to `connectorRef: {name, type, system}` in BOTH `steps` and `design.steps` (each carries
-its own copy of every config) and adds an `entities` manifest with each referenced entity's
-`uniqueAttribute` — the piece step configs do NOT carry, and what requirement (d) checks. Import
-resolves the descriptors back to local ids and drops the refs.
+ids, but connector steps hold the numeric `config.connector` and Call Subflow steps the numeric
+`config.subflow` (the target flow's id) — both meaningless elsewhere. Export rewrites them to
+`connectorRef: {name, type, system}` / `subflowRef: {name}` (flow names are unique, so the name IS
+the identity) in BOTH `steps` and `design.steps` (each carries its own copy of every config) and
+adds an `entities` manifest with each referenced entity's `uniqueAttribute` — the piece step
+configs do NOT carry, and what requirement (d) checks. Import resolves the descriptors back to
+local ids and drops the refs.
 
 Document: `{format: 'aaxis-ontology-flow', version: 1, exportedAt, flow: {name, type, steps, design},
 entities: [{system, entity, uniqueAttribute}]}`. `flow.type` is informational — import always
@@ -971,23 +1074,26 @@ PHP constant mirrors DESIGN_VERSION in flow-editor-component.ts — keep them in
 canvas would still be SCHEDULED and executed, since `ScheduledFlowRunner` reads `design.steps`, while
 the editor calls it corrupted and opens empty = an uneditable running flow); `steps` and
 `design.steps` describing different flows (they drive different consumers); a taken name; a leftover
-RAW `config.connector` id (the exact cross-environment mis-binding this feature exists to prevent);
-a connector ref missing name/type/system (a partial descriptor used to match loosely); an unmatched
-or ambiguous connector; an entity missing here or keyed by a different unique attribute; a malformed
-step element (never silently truncate a flow); and anything `FlowStepValidator` rejects. Imported
-flows are always created **disabled** (requirement e).
+RAW `config.connector` or `config.subflow` id (the exact cross-environment mis-binding this feature
+exists to prevent); a connector ref missing name/type/system (a partial descriptor used to match
+loosely) or a subflowRef without a name; an unmatched or ambiguous connector; a subflowRef whose
+name matches NO flow here (**the referenced subflow must be imported FIRST — callers after their
+subflows**) or matches a flow that is not TYPE_SUBFLOW; an entity missing here or keyed by a
+different unique attribute; a malformed step element (never silently truncate a flow); and anything
+`FlowStepValidator` rejects. Export refuses a `config.subflow` pointing at a missing or wrong-type
+flow (like a missing connector: the flow is already broken). Imported flows are always created
+**disabled** (requirement e).
 
 KNOWN GAPS (deliberate, surfaced to the user): a referenced entity/system that exists here but is
 DISABLED imports clean and 422s on the first run — reporting it needs a warnings channel the
 response shape does not have yet; export does not detect ambiguity in the SOURCE environment
-(connector names are not unique — no unique index on `(system_id, name, type)`); and `sub_flow`
-NOW carries an id-bearing key — `config.subflow`, the target flow's numeric id — which
-`rewriteStepList` ships VERBATIM: imported into another environment it points at whatever flow
-holds that id THERE (or nothing — runtime "no longer exists" failure, never a wrong-type run
-since `callSubflow` re-checks TYPE_SUBFLOW). Fixing it needs a subflowRef-by-name rewrite like
-the connector one, plus an import order story for flow↔subflow pairs. (`invoke`'s
-`connector` id and entity_read/entity_write's system+entity ARE covered: the connector ⇄
-connectorRef rewrite and the entity manifest match by config KEY, not by step type.)
+(connector names are not unique — no unique index on `(system_id, name, type)`); and subflow
+references travel by NAME with no manifest, so a same-named-but-different subflow in the target
+environment binds silently, there is no bulk import (subflows one file at a time, callers after),
+and MUTUALLY-referencing subflows cannot be imported at all (each demands the other pre-exist).
+(`invoke`'s `connector` id, `sub_flow`'s `subflow` id and entity_read/entity_write's system+entity
+ARE covered: the connector ⇄ connectorRef and subflow ⇄ subflowRef rewrites and the entity
+manifest match by config KEY, not by step type.)
 
 ## JS / TypeScript — NEVER hand-edit the compiled `.js`
 

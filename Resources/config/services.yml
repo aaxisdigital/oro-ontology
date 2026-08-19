@@ -44,6 +44,21 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner'
             - '@http_client'
 
+    # The Logger STEP's own monolog channel, wired manually so its lines always reach the
+    # environment's log file: Oro's LoggerBundle keeps the default handlers at ERROR unless the
+    # temporary "detailed logs" level is raised, which would silently swallow flow log lines.
+    aaxis_ontology.flow_logger.handler:
+        class: Monolog\Handler\StreamHandler
+        arguments:
+            - '%kernel.logs_dir%/%kernel.environment%.log'
+            - 'info'
+
+    aaxis_ontology.flow_logger:
+        class: Monolog\Logger
+        arguments:
+            - 'aaxis_flow'
+            - ['@aaxis_ontology.flow_logger.handler']
+
     Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor:
         arguments:
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager'
@@ -53,6 +68,7 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Manager\FileConnectorTransfer'
             - '@Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator'
             - '@Aaxis\Bundle\OntologyBundle\Manager\DatabaseQueryRunner'
+            - '@aaxis_ontology.flow_logger'
 
     # The rules a flow's steps must clear to be stored — shared by the editor's save endpoint and
     # the importer, so an imported flow is exactly as valid as a hand-built one.
@@ -75,6 +91,15 @@ services:
             - '@doctrine'
             - '@Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor'
             - '@logger'
+
+    # Resolves + runs the flow whose Endpoint trigger matches an incoming API request
+    # (the /api/aaxis/ontology/flow/... catch-all in Api/OntologyFlowApiController).
+    Aaxis\Bundle\OntologyBundle\Manager\EndpointFlowRunner:
+        public: true
+        arguments:
+            - '@doctrine'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor'
+            - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
 
     Aaxis\Bundle\OntologyBundle\Command\RunScheduledFlowsCommand:
         arguments:

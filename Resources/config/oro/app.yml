@@ -1,0 +1,8 @@
+# Merged into the application config by OroPlatform (same mechanism IntegrationBundle uses for
+# its public webhook endpoint). The flow-endpoint API prefix must clear the firewall's
+# access_control so PUBLIC triggers work — a valid OAuth bearer token still authenticates when
+# present, and OntologyFlowApiController returns 401 itself whenever the matched trigger is not
+# public and the request carries no authenticated user.
+oro_security:
+    access_control:
+        - { path: '^/api/aaxis/ontology/flow/', roles: 'PUBLIC_ACCESS' }

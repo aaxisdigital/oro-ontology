@@ -68,6 +68,9 @@ aaxis:
             api_access_read:
                 label: 'Data API: read access (read, query)'
                 description: 'Access the read and query Ontology Data API endpoints (no upsert).'
+            api_access_flow:
+                label: 'Flow API: invoke authenticated endpoints'
+                description: 'Invoke flow Endpoint triggers that require authentication (public endpoints need no permission).'
         section:
             general: General
         choose_system: 'Choose a system...'
@@ -193,6 +196,7 @@ aaxis:
                 object: Object
                 undefined: Undefined
         connector:
+            test_button: 'Test'
             entity_label: Connector
             entity_plural_label: Connectors
             saved: 'Connector saved'
@@ -264,6 +268,11 @@ aaxis:
             steps_design_mismatch: 'This file''s steps and canvas describe different flows and cannot be imported.'
             malformed_step: 'This flow holds a malformed step and cannot be exported.'
             incomplete_connector_ref: 'The connector reference "{{ name }}" is incomplete (name, type and system are all required).'
+            export_subflow_missing: 'Step "{{ name }}" points at a subflow that no longer exists (or is not a subflow anymore) — fix the flow before exporting it.'
+            raw_subflow_id: 'This file still holds raw subflow ids instead of subflow names — re-export it from a current version.'
+            subflow_missing: 'No subflow named "{{ name }}" exists here — import it before this flow.'
+            subflow_not_subflow: 'The flow named "{{ name }}" here is not a subflow, so a Call Subflow step cannot invoke it.'
+            incomplete_subflow_ref: 'A subflow reference in this file is incomplete (the subflow name is required).'
         flow_editor:
             title: 'New Flow'
             name_label: 'Flow name'
@@ -284,6 +293,7 @@ aaxis:
                     flow_control: 'Flow Control'
                     operations: 'Operations'
                     file_operations: 'File Operations'
+                    notification: 'Notification'
                 item:
                     cron: 'Schedule'
                     endpoint: 'Endpoint'
@@ -302,6 +312,11 @@ aaxis:
                     file_list: 'List Folder'
                     file_delete: 'Delete'
                     file_rename: 'Rename'
+                    invoke_php: 'Invoke PHP'
+                    logger: 'Logger'
+                    event: 'Event'
+                    email: 'Email'
+                    ms_teams: 'MS Teams'
         flow_view:
             add_button: 'Add Flow'
             import_button: 'Import Flow'

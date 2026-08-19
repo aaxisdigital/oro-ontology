@@ -13,6 +13,7 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
 use Doctrine\Persistence\ManagerRegistry;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * Executes a flow definition in DEBUG mode: walks the links breadth-first from the trigger and
@@ -67,6 +68,7 @@ class FlowDebugExecutor
         private readonly FileConnectorTransfer $files,
         private readonly FlowStepValidator $stepValidator,
         private readonly DatabaseQueryRunner $database,
+        private readonly LoggerInterface $logger,
     ) {
     }
 
@@ -360,6 +362,28 @@ class FlowDebugExecutor
         if ($trigger['type'] === 'entity_change' && \array_key_exists('payload', $input)) {
             $context['payload'] = $input['payload'];
         }
+        // An Endpoint-triggered run sees its HTTP request as variables: every {param} captured
+        // from the path under its own name (the validator forbids reserved names there), the
+        // request body as `body` and the headers as `headers`.
+        if ($trigger['type'] === 'endpoint') {
+            foreach (\is_array($input['params'] ?? null) ? $input['params'] : [] as $name => $value) {
+                $context[(string) $name] = $value;
+            }
+            if (\array_key_exists('body', $input)) {
+                $context['body'] = $input['body'];
+            }
+            if (\array_key_exists('headers', $input)) {
+                $context['headers'] = $input['headers'];
+            }
+            if (\array_key_exists('queryParams', $input)) {
+                $context['queryParams'] = $input['queryParams'];
+            }
+            // Authenticated calls only (public or not): the OAuth application that made the
+            // call (null when the caller authenticated some other way, e.g. a session).
+            if (\array_key_exists('OAuthApplication', $input)) {
+                $context['OAuthApplication'] = $input['OAuthApplication'];
+            }
+        }
 
         return $context;
     }
@@ -395,7 +419,7 @@ class FlowDebugExecutor
         $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
         if (!\in_array(
             $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow'], $fileOps),
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'logger'], $fileOps),
             true
         )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
@@ -410,6 +434,31 @@ class FlowDebugExecutor
         // and whatever it wrote there is what the next main-flow element sees.
         if ($step['type'] === 'sub_flow') {
             $context = $this->callSubflow($step['name'], $config, $context, $executionUuid);
+
+            return;
+        }
+
+        // Logger has no destination either: it emits ONE line into the PHP application log,
+        // prefixed with the flow's name. The message is hardcoded text, or — via its DWL
+        // toggle — an expression resolved against the current context.
+        if ($step['type'] === 'logger') {
+            $raw = trim((string) ($config['message'] ?? ''));
+            if ($raw === '') {
+                throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
+            }
+            $text = $raw;
+            if (($config['message_dwl'] ?? false) === true) {
+                try {
+                    $result = $this->dwl->transform($raw, $context);
+                } catch (\Throwable $e) {
+                    throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
+                }
+                // Strings go verbatim; anything else (objects, lists, numbers, booleans) as JSON.
+                $text = \is_string($result)
+                    ? $result
+                    : (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            }
+            $this->logger->info(sprintf('[Aaxis Flow - %s] %s', $flow?->getName() ?? 'unsaved', $text));
 
             return;
         }

@@ -16,10 +16,13 @@ use Symfony\Contracts\Translation\TranslatorInterface;
  * Moves flows between environments as a self-contained JSON document.
  *
  * A flow is almost portable already — its steps name systems and entities rather than pointing at
- * ids — with ONE exception: connector steps hold the numeric connector id, which means nothing in
- * another database. Export therefore rewrites every `connector` id into a `connectorRef`
- * {name, type, system} descriptor (in BOTH `steps` and `design.steps`, which each carry their own
- * copy of every config), and import resolves those descriptors back to local ids.
+ * ids — with TWO exceptions: connector steps hold the numeric connector id and Call Subflow steps
+ * the numeric target-flow id, both meaningless in another database. Export therefore rewrites
+ * every `connector` id into a `connectorRef` {name, type, system} descriptor and every `subflow`
+ * id into a `subflowRef` {name} descriptor (flow names are unique — in BOTH `steps` and
+ * `design.steps`, which each carry their own copy of every config), and import resolves the
+ * descriptors back to local ids. For a subflow that means the referenced subflow must exist HERE
+ * by that name already: import the subflows first, their callers after.
  *
  * Entities travel as names, so the document also carries a manifest of the referenced entities
  * with their unique attribute — the piece the step configs do not hold — so the import can refuse
@@ -50,8 +53,9 @@ class FlowPortability
      *
      * @return array<string, mixed>
      *
-     * @throws FlowImportException when a step points at a connector that no longer exists — the
-     *                             flow is already broken and the file could never be imported
+     * @throws FlowImportException when a step points at a connector or subflow that no longer
+     *                             exists — the flow is already broken and the file could never
+     *                             be imported
      */
     public function export(OntologyFlow $flow): array
     {
@@ -140,26 +144,36 @@ class FlowPortability
             }
         }
 
-        // A document must never smuggle in a RAW connector id: it would silently point at whatever
-        // that id happens to be here. Export always replaces it with a descriptor.
+        // A document must never smuggle in a RAW connector or subflow id: it would silently point
+        // at whatever those ids happen to be here. Export always replaces both with descriptors.
+        $rawKeys = ['connector' => 'raw_connector_id', 'subflow' => 'raw_subflow_id'];
         foreach ($this->allConfigs($steps, $design) as $config) {
-            if (\array_key_exists('connector', $config)) {
-                $errors[] = $this->trans('raw_connector_id');
+            foreach ($rawKeys as $rawKey => $message) {
+                if (\array_key_exists($rawKey, $config)) {
+                    $errors[] = $this->trans($message);
+                    unset($rawKeys[$rawKey]);
+                }
+            }
+            if ($rawKeys === []) {
                 break;
             }
         }
 
         // Resolve references against THIS environment, collecting every mismatch.
         $connectorIds = $this->resolveConnectors($steps, $design, $errors);
+        $subflowIds = $this->resolveSubflows($steps, $design, $errors);
         $this->checkEntities($steps, $design, \is_array($document['entities'] ?? null) ? $document['entities'] : [], $errors);
 
         if ($errors !== []) {
             throw new FlowImportException(array_values(array_unique($errors)));
         }
 
-        $importedSteps = $this->applyConnectorIds(\is_array($steps) ? $steps : [], $connectorIds);
+        $importedSteps = $this->applySubflowIds(
+            $this->applyConnectorIds(\is_array($steps) ? $steps : [], $connectorIds),
+            $subflowIds
+        );
         if (\is_array($design) && \is_array($design['steps'] ?? null)) {
-            $design['steps'] = $this->applyConnectorIds($design['steps'], $connectorIds);
+            $design['steps'] = $this->applySubflowIds($this->applyConnectorIds($design['steps'], $connectorIds), $subflowIds);
         }
 
         // The imported steps must clear exactly the bar an editor save clears — otherwise a file
@@ -214,7 +228,8 @@ class FlowPortability
     }
 
     /**
-     * Replaces each config's connector id with a portable {name, type, system} descriptor.
+     * Replaces each config's connector id with a portable {name, type, system} descriptor and
+     * each Call Subflow target id with a {name} one.
      *
      * @param mixed              $steps
      * @param array<int, string> $errors
@@ -245,6 +260,19 @@ class FlowPortability
                         'type' => $connector->getType(),
                         'system' => $connector->getSystem()?->getName(),
                     ];
+                }
+                $step['config'] = $config;
+            }
+            if (\is_array($config) && \array_key_exists('subflow', $config)) {
+                $target = $this->doctrine->getRepository(OntologyFlow::class)->find((int) $config['subflow']);
+                // A wrong-type target is exactly as broken as a missing one: the run would fail.
+                if ($target === null || $target->getType() !== OntologyFlow::TYPE_SUBFLOW) {
+                    $errors[] = $this->trans('export_subflow_missing', [
+                        '{{ name }}' => (string) ($step['name'] ?? '?'),
+                    ]);
+                } else {
+                    unset($config['subflow']);
+                    $config['subflowRef'] = ['name' => $target->getName()];
                 }
                 $step['config'] = $config;
             }
@@ -377,6 +405,45 @@ class FlowPortability
     }
 
     /**
+     * Resolves every subflowRef to a local flow id: the subflow must already exist HERE by name
+     * (names are unique) and be of type subflow — so callers import AFTER their subflows.
+     *
+     * @param array<int, string> $errors
+     *
+     * @return array<string, int> trimmed name => local flow id
+     */
+    private function resolveSubflows(mixed $steps, mixed $design, array &$errors): array
+    {
+        $resolved = [];
+        foreach ($this->allConfigs($steps, $design) as $config) {
+            $ref = $config['subflowRef'] ?? null;
+            if (!\is_array($ref)) {
+                continue;
+            }
+            $name = \is_string($ref['name'] ?? null) ? trim($ref['name']) : '';
+            if ($name === '') {
+                $errors[] = $this->trans('incomplete_subflow_ref');
+                continue;
+            }
+            if (isset($resolved[$name])) {
+                continue;
+            }
+            $target = $this->doctrine->getRepository(OntologyFlow::class)->findOneBy(['name' => $name]);
+            if ($target === null) {
+                $errors[] = $this->trans('subflow_missing', ['{{ name }}' => $name]);
+                continue;
+            }
+            if ($target->getType() !== OntologyFlow::TYPE_SUBFLOW) {
+                $errors[] = $this->trans('subflow_not_subflow', ['{{ name }}' => $name]);
+                continue;
+            }
+            $resolved[$name] = (int) $target->getId();
+        }
+
+        return $resolved;
+    }
+
+    /**
      * Checks every referenced entity exists here under the same system, with the same unique
      * attribute when the document states one.
      *
@@ -445,6 +512,38 @@ class FlowPortability
                 if (isset($connectorIds[$key])) {
                     // Stored as a string, matching what the editor saves.
                     $config['connector'] = (string) $connectorIds[$key];
+                }
+                $step['config'] = $config;
+            }
+            $out[] = $step;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Puts the resolved subflow ids back into the configs, dropping the descriptors.
+     *
+     * @param array<int, mixed>  $steps
+     * @param array<string, int> $subflowIds
+     *
+     * @return array<int, mixed>
+     */
+    private function applySubflowIds(array $steps, array $subflowIds): array
+    {
+        $out = [];
+        foreach ($steps as $step) {
+            if (!\is_array($step)) {
+                $out[] = $step;
+                continue;
+            }
+            $config = $step['config'] ?? null;
+            if (\is_array($config) && \is_array($config['subflowRef'] ?? null)) {
+                $name = \is_string($config['subflowRef']['name'] ?? null) ? trim($config['subflowRef']['name']) : '';
+                unset($config['subflowRef']);
+                if (isset($subflowIds[$name])) {
+                    // Stored as a string, matching what the editor saves.
+                    $config['subflow'] = (string) $subflowIds[$name];
                 }
                 $step['config'] = $config;
             }

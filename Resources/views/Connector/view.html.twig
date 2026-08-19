@@ -1,6 +1,16 @@
 {% extends '@OroUI/actions/view.html.twig' %}
 {% import '@OroUI/macros.html.twig' as UI %}
 
+{% block navButtons %}
+    {% import '@OroUI/macros.html.twig' as UI %}
+    {{ parent() }}
+    {# Tests the SAVED configuration server-side (no secrets on the page to send back). #}
+    <button type="button" class="btn" data-role="connector-test-stored">
+        <span class="fa fa-plug" aria-hidden="true"></span>
+        {{ 'aaxis.ontology.connector.test_button'|trans }}
+    </button>
+{% endblock navButtons %}
+
 {% block pageHeader %}
     {% set breadcrumbs = {
         'entity': entity,
@@ -20,6 +30,12 @@
             <label class="control-label">{{ 'aaxis.ontology.connector.config.label'|trans }}</label>
             {# maskedConfig (not entity.config): secret values are replaced with ******** server-side #}
             <div class="controls"><pre>{{ maskedConfig ? maskedConfig|json_encode(constant('JSON_PRETTY_PRINT')) : '' }}</pre></div>
+        </div>
+        {# The title bar's Test button (navButtons) posts to the stored-config test endpoint and
+           this component renders the per-step outcome here, under the configuration. #}
+        <div data-page-component-module="aaxisontology/js/app/components/connector-view-test-component"
+             data-page-component-options="{{ {connectorId: entity.id}|json_encode }}">
+            <div class="aaxis-connector-test" data-role="connector-test-result" hidden></div>
         </div>
     {% endset %}
 

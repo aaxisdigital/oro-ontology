@@ -189,6 +189,16 @@ class FlowStepValidator
         if ($step['type'] === 'choice' && \is_string($config['expression'] ?? null) && trim($config['expression']) !== '') {
             $snippets[] = $config['expression'];
         }
+        // Endpoint trigger: the optional response binding is ALWAYS a DWL expression.
+        if ($step['type'] === 'endpoint' && \is_string($config['response'] ?? null) && trim($config['response']) !== '') {
+            $snippets[] = $config['response'];
+        }
+        // Logger: the message is DWL only while its toggle is on (plain text otherwise).
+        if ($step['type'] === 'logger' && ($config['message_dwl'] ?? false) === true
+            && \is_string($config['message'] ?? null) && trim($config['message']) !== ''
+        ) {
+            $snippets[] = $config['message'];
+        }
         // SQL Query: the SQL text and the bindings are DWL-capable too.
         if ($step['type'] === 'sql_query') {
             if (($config['sql_dwl'] ?? false) === true && \is_string($config['sql'] ?? null) && trim($config['sql']) !== '') {
@@ -204,10 +214,11 @@ class FlowStepValidator
 
     private function isStepConfigValid(array $step): bool
     {
-        $config = $step['config'];
-        if ($config === null) {
-            return true;
-        }
+        // A missing config is NOT a free pass: a type that needs parameters is exactly as broken
+        // never-configured as it is half-configured (fresh drops start red and the flow cannot
+        // run until they are completed). Types whose arms accept an empty config — triggers via
+        // $onlyEnabled(), parameterless placeholders via the default arm — stay valid.
+        $config = \is_array($step['config']) ? $step['config'] : [];
         $filled = static fn (string $key): bool => \is_string($config[$key] ?? null) && trim($config[$key]) !== '';
 
         // Enum keys are lenient when ABSENT (configs saved by older editors) but strict when set.
@@ -219,8 +230,9 @@ class FlowStepValidator
 
         // A trigger holding ONLY its enabled flag counts as "not configured yet" (the editor seeds
         // {enabled: true} the moment a trigger is dropped, so the flow starts armed without the
-        // fresh tile turning red for the fields the user has not filled in yet).
-        $onlyEnabled = static fn (): bool => array_diff_key($config, ['enabled' => 0]) === [];
+        // fresh tile turning red for the fields the user has not filled in yet). Endpoint drops
+        // also seed the Response EXAMPLE, so that key is ignored by the test too.
+        $onlyEnabled = static fn (): bool => array_diff_key($config, ['enabled' => 0, 'response' => 0]) === [];
 
         // "flowUuid" is reserved (every execution seeds its uuid into the context under it) and so
         // is "choiceResults" (choice steps record their branch verdicts there); the legacy
@@ -275,7 +287,16 @@ class FlowStepValidator
             'entity_change' => $boolOk('enabled') && ($onlyEnabled() || ($filled('system') && $filled('entity'))),
             // The remaining triggers carry only the enabled flag (bool when set; a missing flag
             // reads as DISABLED at evaluation, not as invalid — old flows stay green).
-            'endpoint', 'subflow' => $boolOk('enabled'),
+            'subflow' => $boolOk('enabled'),
+            // Endpoint trigger: method + path (+ the public switch). Path segments are literals
+            // or {param} placeholders; a param name must be a valid identifier and not shadow a
+            // reserved context variable (the params are seeded into the context by name).
+            'endpoint' => $boolOk('enabled') && ($onlyEnabled() || (
+                $enumOk('method', ['GET', 'POST', 'PUT', 'QUERY', 'PATCH', 'DELETE'])
+                && $boolOk('public')
+                && self::endpointPathOk((string) ($config['path'] ?? ''))
+                && (!isset($config['response']) || \is_string($config['response']))
+            )),
             // Choice: the success expression is the whole config (syntax checked via
             // stepDwlSnippets); the branch links live in the design, not here.
             'choice' => $filled('expression'),
@@ -291,6 +312,8 @@ class FlowStepValidator
             // "Call Subflow": which subflow to invoke (existence/type/enabled are RUNTIME checks —
             // this validator stays DB-free).
             'sub_flow' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== '',
+            // "Logger": the message text (DWL-capable via its toggle).
+            'logger' => $filled('message') && $boolOk('message_dwl'),
             // "SQL Query": a database connector, the (DWL-capable) SQL, optional bindings.
             'sql_query' => $destinationOk()
                 && is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
@@ -299,6 +322,31 @@ class FlowStepValidator
                 && $boolOk('binding_dwl'),
             default => true,
         };
+    }
+
+    /**
+     * Endpoint trigger path: non-empty; each segment a literal ([A-Za-z0-9_.-]+) or a "{param}"
+     * placeholder whose name is a valid identifier and not a reserved context variable.
+     */
+    private static function endpointPathOk(string $path): bool
+    {
+        $path = trim($path, " \t/");
+        if ($path === '') {
+            return false;
+        }
+        foreach (explode('/', $path) as $segment) {
+            if (preg_match('/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/', $segment, $m) === 1) {
+                if (\in_array(strtolower($m[1]), ['body', 'headers', 'queryparams', 'oauthapplication', 'flowuuid', 'flow-uuid', 'choiceresults', 'payload'], true)) {
+                    return false;
+                }
+                continue;
+            }
+            if (preg_match('/^[A-Za-z0-9_.-]+$/', $segment) !== 1) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

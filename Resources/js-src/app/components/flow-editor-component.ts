@@ -2,6 +2,8 @@ import $ from 'jquery';
 import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import messenger from 'oroui/js/messenger';
+import mediator from 'oroui/js/mediator';
+import pageStateChecker from 'oronavigation/js/app/services/page-state-checker';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import createDwlField from '../widgets/dwl-field';
@@ -227,6 +229,24 @@ function portCount(type: string): number {
     return type === 'choice' ? 2 : 1;
 }
 
+const OPPOSITE_SIDE: Record<AnchorSide, AnchorSide> = {north: 'south', south: 'north', east: 'west', west: 'east'};
+
+/** Seeded into a freshly-dropped Endpoint trigger: the Response binding's example shape. */
+const ENDPOINT_RESPONSE_EXAMPLE = '{\n    statusCode: 200,\n    body: payload\n}';
+
+/**
+ * Step types a fresh drop CANNOT run yet — they need configuration beyond the name, so the new
+ * tile starts red (is-config-invalid) until its properties are confirmed/saved complete. MUST
+ * mirror FlowStepValidator::isStepConfigValid (server side, where an absent config now counts as
+ * incomplete for these types); triggers (seeded {enabled: true}) and the parameterless
+ * placeholder types are valid empty and start clean.
+ */
+const REQUIRES_CONFIG = new Set([
+    'choice', 'sub_flow', 'logger',
+    'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query',
+    'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'
+]);
+
 /** The four tile sides a flow line can attach to. */
 type AnchorSide = 'north' | 'south' | 'east' | 'west';
 
@@ -299,6 +319,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private steps!: PlacedStep[];
 
     private links!: FlowLink[];
+    private discarding!: boolean;
+    private dirtyChecker!: () => boolean;
+    private onOpenLinkBefore!: (e: any) => void;
+    private onBeforeRefresh!: (queue: any[]) => void;
     // Sub-flow entry marker: the id of the step the flow "starts at" when there is no trigger,
     // drawn as an origin-less arrow into that step.
     private startId!: string | null;
@@ -435,6 +459,40 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.clampToolboxIntoView();
         });
 
+        // Unsaved-changes guards, ANY open tab counts: the browser's native prompt for close /
+        // reload / external URLs, the same mediator hook Oro's PageStateView uses for its forms
+        // for in-app (pushState) navigation and the toolbar refresh, plus the checker registry
+        // other components (grid inline editing, config form, hidden redirects) consult.
+        this.discarding = false;
+        this.dirtyChecker = () => this.anyTabDirty();
+        pageStateChecker.registerChecker(this.dirtyChecker);
+        $(window).on('beforeunload.aaxisFlowEditor', (e: any) => {
+            if (this.anyTabDirty()) {
+                e.preventDefault();
+                const message = __('oro.ui.leave_page_with_unsaved_data_confirm');
+                (e.originalEvent || e).returnValue = message;
+                return message;
+            }
+        });
+        this.onOpenLinkBefore = (e: any) => {
+            if (!e.prevented && this.anyTabDirty()) {
+                e.prevented = !window.confirm(__('oro.ui.leave_page_with_unsaved_data_confirm'));
+            }
+        };
+        mediator.on('openLink:before', this.onOpenLinkBefore);
+        this.onBeforeRefresh = (queue: any[]) => {
+            if (this.anyTabDirty()) {
+                const deferred = ($ as any).Deferred();
+                if (window.confirm(__('oro.ui.leave_page_with_unsaved_data_confirm'))) {
+                    deferred.resolve();
+                } else {
+                    deferred.reject();
+                }
+                queue.push(deferred);
+            }
+        };
+        mediator.on('page:beforeRefresh', this.onBeforeRefresh);
+
         this.buildWires();
         this.restore();
         this.applyInvalidStepNames((this.flow && (this.flow as any).invalidSteps) || []);
@@ -469,6 +527,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         this.$el.on('click.aaxisFlowEditor', '[data-role="cancel"]', (e: any) => {
             e.preventDefault();
+            // Discard is EXPLICIT: leaving through this button must not raise the
+            // unsaved-changes prompts — the label already says the work is thrown away.
+            this.discarding = true;
             window.location.href = this.listUrl;
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="save"]', (e: any) => {
@@ -1743,13 +1804,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
     }
 
-    private addStep(type: string, x: number, y: number, name?: string, id?: string, config?: Record<string, any> | null, anchors?: {inSide?: AnchorSide; outSides?: AnchorSide[]}): void {
+    private addStep(type: string, x: number, y: number, name?: string, id?: string, config?: Record<string, any> | null, anchors?: {inSide?: AnchorSide; outSides?: AnchorSide[]}): PlacedStep {
         const stepName = (name || '').trim() || this.defaultName(type);
         // A trigger IS the flow's enabled switch — a fresh one arms the flow right away (the old
         // top-bar switch defaulted ON too); without this, a just-dropped trigger reads as
         // disabled until the user happens to open its properties once.
         if (!config && this.stepMeta[type].category === 'trigger') {
-            config = {enabled: true};
+            // Endpoint triggers also seed the Response example so the expected shape is visible
+            // the first time the properties open (the validator treats enabled+response-only as
+            // "not configured yet", so the fresh tile stays green).
+            config = type === 'endpoint' ? {enabled: true, response: ENDPOINT_RESPONSE_EXAMPLE} : {enabled: true};
         }
         const pos = this.place(x, y);
         const el = this.buildTile(type, stepName);
@@ -1767,6 +1831,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.positionPorts(step);
         this.updateReachability();
         this.syncDirty();
+
+        return step;
     }
 
     private renameStep(step: PlacedStep, name: string): void {
@@ -1835,23 +1901,34 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'choice') {
             $top.prop('hidden', false);
             sections.push(this.choiceSection($top, $body, $panel[0], step.config || {}, $input));
+        } else if (step.type === 'logger') {
+            $top.prop('hidden', false);
+            sections.push(this.loggerSection($top, $body, $panel[0], step.config || {}, $input));
         } else if (step.type === 'cron') {
-            // Schedule owns the first row too (Name | Mode).
+            // Schedule owns the first row too (Enabled | Name | Mode).
             $top.prop('hidden', false);
             sections.push(this.scheduleSection($top, $body, step.config || {}, $input));
+        } else if (step.type === 'endpoint') {
+            $top.prop('hidden', false);
+            sections.push(this.endpointSection($top, $body, step.config || {}, $input));
+        } else if (this.stepMeta[step.type].category === 'trigger') {
+            // Every trigger leads its first row with the Enabled switch — the one place the flow
+            // is turned on/off (the server derives flows.enabled from it) — then the name.
+            const enabled = this.enabledSwitch(step.config || {});
+            $top.prop('hidden', false);
+            $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+                enabled.$col,
+                this.settingsCol('step_name_label', $input, 2)
+            ));
+            sections.push({error: () => '', merge: enabled.merge});
+            if (step.type === 'entity_change') {
+                sections.push(this.systemEntitySection($body, step.config || {}));
+            }
         } else {
             $body.append(
                 $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __('aaxis.ontology.flow_editor.step_name_label')}),
                 $input
             );
-            if (step.type === 'entity_change') {
-                sections.push(this.systemEntitySection($body, step.config || {}));
-            }
-        }
-        // EVERY trigger carries the flow's enabled switch — the one place the flow is turned
-        // on/off (the old top-bar switch is gone; the server derives flows.enabled from this).
-        if (this.stepMeta[step.type].category === 'trigger') {
-            sections.push(this.triggerEnabledSection($body, step.config || {}));
         }
         $columns.append($body, $side);
         $panel.append($top, $columns, $error);
@@ -1959,23 +2036,30 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * flows.enabled from it; a missing/unconfigured trigger reads as disabled). Defaults ON for a
      * fresh trigger so configuring it is what arms the flow.
      */
-    private triggerEnabledSection($body: any, initial: Record<string, any>): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    /** The shared on/off switch control (Enabled, Public, …) — same markup everywhere. */
+    private plainSwitch(on: boolean, titleKey: string): {$switch: any; isOn: () => boolean} {
         const $check = $('<input/>', {type: 'checkbox'});
-        $check.prop('checked', initial.enabled !== false);
-        const $switch = $('<label/>', {'class': 'aaxis-flow-editor__switch', title: __('aaxis.ontology.flow_editor.trigger_enabled_label')}).append(
+        $check.prop('checked', on);
+        const $switch = $('<label/>', {'class': 'aaxis-flow-editor__switch', title: __('aaxis.ontology.flow_editor.' + titleKey)}).append(
             $check,
             $('<span/>', {'class': 'aaxis-flow-editor__switch-track'}).append(
                 $('<span/>', {'class': 'aaxis-flow-editor__switch-thumb'})
             )
         );
-        $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row aaxis-flow-editor__settings-row--switch'}).append(
-            this.settingsLabel('trigger_enabled_label'),
-            $switch
-        ));
+
+        return {$switch, isOn: () => $check.is(':checked')};
+    }
+
+    /**
+     * The trigger's Enabled flag as a FIRST-ROW column, shown before the name on every trigger —
+     * the one place the flow is turned on/off (the server derives flows.enabled from it).
+     */
+    private enabledSwitch(initial: Record<string, any>): {$col: any; merge: (c: Record<string, any>) => Record<string, any>} {
+        const control = this.plainSwitch(initial.enabled !== false, 'trigger_enabled_label');
 
         return {
-            error: () => '',
-            merge: config => ({...config, enabled: $check.is(':checked')})
+            $col: this.settingsCol('trigger_enabled_label', control.$switch, 0.4),
+            merge: config => ({...config, enabled: control.isOn()})
         };
     }
 
@@ -1986,13 +2070,93 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * currently editing (updates as the input/caret changes). Legacy configs ({expression} only)
      * open in Cron mode.
      */
+    /**
+     * Endpoint trigger: Enabled | Name | Public on the first row, Method | Path on the second,
+     * and the optional Response binding (always-DWL) on the third. The path is matched under
+     * /api/aaxis/ontology/flow/…; each {param} placeholder becomes a context variable when the
+     * endpoint is called (body/headers arrive as `body`/`headers`), the Public switch decides
+     * whether the call needs an authenticated API user (default), and the Response expression —
+     * evaluated against the FINAL context — binds `{statusCode, body}` onto the HTTP response.
+     */
+    private endpointSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        const enabled = this.enabledSwitch(initial);
+        // Default is REQUIRE AUTH: public only when explicitly switched on.
+        const pub = this.plainSwitch(initial.public === true, 'endpoint_public_label');
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            enabled.$col,
+            this.settingsCol('step_name_label', $nameInput, 2),
+            this.settingsCol('endpoint_public_label', pub.$switch, 0.4)
+        ));
+
+        const $method = $('<select/>', {'class': 'form-control'});
+        ['GET', 'POST', 'PUT', 'QUERY', 'PATCH', 'DELETE'].forEach(m => {
+            $method.append($('<option/>', {value: m, text: m, selected: String(initial.method || 'GET') === m}));
+        });
+        const $path = $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 256,
+            placeholder: __('aaxis.ontology.flow_editor.endpoint_path_placeholder')
+        });
+        $path.val(String(initial.path || ''));
+        $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('endpoint_method_label', $method, 0.6),
+            this.settingsCol('endpoint_path_label', $path, 2.4)
+        ));
+
+        const response = createDwlField({
+            label: __('aaxis.ontology.flow_editor.endpoint_response_label'),
+            value: String(initial.response || ''),
+            dwl: true,
+            fixed: true, // the response binding IS DWL — no pure-text mode
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+        $body.append(response.$el);
+        $body.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            html: __('aaxis.ontology.flow_editor.endpoint_hint')
+        }));
+
+        const RESERVED = ['body', 'headers', 'queryparams', 'oauthapplication', 'flowuuid', 'flow-uuid', 'choiceresults', 'payload'];
+        const pathError = (): string => {
+            const path = String($path.val() || '').trim().replace(/^\/+|\/+$/g, '');
+            if (path === '') {
+                return __('aaxis.ontology.flow_editor.endpoint_path_required');
+            }
+            for (const segment of path.split('/')) {
+                const param = segment.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
+                if (param) {
+                    if (RESERVED.includes(param[1].toLowerCase())) {
+                        return __('aaxis.ontology.flow_editor.endpoint_path_reserved', {name: param[1]});
+                    }
+                    continue;
+                }
+                if (!/^[A-Za-z0-9_.-]+$/.test(segment)) {
+                    return __('aaxis.ontology.flow_editor.endpoint_path_invalid');
+                }
+            }
+            return '';
+        };
+
+        return {
+            error: pathError,
+            merge: config => enabled.merge({
+                ...config,
+                method: String($method.val()),
+                path: String($path.val() || '').trim(),
+                public: pub.isOn(),
+                response: response.value().trim()
+            })
+        };
+    }
+
     private scheduleSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        const enabled = this.enabledSwitch(initial);
         const initialMode = initial.mode === 'interval' || (initial.mode === undefined && !initial.expression)
             ? 'interval' : 'cron';
         const $mode = $('<select/>', {'class': 'form-control'});
         $mode.append($('<option/>', {value: 'interval', text: __('aaxis.ontology.flow_editor.schedule_mode_interval'), selected: initialMode === 'interval'}));
         $mode.append($('<option/>', {value: 'cron', text: __('aaxis.ontology.flow_editor.schedule_mode_cron'), selected: initialMode === 'cron'}));
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            enabled.$col,
             this.settingsCol('step_name_label', $nameInput, 1.4),
             this.settingsCol('schedule_mode_label', $mode)
         ));
@@ -2055,9 +2219,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
                 return isValidCron(String($cron.val() || '')) ? '' : __('aaxis.ontology.flow_editor.cron_expression_invalid');
             },
-            merge: config => String($mode.val()) === 'interval'
+            merge: config => enabled.merge(String($mode.val()) === 'interval'
                 ? {...config, mode: 'interval', value: Number($value.val()), unit: String($unit.val())}
-                : {...config, mode: 'cron', expression: String($cron.val() || '').trim()}
+                : {...config, mode: 'cron', expression: String($cron.val() || '').trim()})
         };
     }
 
@@ -2215,6 +2379,36 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 ? __('aaxis.ontology.flow_editor.choice_expression_required')
                 : '',
             merge: config => ({...config, expression: expression.value()})
+        };
+    }
+
+    /**
+     * Logger — name plus the (always-DWL) message: the resolved text is written to the PHP
+     * application log as one "[Aaxis Flow - <flow name>] <message>" line.
+     */
+    private loggerSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput)
+        ));
+
+        const message = createDwlField({
+            label: __('aaxis.ontology.flow_editor.logger_message_label'),
+            value: String(initial.message || ''),
+            dwl: initial.message_dwl === true, // toggleable: hardcoded text, or a DWL expression
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+        $body.append(message.$el);
+        $body.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            html: __('aaxis.ontology.flow_editor.logger_hint')
+        }));
+        panel.classList.add('is-wide');
+
+        return {
+            error: () => message.value().trim() === ''
+                ? __('aaxis.ontology.flow_editor.logger_message_required')
+                : '',
+            merge: config => ({...config, message: message.value(), message_dwl: message.isDwl()})
         };
     }
 
@@ -3054,8 +3248,19 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     __('aaxis.ontology.flow_editor.replace_trigger_question'),
                     __('aaxis.ontology.flow_editor.replace_trigger_confirm'),
                     () => {
+                        // The replacement takes the OLD trigger's place — same spot, same
+                        // out-anchor sides, same outgoing links (the drop position was just
+                        // the gesture; a disconnected trigger helps nobody).
+                        const spot = {x: existingTrigger.x, y: existingTrigger.y};
+                        const outSides = existingTrigger.outSides ? [...existingTrigger.outSides] : undefined;
+                        const outgoing = this.links
+                            .filter(l => l.from === existingTrigger.id)
+                            .map(l => ({...l}));
                         this.removeStep(existingTrigger);
-                        this.addStep(type, x, y);
+                        const added = this.addStep(type, spot.x, spot.y, undefined, undefined, undefined, outSides ? {outSides} : undefined);
+                        outgoing.forEach(l => this.links.push({...l, from: added.id}));
+                        this.redrawLinks();
+                        this.syncDirty();
                     }
                 );
                 return;
@@ -3076,7 +3281,71 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
         }
 
-        this.addStep(type, x, y);
+        this.addStepFromDrop(type, x, y, e.clientX - bounds.left, e.clientY - bounds.top);
+    }
+
+    /**
+     * A toolbox drop: places the tile — CHAINED when released onto an existing element that still
+     * has a free flow-out port (the drop makes it that element's NEXT step: positioned one
+     * Align-gap away along that port's flow-out side and wired up immediately) — and marks it
+     * broken (red) when its type needs configuration a fresh drop cannot have.
+     */
+    private addStepFromDrop(type: string, x: number, y: number, px: number, py: number): void {
+        // Triggers accept no incoming line — they never chain.
+        const target = this.stepMeta[type].category === 'trigger'
+            ? null
+            : this.steps.find(s => px >= s.x && px <= s.x + this.tileSize && py >= s.y && py <= s.y + this.tileSize) || null;
+        const freePort = target === null
+            ? -1
+            : [...Array(portCount(target.type)).keys()]
+                .find(p => !this.links.some(l => l.from === target.id && l.fromPort === p)) ?? -1;
+
+        let added: PlacedStep;
+        if (target !== null && freePort >= 0) {
+            const side = this.outSideOf(target, freePort);
+            const v = SIDE_VECTOR[side];
+            const stepGap = 2 * this.tileSize; // one tile + one tile-wide gap, same as Align
+            const occupied = new Set(this.steps.map(s => `${s.x},${s.y}`));
+            let pos = this.place(target.x + v.dx * stepGap, target.y + v.dy * stepGap);
+            let dx = v.dx;
+            let dy = v.dy;
+            let guard = 0;
+            while (occupied.has(`${pos.x},${pos.y}`) && guard++ < 128) {
+                const next = this.place(pos.x + dx * stepGap, pos.y + dy * stepGap);
+                if (next.x === pos.x && next.y === pos.y) {
+                    // Clamped into a canvas wall: scan east from here on (same rule as Align).
+                    dx = 1;
+                    dy = 0;
+                    pos = this.place(pos.x + stepGap, pos.y);
+                } else {
+                    pos = next;
+                }
+            }
+            // Face the parent: the input lands on the side the line arrives from — unless that
+            // side is the fresh tile's own default flow-out (east; choice also south).
+            const desiredIn = OPPOSITE_SIDE[side];
+            const defaultOuts: AnchorSide[] = type === 'choice' ? ['east', 'south'] : ['east'];
+            const anchors = desiredIn !== 'west' && !defaultOuts.includes(desiredIn) ? {inSide: desiredIn} : undefined;
+            added = this.addStep(type, pos.x, pos.y, undefined, undefined, undefined, anchors);
+            this.links.push({from: target.id, fromPort: freePort, to: added.id});
+            this.redrawLinks();
+        } else {
+            added = this.addStep(type, x, y);
+        }
+
+        if (REQUIRES_CONFIG.has(type)) {
+            this.markStepInvalid(added, true);
+        }
+        this.syncDirty();
+    }
+
+    /** Any unsaved work in ANY open tab (the active one asks the live canvas) — except while
+     * leaving through the explicit Discard button, which silences every guard. */
+    private anyTabDirty(): boolean {
+        if (this.discarding) {
+            return false;
+        }
+        return this.tabs.some((tab, index) => this.tabDirty(tab, index === this.activeTab));
     }
 
     // --- Creating a flow link (drag from an output port onto another step) ------------
@@ -4234,6 +4503,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.panelDrag = null;
         this.stepDrag = null;
         $(window).off('resize.aaxisFlowEditor');
+        $(window).off('beforeunload.aaxisFlowEditor');
+        pageStateChecker.removeChecker(this.dirtyChecker);
+        mediator.off('openLink:before', this.onOpenLinkBefore);
+        mediator.off('page:beforeRefresh', this.onBeforeRefresh);
         window.removeEventListener('pointermove', this.onPointerMove);
         window.removeEventListener('pointerup', this.onPointerUp);
         super.dispose();

@@ -87,6 +87,22 @@ class OntologyConnectorController extends AbstractOntologyController
     }
 
     /**
+     * The view page's "Test" button: probes the SAVED configuration of one connector. Unlike
+     * testConfigAction below this takes no config at all — it can only test what an editor
+     * already persisted — so plain VIEW permission is enough (nothing to probe arbitrarily,
+     * and the response carries no secrets, only per-step pass/fail lines).
+     */
+    #[Route(path: '/connectors/test-stored/{id}', name: 'aaxis_ontology_connector_test_stored', requirements: ['id' => '\d+'], options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('aaxis_ontology_connector_view')]
+    #[CsrfProtection]
+    public function testStoredAction(OntologyConnector $entity): JsonResponse
+    {
+        return new JsonResponse(
+            $this->container->get(ConnectorTester::class)->test((string) $entity->getType(), $entity->getConfig())
+        );
+    }
+
+    /**
      * Runs the Configure popup's "Test" against a (possibly unsaved) configuration:
      * body {type, config, id?}. Untouched stored secrets arrive as the ******** sentinel and are
      * resolved from the persisted connector (same-type only) before testing. Deliberately NOT the

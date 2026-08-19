@@ -16,6 +16,8 @@ declare module 'codemirror/mode/php/php';
 declare module 'codemirror/mode/twig/twig';
 declare module 'oroui/js/app/components/base/component';
 declare module 'oroui/js/messenger';
+declare module 'oroui/js/mediator';
+declare module 'oronavigation/js/app/services/page-state-checker';
 declare module 'oroui/js/modal';
 declare module 'oroform/js/app/views/select2-view';
 declare module 'jquery.select2';

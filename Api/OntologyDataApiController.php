@@ -16,9 +16,11 @@ use Symfony\Component\Routing\Attribute\Route;
 
 /**
  * OAuth-authenticated HTTP API over the Ontology data records, addressing them by system + entity
- * name. The routes are declared under "/api/..."; Oro's RouteCollectionListener prepends the
- * back-office prefix, so they resolve under "/admin/api/aaxis/ontology/..." and are therefore
- * handled by the stateless OAuth ("api_secured") firewall.
+ * name. The routes are declared under "/api/aaxis/ontology/data/..." (the sibling
+ * "/api/aaxis/ontology/flow/..." prefix belongs to the Endpoint-trigger API, see
+ * OntologyFlowApiController); Oro's RouteCollectionListener prepends the back-office prefix, so
+ * they resolve under "/admin/api/aaxis/ontology/data/..." and are therefore handled by the
+ * stateless OAuth ("api_secured") firewall.
  *
  * All business logic lives in {@see OntologyDataApiManager}; this controller only enforces the
  * per-endpoint config toggle and ACL, parses the request, and renders JSON.
@@ -32,7 +34,7 @@ class OntologyDataApiController extends AbstractController
     private const string ACL_READ = 'aaxis_ontology_api_access_read';
 
     #[Route(
-        path: '/api/aaxis/ontology/{systemName}/{entityName}/uid/{uniqueId}',
+        path: '/api/aaxis/ontology/data/{systemName}/{entityName}/uid/{uniqueId}',
         name: 'aaxis_ontology_api_data_read',
         methods: ['GET']
     )]
@@ -54,7 +56,7 @@ class OntologyDataApiController extends AbstractController
     }
 
     #[Route(
-        path: '/api/aaxis/ontology/{systemName}/{entityName}/upsert',
+        path: '/api/aaxis/ontology/data/{systemName}/{entityName}/upsert',
         name: 'aaxis_ontology_api_data_upsert',
         methods: ['POST']
     )]
@@ -90,7 +92,7 @@ class OntologyDataApiController extends AbstractController
     }
 
     #[Route(
-        path: '/api/aaxis/ontology/{systemName}/{entityName}/query',
+        path: '/api/aaxis/ontology/data/{systemName}/{entityName}/query',
         name: 'aaxis_ontology_api_data_query',
         methods: ['POST']
     )]

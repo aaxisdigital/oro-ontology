@@ -7,6 +7,14 @@ acls:
         group_name: ""
         category: "aaxis_ontology"
 
+    # Invoke authenticated flow-endpoint API routes (Endpoint triggers that are not public).
+    aaxis_ontology_api_access_flow:
+        label: aaxis.ontology.acl.api_access_flow.label
+        description: aaxis.ontology.acl.api_access_flow.description
+        type: action
+        group_name: ""
+        category: "aaxis_ontology"
+
     # Read-only access to the Ontology Data HTTP API (read + query, no upsert).
     aaxis_ontology_api_access_read:
         label: aaxis.ontology.acl.api_access_read.label

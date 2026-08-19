@@ -7,5 +7,5 @@ aaxis_ontology:
 # and Oro's RouteCollectionListener prepends the back-office prefix, so they resolve under
 # /admin/api/aaxis/ontology/... (inside the stateless OAuth "api_secured" firewall).
 aaxis_ontology_api:
-    resource: "@AaxisOntologyBundle/Api/OntologyDataApiController.php"
+    resource: "@AaxisOntologyBundle/Api"
     type: attribute

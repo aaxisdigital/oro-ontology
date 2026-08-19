@@ -42,6 +42,12 @@ services:
             - { name: container.service_subscriber }
             - { name: container.service_subscriber, id: oro_config.global, key: Oro\Bundle\ConfigBundle\Config\ConfigManager }
 
+    Aaxis\Bundle\OntologyBundle\Api\OntologyFlowApiController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+
     Aaxis\Bundle\OntologyBundle\Api\OntologyDataApiController:
         calls:
             - [setContainer, ['@Psr\Container\ContainerInterface']]

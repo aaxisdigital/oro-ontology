@@ -65,9 +65,12 @@ class OntologyFlow
         // reader/writer (v1_10's ConvertLegacyReaderWriterSteps rewrote stored flows); `invoke`
         // is the "HTTP Request" step (rest_api connectors only); `sql_query` runs SQL against
         // database connectors.
-        'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query',
+        // `invoke_php` is a PLACEHOLDER (not implemented yet).
+        'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query', 'invoke_php',
         // File Operations (file_system/sftp/bucket connectors, DWL-capable paths).
         'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename',
+        // Notification steps — ALL PLACEHOLDERS (toolbox + name-only settings, no-op at runtime).
+        'logger', 'event', 'email', 'ms_teams',
     ];
 
     #[ORM\Id]

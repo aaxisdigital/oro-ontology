@@ -1007,6 +1007,45 @@
 
 // --- Flow editor -------------------------------------------------------------
 
+// Connector view page: result lines of the "Test" button (same look as the Configure popup's
+// test, which lives inside the .aaxis-rfm modal scope and cannot be reused here).
+.aaxis-connector-test {
+    padding: 4px 0 0;
+    font-size: 13px;
+
+    &[hidden] {
+        display: none;
+    }
+
+    &__line,
+    &__step {
+        display: flex;
+        align-items: baseline;
+        gap: 6px;
+        margin-bottom: 4px;
+
+        &.is-ok {
+            color: #1a7f37;
+        }
+
+        &.is-fail {
+            color: #c0392b;
+        }
+
+        &.is-progress {
+            color: #6b7a89;
+        }
+    }
+
+    &__line {
+        font-weight: font-weight('bold');
+    }
+
+    &__step {
+        padding-left: 18px;
+    }
+}
+
 .aaxis-flow-editor {
     display: flex;
     flex-direction: column;
