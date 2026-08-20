@@ -42,6 +42,35 @@ class Configuration implements ConfigurationInterface
             'api_auto_create_unique_attribute' => ['type' => 'string', 'value' => 'id'],
             // Hard upper bound on the query endpoint's page_size.
             'api_query_max_page_size' => ['type' => 'integer', 'value' => 200],
+
+            // Flow API: kill switches for the Endpoint-trigger API, split by trigger kind.
+            'flow_api_secure_enabled' => ['type' => 'boolean', 'value' => true],
+            'flow_api_public_enabled' => ['type' => 'boolean', 'value' => true],
+
+            // Flow Elements: per-element toolbox visibility (hidden elements stay valid in
+            // stored flows — the editor still needs their metadata, see editor.html.twig).
+            'flow_element_cron' => ['type' => 'boolean', 'value' => true],
+            'flow_element_endpoint' => ['type' => 'boolean', 'value' => true],
+            'flow_element_entity_change' => ['type' => 'boolean', 'value' => false],
+            'flow_element_subflow' => ['type' => 'boolean', 'value' => true],
+            'flow_element_choice' => ['type' => 'boolean', 'value' => true],
+            'flow_element_sub_flow' => ['type' => 'boolean', 'value' => true],
+            'flow_element_foreach' => ['type' => 'boolean', 'value' => true],
+            'flow_element_dwl_transform' => ['type' => 'boolean', 'value' => true],
+            'flow_element_entity_read' => ['type' => 'boolean', 'value' => true],
+            'flow_element_entity_write' => ['type' => 'boolean', 'value' => true],
+            'flow_element_invoke' => ['type' => 'boolean', 'value' => true],
+            'flow_element_sql_query' => ['type' => 'boolean', 'value' => true],
+            'flow_element_invoke_php' => ['type' => 'boolean', 'value' => true],
+            'flow_element_file_read' => ['type' => 'boolean', 'value' => true],
+            'flow_element_file_write' => ['type' => 'boolean', 'value' => true],
+            'flow_element_file_list' => ['type' => 'boolean', 'value' => true],
+            'flow_element_file_delete' => ['type' => 'boolean', 'value' => true],
+            'flow_element_file_rename' => ['type' => 'boolean', 'value' => true],
+            'flow_element_logger' => ['type' => 'boolean', 'value' => true],
+            'flow_element_event' => ['type' => 'boolean', 'value' => false],
+            'flow_element_email' => ['type' => 'boolean', 'value' => false],
+            'flow_element_ms_teams' => ['type' => 'boolean', 'value' => true],
         ]);
 
         return $treeBuilder;

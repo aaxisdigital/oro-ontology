@@ -9,6 +9,10 @@ system_configuration:
             title: aaxis.ontology.config.flows.title
         aaxis_ontology_api:
             title: aaxis.ontology.config.api.title
+        aaxis_ontology_flow_api:
+            title: aaxis.ontology.config.flow_api.title
+        aaxis_ontology_flow_elements:
+            title: aaxis.ontology.config.flow_elements.title
 
     fields:
         aaxis_ontology.enabled:
@@ -86,6 +90,153 @@ system_configuration:
                 tooltip: aaxis.ontology.config.api.query_max_page_size.tooltip
                 required: false
 
+        aaxis_ontology.flow_api_secure_enabled:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_api.secure_enabled.label
+                tooltip: aaxis.ontology.config.flow_api.secure_enabled.tooltip
+                required: false
+        aaxis_ontology.flow_api_public_enabled:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_api.public_enabled.label
+                tooltip: aaxis.ontology.config.flow_api.public_enabled.tooltip
+                required: false
+        aaxis_ontology.flow_element_cron:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.cron.label
+                required: false
+        aaxis_ontology.flow_element_endpoint:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.endpoint.label
+                required: false
+        aaxis_ontology.flow_element_entity_change:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.entity_change.label
+                required: false
+        aaxis_ontology.flow_element_subflow:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.subflow.label
+                required: false
+        aaxis_ontology.flow_element_choice:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.choice.label
+                required: false
+        aaxis_ontology.flow_element_sub_flow:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.sub_flow.label
+                required: false
+        aaxis_ontology.flow_element_foreach:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.foreach.label
+                required: false
+        aaxis_ontology.flow_element_dwl_transform:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.dwl_transform.label
+                required: false
+        aaxis_ontology.flow_element_entity_read:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.entity_read.label
+                required: false
+        aaxis_ontology.flow_element_entity_write:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.entity_write.label
+                required: false
+        aaxis_ontology.flow_element_invoke:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.invoke.label
+                required: false
+        aaxis_ontology.flow_element_sql_query:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.sql_query.label
+                required: false
+        aaxis_ontology.flow_element_invoke_php:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.invoke_php.label
+                required: false
+        aaxis_ontology.flow_element_file_read:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.file_read.label
+                required: false
+        aaxis_ontology.flow_element_file_write:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.file_write.label
+                required: false
+        aaxis_ontology.flow_element_file_list:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.file_list.label
+                required: false
+        aaxis_ontology.flow_element_file_delete:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.file_delete.label
+                required: false
+        aaxis_ontology.flow_element_file_rename:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.file_rename.label
+                required: false
+        aaxis_ontology.flow_element_logger:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.logger.label
+                required: false
+        aaxis_ontology.flow_element_event:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.event.label
+                required: false
+        aaxis_ontology.flow_element_email:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.email.label
+                required: false
+        aaxis_ontology.flow_element_ms_teams:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.ms_teams.label
+                required: false
+
     tree:
         system_configuration:
             aaxis:
@@ -114,3 +265,33 @@ system_configuration:
                                             - aaxis_ontology.api_auto_create
                                             - aaxis_ontology.api_auto_create_unique_attribute
                                             - aaxis_ontology.api_query_max_page_size
+                                    aaxis_ontology_flow_api:
+                                        priority: 70
+                                        children:
+                                            - aaxis_ontology.flow_api_secure_enabled
+                                            - aaxis_ontology.flow_api_public_enabled
+                                    aaxis_ontology_flow_elements:
+                                        priority: 60
+                                        children:
+                                            - aaxis_ontology.flow_element_cron
+                                            - aaxis_ontology.flow_element_endpoint
+                                            - aaxis_ontology.flow_element_entity_change
+                                            - aaxis_ontology.flow_element_subflow
+                                            - aaxis_ontology.flow_element_choice
+                                            - aaxis_ontology.flow_element_sub_flow
+                                            - aaxis_ontology.flow_element_foreach
+                                            - aaxis_ontology.flow_element_dwl_transform
+                                            - aaxis_ontology.flow_element_entity_read
+                                            - aaxis_ontology.flow_element_entity_write
+                                            - aaxis_ontology.flow_element_invoke
+                                            - aaxis_ontology.flow_element_sql_query
+                                            - aaxis_ontology.flow_element_invoke_php
+                                            - aaxis_ontology.flow_element_file_read
+                                            - aaxis_ontology.flow_element_file_write
+                                            - aaxis_ontology.flow_element_file_list
+                                            - aaxis_ontology.flow_element_file_delete
+                                            - aaxis_ontology.flow_element_file_rename
+                                            - aaxis_ontology.flow_element_logger
+                                            - aaxis_ontology.flow_element_event
+                                            - aaxis_ontology.flow_element_email
+                                            - aaxis_ontology.flow_element_ms_teams

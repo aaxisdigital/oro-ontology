@@ -543,13 +543,20 @@ hides it). The draggable toolbox
 (Triggers: cron/endpoint/entity change/Subflow (`subflow` — the ENTRY POINT of a callable
 subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call Subflow" action
 `sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop
-(`foreach`, PLACEHOLDER — name-only settings, no-op at runtime) · Operations: DWL transform/Entity
+(`foreach`, IMPLEMENTED — see the step docs) · Operations: DWL transform/Entity
 Read/Entity Write/HTTP Request/SQL Query/Invoke PHP (`invoke_php`, IMPLEMENTED — see the step
 docs) · File Operations:
 Read File/Write File/List Folder/Delete/Rename · Notification: Logger + MS Teams (`logger`,
 `ms_teams` — IMPLEMENTED, see the step docs) /Event/Email (`event`/`email` — PLACEHOLDERS like
 foreach: toolbox tile + name-only settings, valid with any config, no-op at runtime)) is the step
-palette — each SECTION collapses via the
+palette. Element VISIBILITY is System Configuration (Aaxis Ontology → Flow Elements: one
+`flow_element_<type>` boolean per toolbox item — defaults ALL ON except entity_change, email and
+event). Hidden elements are still RENDERED with the `[hidden]` attribute (an explicit
+`display: none !important` in ontology.scss — the attribute alone loses to the item's display
+rule): the editor HARVESTS every type's category/icon/label from these nodes and stored flows may
+carry hidden types, so removing them from the DOM would crash the canvas. A section whose items
+are all hidden hides fully. Hiding only affects the palette — hidden types stay valid, editable
+and runnable in existing flows. Each SECTION collapses via the
 +/- at the right of its title (`data-role="toolbox-section-toggle"` → `.is-collapsed` hides the
 items; in-memory only, every load starts expanded). The toolbox's position/visibility are a
 WORKSPACE preference, NOT flow state: saved to localStorage (`aaxis.ontology.flowEditor.toolbox`,
@@ -748,6 +755,20 @@ Teams-workflow envelope — `{type: message, attachments: [adaptive card]}` with
 TextBlock — the shape the standard "post a card when a webhook request is received" Power
 Automate template consumes (it answers 202 on accept); HTTP >= 400 or a transport error fails the
 step, and the flow continues past it on success.
+**foreach** ("Foreach Loop", `foreachSection`) runs a SUBFLOW once per element of an array
+variable: settings `Name | Subflow` (the same searchable picker as Call Subflow, `stringCombo`
+over the flow catalog mapped name→id) + `Array variable | Flow variable` (config keys `subflow`,
+`array`, `item`; the item name must not shadow the injected `index` or a reserved context name —
+validator + section error()). Executor arm (`foreachSubflow`, no destination, before the
+destination gate): the array variable must hold a LIST (empty = zero runs, flow continues);
+target loading shares `resolveSubflowTarget()` with sub_flow (exists / TYPE_SUBFLOW / ENABLED /
+has steps / circular via subflowStack / depth ≤ 10 — a disabled subflow fails the run). Runs are
+SEQUENTIAL over the SHARED context — iteration N sees what N-1 wrote and everything persists for
+the caller — with the current element under the item name and its 0-based position under `index`,
+both LOOP-SCOPED (pre-existing values under those names are restored, otherwise removed, after
+the loop). An iteration failure is wrapped `Step "<name>" (iteration N): …`. PORTABILITY: foreach
+carries the target under the same `subflow` config KEY, so the subflow ⇄ subflowRef export
+rewrite covers it with no extra code (the rewrite matches by key, not step type).
 **sub_flow** ("Call Subflow", `subFlowSection`) invokes another flow of TYPE `subflow` inline:
 settings are just `Name | Subflow` — the Subflow picker is a SEARCHABLE combobox
 (`.aaxis-flow-editor__combo`: a text input filtering a dropdown of every `type === 'subflow'`

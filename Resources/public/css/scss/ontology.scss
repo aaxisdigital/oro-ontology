@@ -1046,6 +1046,13 @@
     }
 }
 
+// The toolbox keeps configuration-hidden elements in the DOM (the editor harvests step metadata
+// from them) — the hidden attribute must beat their display rules.
+.aaxis-flow-editor__toolbox-item[hidden],
+.aaxis-flow-editor__toolbox-section[hidden] {
+    display: none !important;
+}
+
 .aaxis-flow-editor {
     display: flex;
     flex-direction: column;

@@ -242,7 +242,7 @@ const ENDPOINT_RESPONSE_EXAMPLE = '{\n    statusCode: 200,\n    body: payload\n}
  * placeholder types are valid empty and start clean.
  */
 const REQUIRES_CONFIG = new Set([
-    'choice', 'sub_flow', 'logger', 'ms_teams', 'invoke_php',
+    'choice', 'sub_flow', 'foreach', 'logger', 'ms_teams', 'invoke_php',
     'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query',
     'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'
 ]);
@@ -1896,6 +1896,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'sub_flow') {
             $top.prop('hidden', false);
             sections.push(this.subFlowSection($top, step.config || {}, $input));
+        } else if (step.type === 'foreach') {
+            $top.prop('hidden', false);
+            sections.push(this.foreachSection($top, step.config || {}, $input));
         } else if (step.type.indexOf('file_') === 0) {
             $top.prop('hidden', false);
             sections.push(this.fileOpSection(step.type, $top, $body, $panel[0], step.config || {}, $input));
@@ -2080,6 +2083,82 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * currently editing (updates as the input/caret changes). Legacy configs ({expression} only)
      * open in Cron mode.
      */
+    /**
+     * Foreach Loop — Name | Subflow on the first row (same searchable picker as Call Subflow),
+     * Array variable | Flow variable on the second: the subflow runs once per element of the
+     * array variable, seeing the element under the flow-variable name and its 0-based position
+     * under `index` (both loop-scoped), over the SHARED context.
+     */
+    private foreachSection($top: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+        let idByName: Record<string, number> = {};
+        const combo = this.stringCombo('subflow_placeholder', () => undefined);
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput, 1.1),
+            this.settingsCol('subflow_label', combo.$combo, 1.4)
+        ));
+
+        const $array = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 128, placeholder: 'payload'});
+        $array.val(String(initial.array || ''));
+        const $item = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 128, placeholder: 'item'});
+        $item.val(String(initial.item || ''));
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('foreach_array_label', $array),
+            this.settingsCol('foreach_item_label', $item)
+        ));
+        $top.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            html: __('aaxis.ontology.flow_editor.foreach_hint')
+        }));
+
+        const selectedId = initial.subflow ? String(initial.subflow) : '';
+        const ready = this.flowCatalog()
+            .then((data: {records?: Array<{id: number; name: string | null; type: string}>}) => {
+                idByName = {};
+                const names: string[] = [];
+                (data.records || [])
+                    .filter(f => f.type === 'subflow' && (!this.flow || f.id !== this.flow.id))
+                    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+                    .forEach(f => {
+                        const name = f.name || String(f.id);
+                        idByName[name] = f.id;
+                        names.push(name);
+                    });
+                combo.setOptions(names);
+                combo.setEnabled(true);
+                const current = names.find(n => String(idByName[n]) === selectedId);
+                if (current) {
+                    combo.setValue(current);
+                }
+            });
+
+        const RESERVED = ['index', 'flowuuid', 'flow-uuid', 'choiceresults'];
+        return {
+            error: () => {
+                if (combo.value() === '' || idByName[combo.value()] === undefined) {
+                    return __('aaxis.ontology.flow_editor.subflow_required');
+                }
+                if (String($array.val() || '').trim() === '') {
+                    return __('aaxis.ontology.flow_editor.foreach_array_required');
+                }
+                const item = String($item.val() || '').trim();
+                if (item === '') {
+                    return __('aaxis.ontology.flow_editor.foreach_item_required');
+                }
+                if (RESERVED.includes(item.toLowerCase())) {
+                    return __('aaxis.ontology.flow_editor.foreach_item_reserved', {name: item});
+                }
+                return '';
+            },
+            merge: config => ({
+                ...config,
+                subflow: String(idByName[combo.value()] ?? ''),
+                array: String($array.val() || '').trim(),
+                item: String($item.val() || '').trim()
+            }),
+            ready
+        };
+    }
+
     /**
      * A type-ahead combobox over plain string options (the subflow picker's interaction:
      * pointerdown selection so the input's blur cannot swallow the click, typing reopens the

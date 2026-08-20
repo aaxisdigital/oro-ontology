@@ -316,6 +316,12 @@ class FlowStepValidator
             // "Call Subflow": which subflow to invoke (existence/type/enabled are RUNTIME checks —
             // this validator stays DB-free).
             'sub_flow' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== '',
+            // "Foreach Loop": the subflow + the array variable + the per-element variable name
+            // (which must not shadow the injected `index` or a reserved context name).
+            'foreach' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== ''
+                && $filled('array')
+                && $filled('item')
+                && !\in_array(strtolower(trim((string) $config['item'])), ['index', 'flowuuid', 'flow-uuid', 'choiceresults'], true),
             // "Invoke PHP": the service class + method (existence/callability are RUNTIME
             // checks — this validator stays container-free) and the optional parameters DWL.
             'invoke_php' => $destinationOk() && $filled('class') && $filled('method')

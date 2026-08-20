@@ -42,6 +42,60 @@ aaxis:
                 editor_step_size_factor:
                     label: 'Editor step size (grid multiples)'
                     tooltip: 'Side of a step tile on the flow editor canvas, as a multiple of the grid spacing (default 8 — e.g. 80px tiles on a 10px grid).'
+            flow_api:
+                title: 'Flow API'
+                secure_enabled:
+                    label: 'Enable Secure API Endpoints'
+                    tooltip: 'When disabled, Endpoint triggers that REQUIRE authentication are not served — calls to them return 404.'
+                public_enabled:
+                    label: 'Enable Public API Endpoints'
+                    tooltip: 'When disabled, PUBLIC Endpoint triggers are not served — calls to them return 404.'
+            flow_elements:
+                title: 'Flow Elements'
+                cron:
+                    label: 'Triggers: Schedule'
+                endpoint:
+                    label: 'Triggers: Endpoint'
+                entity_change:
+                    label: 'Triggers: Entity change'
+                subflow:
+                    label: 'Triggers: Subflow'
+                choice:
+                    label: 'Flow Control: Choice'
+                sub_flow:
+                    label: 'Flow Control: Call Subflow'
+                foreach:
+                    label: 'Flow Control: Foreach Loop'
+                dwl_transform:
+                    label: 'Operations: DWL transform'
+                entity_read:
+                    label: 'Operations: Entity Read'
+                entity_write:
+                    label: 'Operations: Entity Write'
+                invoke:
+                    label: 'Operations: HTTP Request'
+                sql_query:
+                    label: 'Operations: SQL Query'
+                invoke_php:
+                    label: 'Operations: Invoke PHP'
+                file_read:
+                    label: 'File Operations: Read File'
+                file_write:
+                    label: 'File Operations: Write File'
+                file_list:
+                    label: 'File Operations: List Folder'
+                file_delete:
+                    label: 'File Operations: Delete'
+                file_rename:
+                    label: 'File Operations: Rename'
+                logger:
+                    label: 'Notification: Logger'
+                event:
+                    label: 'Notification: Event'
+                email:
+                    label: 'Notification: Email'
+                ms_teams:
+                    label: 'Notification: MS Teams'
             api:
                 title: 'Data API'
                 read_enabled:

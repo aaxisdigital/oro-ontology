@@ -59,7 +59,8 @@ class OntologyFlow
     /** Every step type the editor toolbox offers (triggers + actions + operations). */
     public const array STEP_TYPES = [
         'cron', 'endpoint', 'entity_change', 'subflow', // triggers (subflow = callable entry point)
-        // Flow Control ("choice" acts as an if; `foreach` is a PLACEHOLDER, not implemented yet).
+        // Flow Control: "choice" acts as an if; `sub_flow` calls a subflow once, `foreach` once
+        // per element of an array variable.
         'choice', 'sub_flow', 'foreach',
         // Operations. entity_read/entity_write are the typed successors of the REMOVED generic
         // reader/writer (v1_10's ConvertLegacyReaderWriterSteps rewrote stored flows); `invoke`

@@ -420,7 +420,7 @@ class FlowDebugExecutor
         $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
         if (!\in_array(
             $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'logger', 'ms_teams', 'invoke_php'], $fileOps),
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'foreach', 'logger', 'ms_teams', 'invoke_php'], $fileOps),
             true
         )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
@@ -435,6 +435,13 @@ class FlowDebugExecutor
         // and whatever it wrote there is what the next main-flow element sees.
         if ($step['type'] === 'sub_flow') {
             $context = $this->callSubflow($step['name'], $config, $context, $executionUuid);
+
+            return;
+        }
+
+        // Foreach Loop shares the context the same way — one subflow run per array element.
+        if ($step['type'] === 'foreach') {
+            $context = $this->foreachSubflow($step['name'], $config, $context, $executionUuid);
 
             return;
         }
@@ -813,6 +820,102 @@ class FlowDebugExecutor
      */
     private function callSubflow(string $stepName, array $config, array $context, string $executionUuid): array
     {
+        [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config);
+
+        // The nested run resets the executed-ids trail (its step ids belong to ANOTHER canvas) —
+        // preserve the caller's so the editor keeps painting the right tiles.
+        $outerTrail = $this->lastExecutedIds;
+        $this->subflowStack[] = $id;
+        try {
+            return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context);
+        } catch (\RuntimeException $e) {
+            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+        } finally {
+            array_pop($this->subflowStack);
+            $this->lastExecutedIds = $outerTrail;
+        }
+    }
+
+    /**
+     * "Foreach Loop": runs the configured subflow ONCE PER ELEMENT of the named array variable —
+     * sequentially, over the SHARED context (iteration N sees what N-1 wrote, and everything the
+     * subflow writes stays for the caller). Each iteration sees the current element under the
+     * configured flow-variable name and its 0-based position under `index`; both are LOOP-SCOPED:
+     * whatever the caller held under those names is restored (or removed) after the loop.
+     *
+     * @param array<string, mixed> $config  {subflow, array, item}
+     * @param array<string, mixed> $context
+     *
+     * @return array<string, mixed> the context after the last iteration
+     */
+    private function foreachSubflow(string $stepName, array $config, array $context, string $executionUuid): array
+    {
+        $arrayVar = trim((string) ($config['array'] ?? ''));
+        $itemVar = trim((string) ($config['item'] ?? ''));
+        if ($arrayVar === '' || $itemVar === '') {
+            throw new \RuntimeException(sprintf('Step "%s" is not configured.', $stepName));
+        }
+        if (!\array_key_exists($arrayVar, $context)) {
+            throw new \RuntimeException(sprintf('Step "%s": the variable "%s" is not defined.', $stepName, $arrayVar));
+        }
+        $list = $context[$arrayVar];
+        if (!\is_array($list) || ($list !== [] && !array_is_list($list))) {
+            throw new \RuntimeException(sprintf(
+                'Step "%s": the variable "%s" must hold an array, got %s.',
+                $stepName,
+                $arrayVar,
+                get_debug_type($list)
+            ));
+        }
+        [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config);
+
+        $hadItem = \array_key_exists($itemVar, $context);
+        $previousItem = $context[$itemVar] ?? null;
+        $hadIndex = \array_key_exists('index', $context);
+        $previousIndex = $context['index'] ?? null;
+
+        $outerTrail = $this->lastExecutedIds;
+        $this->subflowStack[] = $id;
+        try {
+            foreach ($list as $index => $element) {
+                $context[$itemVar] = $element;
+                $context['index'] = $index;
+                try {
+                    $context = $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context);
+                } catch (\RuntimeException $e) {
+                    throw new \RuntimeException(sprintf('Step "%s" (iteration %d): %s', $stepName, $index, $e->getMessage()), 0, $e);
+                }
+            }
+        } finally {
+            array_pop($this->subflowStack);
+            $this->lastExecutedIds = $outerTrail;
+        }
+
+        if ($hadItem) {
+            $context[$itemVar] = $previousItem;
+        } else {
+            unset($context[$itemVar]);
+        }
+        if ($hadIndex) {
+            $context['index'] = $previousIndex;
+        } else {
+            unset($context['index']);
+        }
+
+        return $context;
+    }
+
+    /**
+     * Loads + guards the subflow a sub_flow/foreach step points at: must exist, be of type
+     * subflow, be ENABLED, carry design steps, not already run in this execution (circular) and
+     * not nest deeper than 10 levels.
+     *
+     * @param array<string, mixed> $config
+     *
+     * @return array{0: int, 1: OntologyFlow, 2: array<int, mixed>, 3: array<int, mixed>}
+     */
+    private function resolveSubflowTarget(string $stepName, array $config): array
+    {
         $id = (int) ($config['subflow'] ?? 0);
         /** @var OntologyFlow|null $target */
         $target = $id > 0 ? $this->doctrine->getRepository(OntologyFlow::class)->find($id) : null;
@@ -850,18 +953,7 @@ class FlowDebugExecutor
             throw new \RuntimeException(sprintf('Step "%s": subflow calls nested deeper than 10 levels.', $stepName));
         }
 
-        // The nested run resets the executed-ids trail (its step ids belong to ANOTHER canvas) —
-        // preserve the caller's so the editor keeps painting the right tiles.
-        $outerTrail = $this->lastExecutedIds;
-        $this->subflowStack[] = $id;
-        try {
-            return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context);
-        } catch (\RuntimeException $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
-        } finally {
-            array_pop($this->subflowStack);
-            $this->lastExecutedIds = $outerTrail;
-        }
+        return [$id, $target, $subSteps, $subLinks];
     }
 
     /**

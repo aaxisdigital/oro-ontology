@@ -119,7 +119,12 @@
                             ]}
                         ] %}
                         {% for section in sections %}
-                            <div class="aaxis-flow-editor__toolbox-section">
+                            {# Element visibility is a System Configuration setting. Hidden items
+                               are still RENDERED (with [hidden]) — the editor harvests each
+                               type's category/icon/label from these nodes, and stored flows may
+                               carry hidden types. A section with no visible item hides fully. #}
+                            {% set visibleCount = section.items|filter(item => oro_config_value('aaxis_ontology.flow_element_' ~ item.key))|length %}
+                            <div class="aaxis-flow-editor__toolbox-section"{% if visibleCount == 0 %} hidden{% endif %}>
                                 <div class="aaxis-flow-editor__toolbox-section-title">
                                     {{ ('aaxis.ontology.flow_editor.toolbox.section.' ~ section.key)|trans }}
                                     <button type="button" class="aaxis-flow-editor__toolbox-section-toggle"
@@ -131,6 +136,7 @@
                                 </div>
                                 {% for item in section.items %}
                                     <div class="aaxis-flow-editor__toolbox-item"
+                                         {% if not oro_config_value('aaxis_ontology.flow_element_' ~ item.key) %}hidden{% endif %}
                                          data-step-type="{{ item.key }}"
                                          data-step-category="{{ section.category }}"
                                          data-step-icon="{{ item.icon }}"

@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Api;
 
 use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Manager\EndpointFlowRunner;
+use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -57,10 +58,18 @@ class OntologyFlowApiController extends AbstractController
             );
         }
 
+        // System Configuration kill switches, split by trigger kind — checked BEFORE auth so a
+        // switched-off endpoint does not even reveal it exists.
+        $isPublic = ($match['config']['public'] ?? false) === true;
+        $switch = $isPublic ? 'aaxis_ontology.flow_api_public_enabled' : 'aaxis_ontology.flow_api_secure_enabled';
+        if (!$this->container->get(ConfigManager::class)->get($switch)) {
+            return new JsonResponse(['error' => 'Not found.', 'code' => 'endpoint_disabled'], Response::HTTP_NOT_FOUND);
+        }
+
         // Non-public triggers demand an authenticated caller HOLDING the flow-API capability —
         // the guard twin of OntologyDataApiController: authentication happened at the firewall
         // (bearer token), authorization is decided here per trigger.
-        if (($match['config']['public'] ?? false) !== true) {
+        if (!$isPublic) {
             if ($this->getUser() === null) {
                 return new JsonResponse(
                     ['error' => 'Authentication required.', 'code' => 'unauthenticated'],
@@ -141,6 +150,7 @@ class OntologyFlowApiController extends AbstractController
     {
         return array_merge(parent::getSubscribedServices(), [
             EndpointFlowRunner::class,
+            ConfigManager::class,
         ]);
     }
 }
