@@ -741,8 +741,10 @@ text may legally look like DWL). Executor arm (no destination — before the des
 sub_flow): plain mode logs the text verbatim, DWL mode resolves it against the context; emits
 `[Aaxis Flow - <flow name>] <text>` (a null $flow — unsaved debug — logs as "unsaved"; string
 results go verbatim, everything else JSON-encoded). It logs through its OWN monolog channel
-(`aaxis_ontology.flow_logger`, channel name `aaxis_flow`, a manually-wired StreamHandler on
-`%kernel.logs_dir%/%kernel.environment%.log` at info) — NOT '@logger', because Oro's LoggerBundle
+(`aaxis_ontology.flow_logger`, channel name `aaxis_flow`, a manually-wired StreamHandler on the
+application's `%log_path%` at info — the Oro skeleton's ORO_LOG_PATH: the env log file locally,
+php://stderr on stdout-collector deployments, so flow lines follow the app's logs) — NOT
+'@logger', because Oro's LoggerBundle
 keeps the default handlers at ERROR unless the temporary "detailed logs" level is raised, which
 would silently swallow the lines.
 **ms_teams** ("MS Teams", `msTeamsSection`) posts a message into a Teams chat/channel through a

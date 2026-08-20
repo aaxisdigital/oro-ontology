@@ -44,13 +44,16 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner'
             - '@http_client'
 
-    # The Logger STEP's own monolog channel, wired manually so its lines always reach the
-    # environment's log file: Oro's LoggerBundle keeps the default handlers at ERROR unless the
-    # temporary "detailed logs" level is raised, which would silently swallow flow log lines.
+    # The Logger STEP's own monolog channel, wired manually so its lines always reach the log
+    # regardless of Oro's LoggerBundle level gate (default handlers sit at ERROR unless the
+    # temporary "detailed logs" level is raised, which would silently swallow flow log lines).
+    # The stream is the application's own %log_path% (the Oro skeleton's ORO_LOG_PATH: the
+    # environment's log file locally, php://stderr on stdout-collector deployments like cloud) —
+    # so flow lines land wherever the app's logs actually go.
     aaxis_ontology.flow_logger.handler:
         class: Monolog\Handler\StreamHandler
         arguments:
-            - '%kernel.logs_dir%/%kernel.environment%.log'
+            - '%log_path%'
             - 'info'
 
     aaxis_ontology.flow_logger:
