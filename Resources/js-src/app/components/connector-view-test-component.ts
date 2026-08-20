@@ -2,6 +2,7 @@ import $ from 'jquery';
 import __ from 'orotranslation/js/translator';
 import routing from 'routing';
 import BaseComponent from 'oroui/js/app/components/base/component';
+import {csrfToken} from './component-support';
 
 interface ConnectorViewTestOptions {
     _sourceElement: any;
@@ -57,7 +58,7 @@ class ConnectorViewTestComponent extends BaseComponent {
         fetch(routing.generate('aaxis_ontology_connector_test_stored', {id: this.connectorId}), {
             method: 'POST',
             credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': this.csrf()}
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': csrfToken()}
         })
             .then(r => r.json())
             .then((outcome: TestOutcome) => this.render(outcome))
@@ -91,12 +92,6 @@ class ConnectorViewTestComponent extends BaseComponent {
             $('<span/>', {'class': 'fa ' + icon, 'aria-hidden': 'true'}),
             $('<span/>', {text: ' ' + text})
         );
-    }
-
-    private csrf(): string {
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-        return match ? decodeURIComponent(match[1]) : '';
     }
 
     dispose(): void {

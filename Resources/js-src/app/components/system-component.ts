@@ -6,6 +6,7 @@ import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal from 'aaxiscommon/js/app/widgets/record-form-modal';
+import {apiFetch, bindGridToolbar, csrfToken, setRefreshBusy} from './component-support';
 interface OntologySystemOptions {
     _sourceElement: any;
     canCreate: boolean;
@@ -71,14 +72,7 @@ class OntologySystemComponent extends BaseComponent {
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
         this.$el.on('click.aaxisOntologySys', '[data-role="add"]', this.onAdd.bind(this));
-        this.$el.on('click.aaxisOntologySys', '[data-role="refresh"]', (e: any) => {
-            e.preventDefault();
-            this.load();
-        });
-        this.$el.on('click.aaxisOntologySys', '[data-role="columns-settings"]', (e: any) => {
-            e.preventDefault();
-            this.grid.toggleColumnSettings(e.currentTarget);
-        });
+        bindGridToolbar(this.$el, 'aaxisOntologySys', () => this.load(), () => this.grid);
 
         this.load();
     }
@@ -142,7 +136,7 @@ class OntologySystemComponent extends BaseComponent {
             ? routing.generate('aaxis_ontology_system_api_create')
             : routing.generate('aaxis_ontology_system_api_update', {id: system.id});
 
-        return this.apiFetch(url, system === null ? 'POST' : 'PUT', {
+        return apiFetch(url, system === null ? 'POST' : 'PUT', {
             name: values.name,
             enabled: !!values.enabled
         }).then(res => {
@@ -192,7 +186,7 @@ class OntologySystemComponent extends BaseComponent {
 
     private doDelete(system: SystemRecord, done: () => void): void {
         this.setBusy(true);
-        this.apiFetch(routing.generate('aaxis_ontology_system_delete', {id: system.id}), 'DELETE')
+        apiFetch(routing.generate('aaxis_ontology_system_delete', {id: system.id}), 'DELETE')
             .then(res => {
                 if (!res.ok || !res.data || !res.data.successful) {
                     messenger.notificationFlashMessage(
@@ -211,27 +205,8 @@ class OntologySystemComponent extends BaseComponent {
             });
     }
 
-    private csrf(): string {
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-        return match ? decodeURIComponent(match[1]) : '';
-    }
-
-    private apiFetch(url: string, method: string, body?: any): Promise<{ok: boolean; data: any}> {
-        const opts: any = {
-            method,
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': this.csrf()}
-        };
-        if (body !== undefined) {
-            opts.body = JSON.stringify(body);
-        }
-        return fetch(url, opts).then(r => r.json().then(d => ({ok: r.ok, data: d})));
-    }
-
     private setBusy(busy: boolean): void {
-        this.$el.find('[data-role="refresh"]').prop('disabled', busy)
-            .find('.fa').toggleClass('fa-spin', busy);
+        setRefreshBusy(this.$el, busy);
     }
 
     dispose(): void {

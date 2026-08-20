@@ -26,6 +26,8 @@ use Psr\Log\LoggerInterface;
  */
 class ScheduledFlowRunner
 {
+    use FlowDesignParserTrait;
+
     /**
      * How long a flow may stay "running" before the scheduler assumes the run died and starts a new
      * one. Without this, a process killed mid-run (fatal error, container restart, deploy) never
@@ -64,7 +66,7 @@ class ScheduledFlowRunner
     private function runIfDue(OntologyFlow $flow, \DateTimeImmutable $now): array
     {
         $name = (string) $flow->getName();
-        $parsed = $this->parseDesign($flow->getDesign());
+        $parsed = $this->parseDesign($flow->getDesign(), 'cron');
         if ($parsed === null) {
             return ['flow' => $name, 'status' => 'skipped', 'detail' => 'no runnable design with a schedule trigger'];
         }
@@ -150,48 +152,5 @@ class ScheduledFlowRunner
         }
 
         return (new CronExpression($expression))->isDue(\DateTime::createFromImmutable($now));
-    }
-
-    /**
-     * Rebuilds the executor inputs from the flow's saved design (version 2): the normalized steps
-     * [{id, type, name, config}], the links, and the schedule trigger step. Null when the design
-     * is missing/unreadable or carries no schedule trigger.
-     *
-     * @return array{0: array<int, array<string, mixed>>, 1: array<int, array<string, mixed>>, 2: array<string, mixed>}|null
-     */
-    private function parseDesign(mixed $design): ?array
-    {
-        if (!\is_array($design) || !\is_array($design['steps'] ?? null)) {
-            return null;
-        }
-        $steps = [];
-        $trigger = null;
-        foreach ($design['steps'] as $step) {
-            if (!\is_array($step) || !\is_string($step['id'] ?? null) || !\is_string($step['type'] ?? null)) {
-                return null;
-            }
-            $config = $step['config'] ?? null;
-            $normalized = [
-                'id' => $step['id'],
-                'type' => $step['type'],
-                'name' => \is_string($step['name'] ?? null) ? $step['name'] : $step['id'],
-                'config' => \is_array($config) ? $config : null,
-            ];
-            $steps[] = $normalized;
-            if ($trigger === null && $step['type'] === 'cron') {
-                $trigger = $normalized;
-            }
-        }
-        if ($trigger === null) {
-            return null;
-        }
-        $links = [];
-        foreach (\is_array($design['links'] ?? null) ? $design['links'] : [] as $link) {
-            if (\is_array($link) && \is_string($link['from'] ?? null) && \is_string($link['to'] ?? null)) {
-                $links[] = ['from' => $link['from'], 'fromPort' => (int) ($link['fromPort'] ?? 0), 'to' => $link['to']];
-            }
-        }
-
-        return [$steps, $links, $trigger];
     }
 }

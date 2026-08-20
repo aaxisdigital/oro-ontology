@@ -25,6 +25,8 @@ use Doctrine\Persistence\ManagerRegistry;
  */
 class EndpointFlowRunner
 {
+    use FlowDesignParserTrait;
+
     public const array METHODS = ['GET', 'POST', 'PUT', 'QUERY', 'PATCH', 'DELETE'];
 
     public function __construct(
@@ -55,7 +57,7 @@ class EndpointFlowRunner
         $best = null;
         $bestLiterals = -1;
         foreach ($flows as $flow) {
-            $parsed = $this->parseDesign($flow->getDesign());
+            $parsed = $this->parseDesign($flow->getDesign(), 'endpoint');
             if ($parsed === null) {
                 continue;
             }
@@ -177,47 +179,5 @@ class EndpointFlowRunner
         }
 
         return [$params, $literals];
-    }
-
-    /**
-     * Rebuilds the executor inputs from the flow's saved design — same contract as
-     * {@see ScheduledFlowRunner::parseDesign}, keyed on the `endpoint` trigger instead.
-     *
-     * @return array{0: array<int, array<string, mixed>>, 1: array<int, array<string, mixed>>, 2: array<string, mixed>}|null
-     */
-    private function parseDesign(mixed $design): ?array
-    {
-        if (!\is_array($design) || !\is_array($design['steps'] ?? null)) {
-            return null;
-        }
-        $steps = [];
-        $trigger = null;
-        foreach ($design['steps'] as $step) {
-            if (!\is_array($step) || !\is_string($step['id'] ?? null) || !\is_string($step['type'] ?? null)) {
-                return null;
-            }
-            $config = $step['config'] ?? null;
-            $normalized = [
-                'id' => $step['id'],
-                'type' => $step['type'],
-                'name' => \is_string($step['name'] ?? null) ? $step['name'] : $step['id'],
-                'config' => \is_array($config) ? $config : null,
-            ];
-            $steps[] = $normalized;
-            if ($trigger === null && $step['type'] === 'endpoint') {
-                $trigger = $normalized;
-            }
-        }
-        if ($trigger === null) {
-            return null;
-        }
-        $links = [];
-        foreach (\is_array($design['links'] ?? null) ? $design['links'] : [] as $link) {
-            if (\is_array($link) && \is_string($link['from'] ?? null) && \is_string($link['to'] ?? null)) {
-                $links[] = ['from' => $link['from'], 'fromPort' => (int) ($link['fromPort'] ?? 0), 'to' => $link['to']];
-            }
-        }
-
-        return [$steps, $links, $trigger];
     }
 }

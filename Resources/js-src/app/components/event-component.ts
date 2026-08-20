@@ -4,6 +4,7 @@ import routing from 'routing';
 import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid from 'aaxiscommon/js/app/widgets/data-grid';
+import {bindGridToolbar, formatDateTime, setRefreshBusy} from './component-support';
 
 interface OntologyEventOptions {
     _sourceElement: any;
@@ -66,11 +67,11 @@ class OntologyEventComponent extends BaseComponent {
                 },
                 {
                     key: 'startedAt', label: __('aaxis.ontology.event_view.started_at'), type: 'datetime',
-                    width: '190px', render: (row: EventRecord) => this.renderDate(row.startedAt)
+                    width: '190px', render: (row: EventRecord) => formatDateTime(row.startedAt)
                 },
                 {
                     key: 'finishedAt', label: __('aaxis.ontology.event_view.finished_at'), type: 'datetime',
-                    width: '190px', render: (row: EventRecord) => this.renderDate(row.finishedAt)
+                    width: '190px', render: (row: EventRecord) => formatDateTime(row.finishedAt)
                 }
             ],
             gridKey: 'ontology-event-view',
@@ -79,14 +80,7 @@ class OntologyEventComponent extends BaseComponent {
         });
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
-        this.$el.on('click.aaxisOntologyEvent', '[data-role="refresh"]', (e: any) => {
-            e.preventDefault();
-            this.load();
-        });
-        this.$el.on('click.aaxisOntologyEvent', '[data-role="columns-settings"]', (e: any) => {
-            e.preventDefault();
-            this.grid.toggleColumnSettings(e.currentTarget);
-        });
+        bindGridToolbar(this.$el, 'aaxisOntologyEvent', () => this.load(), () => this.grid);
 
         this.load();
     }
@@ -192,17 +186,8 @@ class OntologyEventComponent extends BaseComponent {
         return $wrap;
     }
 
-    private renderDate(value: string | null): string {
-        if (!value) {
-            return '';
-        }
-        const d = new Date(value);
-        return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
-    }
-
     private setBusy(busy: boolean): void {
-        this.$el.find('[data-role="refresh"]').prop('disabled', busy)
-            .find('.fa').toggleClass('fa-spin', busy);
+        setRefreshBusy(this.$el, busy);
     }
 
     dispose(): void {

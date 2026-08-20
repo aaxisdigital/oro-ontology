@@ -27,7 +27,8 @@
         {{ UI.renderProperty('aaxis.ontology.connector.name.label'|trans, entity.name) }}
         {{ UI.renderProperty('aaxis.ontology.connector.type.label'|trans, ('aaxis.ontology.connector.type.' ~ entity.type)|trans) }}
         <div class="control-group">
-            <label class="control-label">{{ 'aaxis.ontology.connector.config.label'|trans }}</label>
+            {# A caption for a read-only value, not a form control — so a span, not a <label>. #}
+            <span class="control-label">{{ 'aaxis.ontology.connector.config.label'|trans }}</span>
             {# maskedConfig (not entity.config): secret values are replaced with ******** server-side #}
             <div class="controls"><pre>{{ maskedConfig ? maskedConfig|json_encode(constant('JSON_PRETTY_PRINT')) : '' }}</pre></div>
         </div>

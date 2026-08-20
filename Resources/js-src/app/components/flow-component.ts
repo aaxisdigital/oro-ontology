@@ -5,6 +5,7 @@ import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
+import {bindGridToolbar, formatDateTime, setRefreshBusy} from './component-support';
 
 interface OntologyFlowOptions {
     _sourceElement: any;
@@ -75,7 +76,7 @@ class OntologyFlowComponent extends BaseComponent {
                 {key: 'enabled', label: __('aaxis.ontology.flow_view.enabled'), type: 'boolean', width: '120px'},
                 {
                     key: 'lastExecuted', label: __('aaxis.ontology.flow_view.last_executed'), type: 'datetime',
-                    width: '190px', render: (row: FlowRecord) => this.renderDate(row.lastExecuted)
+                    width: '190px', render: (row: FlowRecord) => formatDateTime(row.lastExecuted)
                 },
                 {
                     key: 'lastFinished', label: __('aaxis.ontology.flow_view.last_finished'), type: 'datetime',
@@ -84,11 +85,11 @@ class OntologyFlowComponent extends BaseComponent {
                     // showing an empty cell that reads like "never ran".
                     render: (row: FlowRecord) => row.running
                         ? __('aaxis.ontology.flow_view.running')
-                        : this.renderDate(row.lastFinished)
+                        : formatDateTime(row.lastFinished)
                 },
                 {
                     key: 'lastModified', label: __('aaxis.ontology.flow_view.last_modified'), type: 'datetime',
-                    width: '190px', render: (row: FlowRecord) => this.renderDate(row.lastModified)
+                    width: '190px', render: (row: FlowRecord) => formatDateTime(row.lastModified)
                 }
             ],
             actions,
@@ -99,14 +100,7 @@ class OntologyFlowComponent extends BaseComponent {
         });
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
-        this.$el.on('click.aaxisOntologyFlow', '[data-role="refresh"]', (e: any) => {
-            e.preventDefault();
-            this.load();
-        });
-        this.$el.on('click.aaxisOntologyFlow', '[data-role="columns-settings"]', (e: any) => {
-            e.preventDefault();
-            this.grid.toggleColumnSettings(e.currentTarget);
-        });
+        bindGridToolbar(this.$el, 'aaxisOntologyFlow', () => this.load(), () => this.grid);
         this.$el.on('click.aaxisOntologyFlow', '[data-role="add"]', (e: any) => {
             e.preventDefault();
             navigateTo(routing.generate('aaxis_ontology_flow_editor'), (e.originalEvent || e) as MouseEvent);
@@ -315,17 +309,8 @@ class OntologyFlowComponent extends BaseComponent {
             .finally(() => this.setBusy(false));
     }
 
-    private renderDate(value: string | null): string {
-        if (!value) {
-            return '';
-        }
-        const d = new Date(value);
-        return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
-    }
-
     private setBusy(busy: boolean): void {
-        this.$el.find('[data-role="refresh"]').prop('disabled', busy)
-            .find('.fa').toggleClass('fa-spin', busy);
+        setRefreshBusy(this.$el, busy);
     }
 
     dispose(): void {

@@ -7,6 +7,7 @@ import 'jquery.select2';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
+import {apiFetch, bindGridToolbar, csrfToken, formatDateTime, setRefreshBusy} from './component-support';
 
 interface OntologyDataViewOptions {
     _sourceElement: any;
@@ -94,7 +95,7 @@ class OntologyDataViewComponent extends BaseComponent {
                 {key: 'version', label: __('aaxis.ontology.data_view.version'), type: 'number', width: '110px', hidden: true},
                 {
                     key: 'updatedAt', label: __('aaxis.ontology.data_view.updated_at'), type: 'datetime',
-                    width: '190px', render: (row: DataRecord) => this.renderDate(row.updatedAt)
+                    width: '190px', render: (row: DataRecord) => formatDateTime(row.updatedAt)
                 },
                 {
                     key: 'payload', label: __('aaxis.ontology.data_view.payload'), type: 'json',
@@ -115,14 +116,7 @@ class OntologyDataViewComponent extends BaseComponent {
         });
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
-        this.$el.on('click.aaxisOntologyData', '[data-role="refresh"]', (e: any) => {
-            e.preventDefault();
-            this.load();
-        });
-        this.$el.on('click.aaxisOntologyData', '[data-role="columns-settings"]', (e: any) => {
-            e.preventDefault();
-            this.grid.toggleColumnSettings(e.currentTarget);
-        });
+        bindGridToolbar(this.$el, 'aaxisOntologyData', () => this.load(), () => this.grid);
         this.$el.on('click.aaxisOntologyData', '[data-role="add"]', (e: any) => {
             e.preventDefault();
             this.openAddData();
@@ -316,7 +310,7 @@ class OntologyDataViewComponent extends BaseComponent {
         /** Label shown in the box for a version: "v3 — 12/05/2026 14:22 — <uuid>  (current)". */
         const versionLabel = (v: VersionEntry): string => [
             'v' + v.version,
-            this.renderDate(v.updatedAt),
+            formatDateTime(v.updatedAt),
             v.uuid || ''
         ].filter(part => part !== '').join(' — ')
             + (v.current ? '  (' + __('aaxis.ontology.data_view.version_current') + ')' : '');
@@ -1108,7 +1102,7 @@ class OntologyDataViewComponent extends BaseComponent {
             payload: String(this.$addPayload.val() || '')
         };
         this.setAddSubmitBusy(true);
-        this.apiFetch(routing.generate('aaxis_ontology_data_create'), 'POST', body).then(res => {
+        apiFetch(routing.generate('aaxis_ontology_data_create'), 'POST', body).then(res => {
             if (!res.ok || !res.data || !res.data.success) {
                 this.setAddSubmitBusy(false);
                 this.showFormError(this.$addError, (res.data && res.data.message) || __('aaxis.ontology.data_view.save_error'));
@@ -1141,24 +1135,6 @@ class OntologyDataViewComponent extends BaseComponent {
         $error.text(message).removeAttr('hidden');
     }
 
-    private csrf(): string {
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-        return match ? decodeURIComponent(match[1]) : '';
-    }
-
-    private apiFetch(url: string, method: string, body?: any): Promise<{ok: boolean; data: any}> {
-        const opts: any = {
-            method,
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': this.csrf()}
-        };
-        if (body !== undefined) {
-            opts.body = JSON.stringify(body);
-        }
-        return fetch(url, opts).then(r => r.json().then(d => ({ok: r.ok, data: d})));
-    }
-
     private load(): void {
         this.setBusy(true);
         fetch(routing.generate('aaxis_ontology_data_list'), {credentials: 'same-origin'})
@@ -1188,14 +1164,6 @@ class OntologyDataViewComponent extends BaseComponent {
         if (entity !== null && entity.trim() !== '') {
             this.grid.setFilter('entity', {operator: 'equals', value: entity.trim()});
         }
-    }
-
-    private renderDate(value: string | null): string {
-        if (!value) {
-            return '';
-        }
-        const d = new Date(value);
-        return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
     }
 
     private renderPayload(row: DataRecord): any {
@@ -1305,8 +1273,7 @@ class OntologyDataViewComponent extends BaseComponent {
     }
 
     private setBusy(busy: boolean): void {
-        this.$el.find('[data-role="refresh"]').prop('disabled', busy)
-            .find('.fa').toggleClass('fa-spin', busy);
+        setRefreshBusy(this.$el, busy);
     }
 
     dispose(): void {

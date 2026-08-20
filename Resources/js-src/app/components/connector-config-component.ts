@@ -4,6 +4,7 @@ import routing from 'routing';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FormField, TestOutcome} from 'aaxiscommon/js/app/widgets/record-form-modal';
+import {apiFetch, csrfToken} from './component-support';
 
 interface ConnectorConfigOptions {
     _sourceElement: any;
@@ -720,7 +721,7 @@ class ConnectorConfigComponent extends BaseComponent {
      * resolves them from the connector's persisted config (hence connectorId).
      */
     private runConfigTest(type: string, config: Record<string, any>): Promise<TestOutcome> {
-        return this.apiFetch(routing.generate('aaxis_ontology_connector_test'), 'POST', {
+        return apiFetch(routing.generate('aaxis_ontology_connector_test'), 'POST', {
             type,
             config,
             id: this.connectorId
@@ -735,24 +736,6 @@ class ConnectorConfigComponent extends BaseComponent {
                 steps: Array.isArray(data.steps) ? data.steps : undefined
             };
         });
-    }
-
-    private csrf(): string {
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-        return match ? decodeURIComponent(match[1]) : '';
-    }
-
-    private apiFetch(url: string, method: string, body?: any): Promise<{ok: boolean; data: any}> {
-        const opts: any = {
-            method,
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': this.csrf()}
-        };
-        if (body !== undefined) {
-            opts.body = JSON.stringify(body);
-        }
-        return fetch(url, opts).then(r => r.json().then(d => ({ok: r.ok, data: d})));
     }
 
     /** Collection rows [{name, value}] → {"Header": "value"} object (rows without a name dropped). */

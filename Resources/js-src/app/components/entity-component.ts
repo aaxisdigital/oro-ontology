@@ -7,6 +7,7 @@ import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FieldChangeContext, FormField, SelectOption} from 'aaxiscommon/js/app/widgets/record-form-modal';
 import DwlPlayground from '../widgets/dwl-playground';
+import {apiFetch, bindGridToolbar, csrfToken, setRefreshBusy} from './component-support';
 
 interface OntologyEntityOptions {
     _sourceElement: any;
@@ -122,14 +123,7 @@ class OntologyEntityComponent extends BaseComponent {
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
         this.$el.on('click.aaxisOntologyEntity', '[data-role="add"]', this.onAdd.bind(this));
-        this.$el.on('click.aaxisOntologyEntity', '[data-role="refresh"]', (e: any) => {
-            e.preventDefault();
-            this.load();
-        });
-        this.$el.on('click.aaxisOntologyEntity', '[data-role="columns-settings"]', (e: any) => {
-            e.preventDefault();
-            this.grid.toggleColumnSettings(e.currentTarget);
-        });
+        bindGridToolbar(this.$el, 'aaxisOntologyEntity', () => this.load(), () => this.grid);
 
         this.load();
     }
@@ -229,7 +223,7 @@ class OntologyEntityComponent extends BaseComponent {
 
     private doPurge(entity: EntityRecord, done: () => void): void {
         this.setBusy(true);
-        this.apiFetch(routing.generate('aaxis_ontology_entity_purge_records', {id: entity.id}), 'DELETE')
+        apiFetch(routing.generate('aaxis_ontology_entity_purge_records', {id: entity.id}), 'DELETE')
             .then(res => {
                 if (!res.ok || !res.data || res.data.success !== true) {
                     messenger.notificationFlashMessage(
@@ -478,7 +472,7 @@ class OntologyEntityComponent extends BaseComponent {
             ? routing.generate('aaxis_ontology_entity_api_create')
             : routing.generate('aaxis_ontology_entity_api_update', {id: entity.id});
 
-        return this.apiFetch(url, entity === null ? 'POST' : 'PUT', {
+        return apiFetch(url, entity === null ? 'POST' : 'PUT', {
             name: values.name,
             systemId: values.systemId ? Number(values.systemId) : null,
             uniqueAttribute: values.uniqueAttribute,
@@ -539,7 +533,7 @@ class OntologyEntityComponent extends BaseComponent {
 
     private doDelete(entity: EntityRecord, done: () => void): void {
         this.setBusy(true);
-        this.apiFetch(routing.generate('aaxis_ontology_entity_delete', {id: entity.id}), 'DELETE')
+        apiFetch(routing.generate('aaxis_ontology_entity_delete', {id: entity.id}), 'DELETE')
             .then(res => {
                 if (!res.ok || !res.data || !res.data.successful) {
                     messenger.notificationFlashMessage('error', (res.data && res.data.message) || __('aaxis.ontology.entity_manager.delete_error'));
@@ -555,27 +549,8 @@ class OntologyEntityComponent extends BaseComponent {
             });
     }
 
-    private csrf(): string {
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-        return match ? decodeURIComponent(match[1]) : '';
-    }
-
-    private apiFetch(url: string, method: string, body?: any): Promise<{ok: boolean; data: any}> {
-        const opts: any = {
-            method,
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': this.csrf()}
-        };
-        if (body !== undefined) {
-            opts.body = JSON.stringify(body);
-        }
-        return fetch(url, opts).then(r => r.json().then(d => ({ok: r.ok, data: d})));
-    }
-
     private setBusy(busy: boolean): void {
-        this.$el.find('[data-role="refresh"]').prop('disabled', busy)
-            .find('.fa').toggleClass('fa-spin', busy);
+        setRefreshBusy(this.$el, busy);
     }
 
     dispose(): void {

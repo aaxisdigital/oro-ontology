@@ -7,6 +7,7 @@ import pageStateChecker from 'oronavigation/js/app/services/page-state-checker';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import createDwlField from '../widgets/dwl-field';
+import {apiFetch, csrfToken} from './component-support';
 
 interface FlowStep {
     type: string;
@@ -21,6 +22,25 @@ interface FlowStep {
  * (minute, hour, day-of-month, month, day-of-week), each a comma list of `*`, values, ranges,
  * with optional /step; month and weekday accept their english names.
  */
+/**
+ * Strips every leading and trailing `ch` from `value`.
+ *
+ * A scan rather than /^c+|c+$/g: that pattern's trailing alternative backtracks quadratically on a
+ * long run of the character, which a pasted label or path can trivially contain.
+ */
+function trimChar(value: string, ch: string): string {
+    let start = 0;
+    let end = value.length;
+    while (start < end && value[start] === ch) {
+        start++;
+    }
+    while (end > start && value[end - 1] === ch) {
+        end--;
+    }
+
+    return value.slice(start, end);
+}
+
 function isValidCron(expression: string): boolean {
     const expr = expression.trim().toLowerCase();
     if (/^@(reboot|yearly|annually|monthly|weekly|daily|midnight|hourly)$/.test(expr)) {
@@ -46,7 +66,7 @@ function isValidCron(expression: string): boolean {
                     return named + (i === 3 ? 1 : 0); // months are 1-based, weekdays 0-based
                 }
             }
-            return /^\d+$/.test(token) ? Number(token) : NaN;
+            return /^\d+$/.test(token) ? Number(token) : Number.NaN;
         };
         return field.split(',').every(item => {
             const [range, step, extra] = item.split('/');
@@ -679,7 +699,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-
     /**
      * Sizes the editor to end at the viewport bottom (minus a small page margin): the measured
      * top position adapts to whatever chrome Oro renders above it, where the CSS calc fallback
@@ -1297,8 +1316,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const minTop = viewport.offsetTop;
         const maxLeft = Math.max(minLeft, minLeft + viewport.clientWidth - el.offsetWidth);
         const maxTop = Math.max(minTop, minTop + viewport.clientHeight - el.offsetHeight);
-        el.style.left = `${Math.min(Math.max(minLeft, parseInt(el.style.left, 10) || 0), maxLeft)}px`;
-        el.style.top = `${Math.min(Math.max(minTop, parseInt(el.style.top, 10) || 0), maxTop)}px`;
+        el.style.left = `${Math.min(Math.max(minLeft, Number.parseInt(el.style.left, 10) || 0), maxLeft)}px`;
+        el.style.top = `${Math.min(Math.max(minTop, Number.parseInt(el.style.top, 10) || 0), maxTop)}px`;
     }
 
     /** localStorage key of the toolbox workspace preference — ONE spot shared by every flow. */
@@ -1308,8 +1327,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private saveToolboxState(): void {
         const el = this.toolbox();
         const state: Record<string, any> = {visible: !el.hidden};
-        const x = parseInt(el.style.left, 10);
-        const y = parseInt(el.style.top, 10);
+        const x = Number.parseInt(el.style.left, 10);
+        const y = Number.parseInt(el.style.top, 10);
         if (Number.isFinite(x) && Number.isFinite(y)) {
             state.x = x;
             state.y = y;
@@ -1740,7 +1759,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      */
     private defaultName(type: string): string {
         const label = this.stepMeta[type] ? this.stepMeta[type].label : type;
-        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || type;
+        const base = trimChar(label.toLowerCase().replace(/[^a-z0-9]+/g, '_'), '_') || type;
         for (let n = 1; ; n++) {
             const candidate = `${base}-${n}`;
             if (!this.nameTaken(candidate)) {
@@ -2462,7 +2481,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         const RESERVED = ['body', 'headers', 'queryparams', 'oauthapplication', 'flowuuid', 'flow-uuid', 'choiceresults', 'payload'];
         const pathError = (): string => {
-            const path = String($path.val() || '').trim().replace(/^\/+|\/+$/g, '');
+            const path = trimChar(String($path.val() || '').trim(), '/');
             if (path === '') {
                 return __('aaxis.ontology.flow_editor.endpoint_path_required');
             }
@@ -3642,7 +3661,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             : this.steps.find(s => px >= s.x && px <= s.x + this.tileSize && py >= s.y && py <= s.y + this.tileSize) || null;
         const freePort = target === null
             ? -1
-            : [...Array(portCount(target.type)).keys()]
+            : [...new Array(portCount(target.type)).keys()]
                 .find(p => !this.links.some(l => l.from === target.id && l.fromPort === p)) ?? -1;
 
         let added: PlacedStep;
@@ -4546,7 +4565,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         session.error = null;
         this.updateDebugger();
 
-        this.apiFetch(routing.generate('aaxis_ontology_flow_debug_step'), 'POST', {
+        apiFetch(routing.generate('aaxis_ontology_flow_debug_step'), 'POST', {
             flowId: this.flow && this.flow.id ? this.flow.id : null,
             steps: session.steps,
             links: session.links,
@@ -4602,7 +4621,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
         $button.prepend($spinner);
 
-        this.apiFetch(routing.generate('aaxis_ontology_flow_debug'), 'POST', {
+        apiFetch(routing.generate('aaxis_ontology_flow_debug'), 'POST', {
             // Writers stamp their upserts with this flow (null = never saved -> Manual fallback).
             flowId: this.flow && this.flow.id ? this.flow.id : null,
             steps: session.steps,
@@ -4651,7 +4670,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return;
         }
         ui.$evalRun.prop('disabled', true);
-        this.apiFetch(routing.generate('aaxis_ontology_flow_debug_eval'), 'POST', {
+        apiFetch(routing.generate('aaxis_ontology_flow_debug_eval'), 'POST', {
             expression,
             contextKey: session.contextKey
         }).then(res => {
@@ -4724,7 +4743,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $save.prop('disabled', true);
         const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
         $save.prepend($spinner);
-        this.apiFetch(url, this.flow === null ? 'POST' : 'PUT', {
+        apiFetch(url, this.flow === null ? 'POST' : 'PUT', {
             steps: this.steps.map(s => ({type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null})),
             design: this.currentDesign()
         }).then(res => {
@@ -4751,12 +4770,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }).finally(() => {
             $spinner.remove();
         });
-    }
-
-    private csrf(): string {
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-        return match ? decodeURIComponent(match[1]) : '';
     }
 
     // --- Settings catalogs (fetched once, kept in memory) ------------------------
@@ -4841,18 +4854,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private prefetchCatalogs(): void {
         this.entityCatalog().catch(() => undefined);
         this.connectorCatalog().catch(() => undefined);
-    }
-
-    private apiFetch(url: string, method: string, body?: any): Promise<{ok: boolean; data: any}> {
-        const opts: any = {
-            method,
-            credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': this.csrf()}
-        };
-        if (body !== undefined) {
-            opts.body = JSON.stringify(body);
-        }
-        return fetch(url, opts).then(r => r.json().then(d => ({ok: r.ok, data: d})));
     }
 
     dispose(): void {
