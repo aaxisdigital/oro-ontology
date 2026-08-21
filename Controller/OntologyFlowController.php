@@ -82,6 +82,7 @@ class OntologyFlowController extends AbstractOntologyController
             'flow' => $flow !== null ? $this->serialize($flow) : null,
             'gridSpacing' => $this->gridSpacing(),
             'stepSizeFactor' => $this->stepSizeFactor(),
+            'debugAutoCloseSeconds' => max(0, (int) $this->container->get(ConfigManager::class)->get('aaxis_ontology.flow_debug_autoclose_seconds')),
         ];
     }
 
@@ -304,7 +305,7 @@ class OntologyFlowController extends AbstractOntologyController
 
         $executor = $this->container->get(FlowDebugExecutor::class);
         try {
-            $output = $executor->execute($steps, $links, $input, $flow);
+            $output = $executor->execute($steps, $links, $input, $flow, null, null, $this->debugRunInfo());
         } catch (FlowStepFailure $e) {
             // The editor paints the trail: executed tiles amber, the failing one red.
             return new JsonResponse([
@@ -350,14 +351,21 @@ class OntologyFlowController extends AbstractOntologyController
         }
         [$steps, $links, $input, $flow] = $parsed;
 
-        $index = $payload['index'] ?? 0;
-        if (!\is_int($index) || $index < 0) {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid debug state.'], 400);
-        }
-        $context = null;
-        if ($index > 0) {
-            $context = $this->loadDebugContext($payload['contextKey'] ?? null);
-            if ($context === null) {
+        // The walk state (context + the frame STACK — step-into descends into subflows) lives
+        // server-side; the client only round-trips the key. No key = a fresh session.
+        $blob = null;
+        $contextKey = $payload['contextKey'] ?? null;
+        if (\is_string($contextKey) && $contextKey !== '') {
+            $stored = $this->loadDebugContext($contextKey);
+            if ($stored === null) {
+                return new JsonResponse([
+                    'success' => false,
+                    'message' => 'The debug session expired — restart the debug.',
+                ], 422);
+            }
+            // The blob is {context, frames, done}; a legacy plain context cannot resume a walk.
+            $blob = \is_array($stored['frames'] ?? null) ? $stored : null;
+            if ($blob === null) {
                 return new JsonResponse([
                     'success' => false,
                     'message' => 'The debug session expired — restart the debug.',
@@ -367,14 +375,24 @@ class OntologyFlowController extends AbstractOntologyController
 
         $executor = $this->container->get(FlowDebugExecutor::class);
         try {
-            $result = $executor
-                ->executeFrom($steps, $links, $input, $index, $context, $flow, ($payload['runAll'] ?? false) === true);
+            $result = $executor->debugWalk(
+                $steps,
+                $links,
+                $input,
+                $blob,
+                $flow,
+                ($payload['runAll'] ?? false) === true,
+                $this->debugRunInfo(),
+                ($payload['stepInto'] ?? false) === true,
+                ($payload['stepOut'] ?? false) === true
+            );
         } catch (FlowStepFailure $e) {
             return new JsonResponse([
                 'success' => false,
                 'message' => $e->getMessage(),
                 'failedStepId' => $e->stepId,
                 'executedIds' => $e->executedIds,
+                'subflowTrails' => $executor->subflowTrails(),
             ], 422);
         } catch (\RuntimeException $e) {
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
@@ -382,9 +400,8 @@ class OntologyFlowController extends AbstractOntologyController
 
         return new JsonResponse([
             'success' => true,
-            'executedIds' => $executor->lastExecutedIds(),
-            'contextKey' => $this->storeDebugContext($result['context']),
-        ] + $result);
+            'contextKey' => $this->storeDebugContext($result['blob']),
+        ] + $result['response']);
     }
 
     /**
@@ -401,7 +418,9 @@ class OntologyFlowController extends AbstractOntologyController
         if ($expression === '') {
             return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
         }
-        $context = $this->loadDebugContext(\is_array($payload) ? ($payload['contextKey'] ?? null) : null);
+        $stored = $this->loadDebugContext(\is_array($payload) ? ($payload['contextKey'] ?? null) : null);
+        // The stored blob wraps the context since the step-into debugger ({context, frames, done}).
+        $context = \is_array($stored['frames'] ?? null) ? ($stored['context'] ?? null) : $stored;
         if ($context === null) {
             return new JsonResponse([
                 'success' => false,
@@ -426,7 +445,9 @@ class OntologyFlowController extends AbstractOntologyController
      */
     private function storeDebugContext(array $context): ?string
     {
-        $key = $context['flowUuid'] ?? null;
+        // Two shapes live here: Run Now stores the final CONTEXT (uuid at the top level), the
+        // step debugger stores the whole WALK BLOB ({context, frames, done} — uuid inside).
+        $key = $context['flowUuid'] ?? ($context['context']['flowUuid'] ?? null);
         if (!\is_string($key) || !preg_match('/^[0-9a-f-]{36}$/i', $key)) {
             return null;
         }
@@ -509,6 +530,32 @@ class OntologyFlowController extends AbstractOntologyController
      * never read from the payload — it is recomputed from the steps on every save (native flows
      * never reach this method).
      */
+    /**
+     * The flow-start event bits for editor-driven runs: trigger "debug" plus the acting
+     * back-office user's name/email.
+     *
+     * @return array{trigger: string, user?: array{name: string, email: string}}
+     */
+    private function debugRunInfo(): array
+    {
+        $info = ['trigger' => 'debug'];
+        $user = $this->getUser();
+        if (\is_object($user)) {
+            $first = method_exists($user, 'getFirstName') ? (string) $user->getFirstName() : '';
+            $last = method_exists($user, 'getLastName') ? (string) $user->getLastName() : '';
+            $name = trim($first . ' ' . $last);
+            if ($name === '') {
+                $name = (string) $user->getUserIdentifier();
+            }
+            $info['user'] = [
+                'name' => $name,
+                'email' => method_exists($user, 'getEmail') ? (string) $user->getEmail() : '',
+            ];
+        }
+
+        return $info;
+    }
+
     private function save(OntologyFlow $entity, Request $request): JsonResponse
     {
         $payload = json_decode($request->getContent(), true);

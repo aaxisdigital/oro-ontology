@@ -27,6 +27,8 @@ class Configuration implements ConfigurationInterface
             'flow_editor_grid_spacing' => ['type' => 'integer', 'value' => 10],
             // Flow editor: step tile size, as a multiple of the dot spacing (tile = factor × spacing px).
             'flow_editor_step_size_factor' => ['type' => 'integer', 'value' => 8],
+            // Debugger: seconds before a FINISHED debug pane closes itself (0 disables it).
+            'flow_debug_autoclose_seconds' => ['type' => 'integer', 'value' => 15],
             // "Invoke PHP" flow step: namespace prefixes whose container services may be called
             // (one per line). The compile-time locator holds EVERY service; this runtime filter
             // decides what flows may actually reach.
@@ -68,7 +70,7 @@ class Configuration implements ConfigurationInterface
             'flow_element_file_delete' => ['type' => 'boolean', 'value' => true],
             'flow_element_file_rename' => ['type' => 'boolean', 'value' => true],
             'flow_element_logger' => ['type' => 'boolean', 'value' => true],
-            'flow_element_event' => ['type' => 'boolean', 'value' => false],
+            'flow_element_event' => ['type' => 'boolean', 'value' => true],
             'flow_element_email' => ['type' => 'boolean', 'value' => false],
             'flow_element_ms_teams' => ['type' => 'boolean', 'value' => true],
         ]);

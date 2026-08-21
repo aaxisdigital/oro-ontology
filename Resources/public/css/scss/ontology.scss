@@ -153,46 +153,46 @@
 
 // Status column: a colored badge (Running | Success | Error), the error rows followed by the
 // failure description (single line; the full text lives in the tooltip and the copy value).
-.aaxis-event-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 100%;
+.aaxis-event-kind {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: #eaf1f8;
+    color: #2b6cb0;
+    font-size: 11px;
+    white-space: nowrap;
 
-    &__badge {
-        flex: 0 0 auto;
-        padding: 1px 8px;
-        border-radius: 10px;
-        font-size: 11px;
-        font-weight: font-weight('bold');
-    }
-
-    &--running &__badge {
-        background: #eaf1f8;
-        color: #2b6cb0;
-    }
-
-    &--success &__badge {
-        background: #e8f5ec;
-        color: #2c7a3f;
-    }
-
-    &--error &__badge {
+    &--flow-exception {
         background: #fdecea;
         color: #c0392b;
     }
 
-    &__message {
-        flex: 0 1 auto;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: #922b21;
+    &--flow-start,
+    &--flow-finish,
+    &--subflow-start,
+    &--subflow-finish {
+        background: #e8f6ec;
+        color: #1a7f37;
+    }
+
+    &--data-upsert {
+        background: #fef7e6;
+        color: #8a6d1a;
     }
 }
 
-// Pretty-printed JSON in a dialog
+.aaxis-event-payload {
+    display: inline-block;
+    max-width: 480px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: Menlo, Monaco, Consolas, monospace;
+    font-size: 11.5px;
+    color: #4a5a6a;
+    vertical-align: middle;
+}
+
 .aaxis-json-toolbar {
     display: flex;
     justify-content: space-between;
@@ -1053,6 +1053,68 @@
     display: none !important;
 }
 
+// The finished-debug auto-close countdown: a full-width track under the buttons whose fill
+// DECREASES linearly until the pane dismisses itself.
+.aaxis-flow-editor__debug-autoclose {
+    flex: 1 1 100%;
+    height: 4px;
+    margin-top: 8px;
+    border-radius: 2px;
+    background: #e4e9ee;
+    overflow: hidden;
+}
+
+.aaxis-flow-editor__debug-autoclose-bar {
+    height: 100%;
+    border-radius: 2px;
+    background: #2b6cb0;
+    transition: width 0.1s linear;
+}
+
+// VSCode-style debugger controls: uniform 34px SQUARES, glyph dead-center (inline-flex), label
+// in the tooltip only. Blue glyphs; the stop button's is red.
+.aaxis-flow-editor__debug-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid #c9d4de;
+    border-radius: 6px;
+    background: #fff;
+    color: #2b6cb0;
+    cursor: pointer;
+
+    svg {
+        display: block;
+    }
+
+    .fa {
+        font-size: 14px;
+    }
+
+    &:hover:not([disabled]) {
+        background: #f0f6ff;
+        border-color: #2b6cb0;
+    }
+
+    &[disabled] {
+        color: #a9b6c2;
+        border-color: #e0e6ec;
+        cursor: default;
+    }
+
+    &--stop {
+        color: #c0392b;
+
+        &:hover:not([disabled]) {
+            background: #fdecea;
+            border-color: #c0392b;
+        }
+    }
+}
+
 .aaxis-flow-editor {
     display: flex;
     flex-direction: column;
@@ -1295,6 +1357,20 @@
         }
     }
 
+    // The first action tab pushes itself (and everything after) to the bar's right edge.
+    &__tab--push-right {
+        margin-left: auto;
+    }
+
+    // Drag-reorder drop indicators: a strong edge on the half where the tab would land.
+    &__tab.is-drop-before {
+        box-shadow: inset 3px 0 0 #2b6cb0;
+    }
+
+    &__tab.is-drop-after {
+        box-shadow: inset -3px 0 0 #2b6cb0;
+    }
+
     &__tab--action {
         padding: 7px 10px;
         color: #2b6cb0;
@@ -1400,6 +1476,8 @@
         justify-content: flex-end;
         gap: 8px;
         flex: 0 0 auto;
+        // The auto-close countdown bar (flex: 1 1 100%) wraps onto its own full-width line.
+        flex-wrap: wrap;
     }
 
     &__canvas {

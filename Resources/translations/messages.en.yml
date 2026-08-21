@@ -32,6 +32,9 @@ aaxis:
             enabled:
                 label: Enabled
             flows:
+                debug_autoclose:
+                    label: 'Debugger auto-close (seconds)'
+                    tooltip: 'A FINISHED debug pane dismisses itself after this many seconds, with a countdown bar under the buttons. 0 keeps it open until closed manually.'
                 invoke_php_namespaces:
                     label: 'Invoke PHP: allowed class prefixes'
                     tooltip: 'Namespace prefixes (one per line) whose container services the "Invoke PHP" flow step may call — e.g. Aaxis\ or Edge\ or a specific Oro\Bundle\SomeBundle\ one.'

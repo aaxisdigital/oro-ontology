@@ -86,7 +86,7 @@ class ScheduledFlowRunner
         }
 
         try {
-            $this->executor->execute($steps, $links, [], $flow);
+            $this->executor->execute($steps, $links, [], $flow, null, null, ['trigger' => 'schedule']);
 
             return ['flow' => $name, 'status' => 'executed'];
         } catch (\Throwable $e) {

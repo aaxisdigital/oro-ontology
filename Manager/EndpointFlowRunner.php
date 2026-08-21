@@ -92,14 +92,14 @@ class EndpointFlowRunner
      *
      * @return array<string, mixed>
      */
-    public function run(array $match, mixed $body, array $headers, array $queryParams = [], array $extraInput = []): array
+    public function run(array $match, mixed $body, array $headers, array $queryParams = [], array $extraInput = [], array $runInfo = []): array
     {
         return $this->executor->execute($match['steps'], $match['links'], [
             'params' => $match['params'],
             'body' => $body,
             'headers' => $headers,
             'queryParams' => $queryParams,
-        ] + $extraInput, $match['flow']);
+        ] + $extraInput, $match['flow'], null, null, $runInfo !== [] ? $runInfo : ['trigger' => 'endpoint']);
     }
 
     /**

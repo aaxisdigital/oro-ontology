@@ -197,6 +197,12 @@ class FlowStepValidator
         if ($step['type'] === 'endpoint' && \is_string($config['response'] ?? null) && trim($config['response']) !== '') {
             $snippets[] = $config['response'];
         }
+        // Event: the value is DWL only while its toggle is on (plain text otherwise).
+        if ($step['type'] === 'event' && ($config['value_dwl'] ?? false) === true
+            && \is_string($config['value'] ?? null) && trim($config['value']) !== ''
+        ) {
+            $snippets[] = $config['value'];
+        }
         // Logger: the message is DWL only while its toggle is on (plain text otherwise).
         if ($step['type'] === 'logger' && ($config['message_dwl'] ?? false) === true
             && \is_string($config['message'] ?? null) && trim($config['message']) !== ''
@@ -328,6 +334,8 @@ class FlowStepValidator
                 && (!isset($config['params']) || \is_string($config['params'])),
             // "Logger": the message text (DWL-capable via its toggle).
             'logger' => $filled('message') && $boolOk('message_dwl'),
+            // "Event": the value emitted as a log-message flow event (DWL-capable via toggle).
+            'event' => $filled('value') && $boolOk('value_dwl'),
             // "MS Teams": the context variable holding the message (stringified at run time)
             // plus the Power Automate webhook — a well-formed HTTPS URL (plain text, not DWL;
             // the domain is deliberately NOT restricted to powerplatform.com).

@@ -58,6 +58,13 @@ class FlowDebugExecutor
     /** @var array<int, int> flow ids currently on the CALL SUBFLOW stack (cycle/depth guard) */
     private array $subflowStack = [];
 
+    /**
+     * The nested subflow trails of the CURRENT top-level run: [{flowId, flowName, executedIds}],
+     * merged per flow (a foreach union-merges its iterations). The debug endpoints ship these so
+     * the editor can VISIT the subflow tabs and paint what ran inside them.
+     */
+    private array $subflowTrails = [];
+
     private const int TIMEOUT = 30;
 
     public function __construct(
@@ -70,6 +77,7 @@ class FlowDebugExecutor
         private readonly DatabaseQueryRunner $database,
         private readonly LoggerInterface $logger,
         private readonly PhpMethodInvoker $phpInvoker,
+        private readonly OntologyFlowEventEmitter $flowEvents,
     ) {
     }
 
@@ -104,7 +112,7 @@ class FlowDebugExecutor
      *
      * @throws \RuntimeException with a user-readable message when a step cannot execute
      */
-    public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null, ?array $seedContext = null): array
+    public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null, ?array $seedContext = null, array $runInfo = []): array
     {
         $this->assertRunnable($steps);
         $order = $this->executionOrder($steps, $links);
@@ -115,6 +123,18 @@ class FlowDebugExecutor
         // the flowUuid variable (a valid DWL identifier).
         // Minted only for a top-level run: a sub-flow inherits its caller's uuid via the param.
         $executionUuid ??= $this->dataApi->generateUuid();
+
+        if ($this->subflowStack === []) {
+            $this->subflowTrails = []; // a new TOP-LEVEL run starts a fresh visit list
+        }
+        // flow-start opens the event trail (subflow-start for a NESTED run): how the run was
+        // triggered (debug | schedule | endpoint | subflow | …) and — for debug/endpoint runs
+        // with credentials — who.
+        $isNested = ($runInfo['trigger'] ?? '') === 'subflow';
+        $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-start' : 'flow-start', array_filter([
+            'trigger' => (string) ($runInfo['trigger'] ?? 'debug'),
+            'user' => \is_array($runInfo['user'] ?? null) ? $runInfo['user'] : null,
+        ], static fn ($v) => $v !== null));
 
         // A CALL SUBFLOW run seeds the CALLER's context — the subflow reads and extends it, and
         // the caller continues with the result (shared-context semantics).
@@ -131,11 +151,16 @@ class FlowDebugExecutor
                     $order = $this->executionOrder($steps, $links, self::choiceResults($context));
                 }
             }
+        } catch (\Throwable $e) {
+            // The run failed: the trail closes with flow-exception instead of flow-finish.
+            $this->flowEvents->emit($flow, $executionUuid, 'flow-exception', ['message' => $e->getMessage()]);
+            throw $e;
         } finally {
             // finally, not a happy-path call: a failed run must still release the "running" state
             // or the flow would be blocked from ever being scheduled again.
             $this->touchLastFinished($flow);
         }
+        $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-finish' : 'flow-finish');
 
         return $context;
     }
@@ -166,75 +191,468 @@ class FlowDebugExecutor
             throw new FlowStepFailure($e->getMessage(), $step['id'], $this->lastExecutedIds, $e);
         }
         $this->lastExecutedIds[] = $step['id'];
+        // Every executed step leaves one event — the run's step-by-step trail.
+        $this->flowEvents->emit($flow, $executionUuid, 'step', ['name' => $step['name'], 'type' => $step['type']]);
     }
 
     /**
-     * Step-by-step debug: executes the step at $index of the execution order (or from it to the
-     * end when $runToEnd), starting from the CLIENT-HELD context accumulated by the previous
-     * steps. Index 0 seeds a fresh context — minting the run's flowUuid — and ignores $context;
-     * later indexes require the passed context to still carry that uuid (writers keep stamping
-     * it). Returns the new context plus progress metadata for the stepper UI.
+     * STEP-INTO debug: executes exactly ONE meaningful tick of the flow, descending INTO invoked
+     * subflows frame by frame — the editor's Next button drives it. The whole cursor lives in the
+     * $blob (stored server-side between calls): a STACK of frames (root flow at the bottom;
+     * sub_flow pushes one frame, foreach pushes one frame per run and re-enters per iteration)
+     * plus the SHARED context.
      *
-     * @param array<int, array{id: string, type: string, name: string, config: array<string, mixed>|null}> $steps
-     * @param array<int, array{from: string, fromPort: int, to: string}> $links
-     * @param array<string, mixed>      $input
-     * @param array<string, mixed>|null $context
+     * One tick is ONE of:
+     *  - executing the current frame's next step (transition null);
+     *  - ENTERING a subflow ('entered': the target's trigger is the executed step, nothing ran);
+     *  - RE-ENTERING a foreach subflow for the next iteration ('reentered': the editor clears the
+     *    subflow canvas and marks the trigger again);
+     *  - RETURNING to the caller ('returned': the caller's sub_flow/foreach step is the executed
+     *    step — it is only now complete).
      *
-     * @return array{context: array<string, mixed>, step: array{name: string, type: string}, index: int, total: int, done: bool}
+     * With $runAll the ticks loop to the end in one call (per-subflow trails are aggregated for
+     * the editor's visit animation instead of transitions).
      *
-     * @throws \RuntimeException with a user-readable message when a step cannot execute
+     * @return array{blob: array<string, mixed>, response: array<string, mixed>}
+     *
+     * @throws FlowStepFailure when a step fails (the response fields ride on the exception via
+     *                         its public properties; flow-exception events are emitted here)
      */
-    public function executeFrom(array $steps, array $links, array $input, int $index, ?array $context, ?OntologyFlow $flow = null, bool $runToEnd = false): array
+    public function debugWalk(array $steps, array $links, array $input, ?array $blob, ?OntologyFlow $flow = null, bool $runAll = false, array $runInfo = [], bool $stepInto = true, bool $stepOut = false): array
     {
-        // Branch-aware: the verdicts recorded by the choice steps ALREADY executed (carried by the
-        // debug context) rebuild exactly the path walked so far, so the client's plain index stays
-        // a valid cursor into it. `total` grows as later choices resolve their branch.
-        $this->assertRunnable($steps);
-        $order = $this->executionOrder($steps, $links, self::choiceResults($context ?? []));
-        $total = \count($order);
-        if ($index < 0 || $index >= $total) {
-            throw new \RuntimeException('There is no step left to execute.');
-        }
         $this->touchLastExecuted($flow);
+        try {
+            if ($blob === null || !\is_array($blob['frames'] ?? null)) {
+                $this->assertRunnable($steps);
+                $order = $this->executionOrder($steps, $links);
+                $executionUuid = $this->dataApi->generateUuid();
+                $blob = [
+                    'context' => $this->initialContext($order[0], $input, $executionUuid),
+                    'frames' => [[
+                        'kind' => 'flow',
+                        'flowId' => $flow?->getId(),
+                        'flowName' => $flow?->getName(),
+                        'steps' => $steps,
+                        'links' => $links,
+                        'index' => 0,
+                        'callerStepId' => null,
+                    ]],
+                    'done' => false,
+                ];
+                $this->flowEvents->emit($flow, $executionUuid, 'flow-start', array_filter([
+                    'trigger' => (string) ($runInfo['trigger'] ?? 'debug'),
+                    'user' => \is_array($runInfo['user'] ?? null) ? $runInfo['user'] : null,
+                ], static fn ($v) => $v !== null));
+            }
+            if (($blob['done'] ?? false) === true) {
+                throw new \RuntimeException('There is no step left to execute.');
+            }
 
-        if ($index === 0) {
-            $executionUuid = $this->dataApi->generateUuid();
-            $context = $this->initialContext($order[0], $input, $executionUuid);
-        } else {
-            $context = \is_array($context) ? $context : [];
-            $executionUuid = (string) ($context['flowUuid'] ?? '');
-            if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $executionUuid)) {
-                throw new \RuntimeException('The debug context lost its flowUuid — restart the debug session.');
+            $trails = [];
+            if ($stepOut && \count($blob['frames']) > 1) {
+                // STEP OUT: run the current frame to completion — remaining foreach iterations
+                // included — stopping the moment it pops back to the caller ('returned').
+                $startFrames = \count($blob['frames']);
+                do {
+                    $response = $this->debugTick($blob, $trails, false);
+                } while (!$blob['done'] && \count($blob['frames']) >= $startFrames);
+                $response['subflowTrails'] = array_values($trails);
+            } else {
+                do {
+                    // Run all steps OVER subflows (atomic — fewer ticks, identical events/trails);
+                    // a single tick honors the caller's choice: step INTO or OVER the invoker.
+                    $response = $this->debugTick($blob, $trails, $runAll ? false : $stepInto);
+                } while ($runAll && !$blob['done'] && \count($blob['frames'] ?? []) > 0);
+
+                if ($runAll) {
+                    $response['subflowTrails'] = array_values($trails);
+                    $response['executedIds'] = $response['rootExecuted'] ?? [];
+                } elseif (($response['_overTrails'] ?? []) !== []) {
+                    // A stepped-OVER invoker: its nested trails feed the editor's visit animation.
+                    $response['subflowTrails'] = $response['_overTrails'];
+                }
+            }
+            unset($response['rootExecuted'], $response['_overTrails']);
+            $response['context'] = $blob['context'];
+            // What the NEXT tick would execute — the editor shows "Step into" when it is a
+            // subflow invoker (null when the next tick is a return/re-enter or the run is done).
+            $response['next'] = null;
+            if (!$blob['done'] && \count($blob['frames'] ?? []) > 0) {
+                $top = $blob['frames'][\count($blob['frames']) - 1];
+                $topOrder = $this->executionOrder($top['steps'], $top['links'], self::choiceResults($blob['context']));
+                $upcoming = $topOrder[$top['index']] ?? null;
+                if ($upcoming !== null) {
+                    $response['next'] = ['id' => $upcoming['id'], 'name' => $upcoming['name'], 'type' => $upcoming['type']];
+                }
+            }
+
+            return ['blob' => $blob, 'response' => $response];
+        } finally {
+            // Each call returns control to the user — stamping every call keeps a paused debug
+            // session from looking like a run in progress and blocking the scheduler.
+            $this->touchLastFinished($flow);
+        }
+    }
+
+    /**
+     * One tick of {@see debugWalk}. Mutates $blob (frames/context/done) and appends per-subflow
+     * executed ids into $trails (keyed by flow id — the runAll visit animation).
+     *
+     * @param array<string, mixed>            $blob
+     * @param array<int, array<string,mixed>> $trails
+     *
+     * @return array<string, mixed> the tick's response fields
+     */
+    private function debugTick(array &$blob, array &$trails, bool $stepInto): array
+    {
+        $context = &$blob['context'];
+        $frames = &$blob['frames'];
+        $frame = &$frames[\count($frames) - 1];
+        $executionUuid = (string) ($context['flowUuid'] ?? '');
+        $frameFlow = $frame['flowId'] !== null
+            ? $this->doctrine->getRepository(OntologyFlow::class)->find((int) $frame['flowId'])
+            : null;
+
+        $order = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
+        $total = \count($order);
+
+        // Frame exhausted: return to the caller (or finish an iteration / the whole run).
+        if ($frame['index'] >= $total) {
+            return $this->debugLeaveFrame($blob, $trails, $order);
+        }
+
+        $step = $order[$frame['index']];
+
+        // A subflow invoker DESCENDS when stepping INTO; stepping OVER falls through to the
+        // atomic arm below (callSubflow/foreachSubflow — events and trails as a full run).
+        if ($stepInto && \in_array($step['type'], ['sub_flow', 'foreach'], true)) {
+            return $this->debugEnterFrame($blob, $step, $frameFlow, $executionUuid);
+        }
+
+        // A plain step (or a stepped-OVER invoker): execute it against the shared context.
+        $this->lastExecutedIds = [];
+        if ($this->subflowStack === []) {
+            $this->subflowTrails = []; // per-tick: a stepped-over invoker reports ITS trails
+        }
+        try {
+            $this->executeStep($step, $context, $frameFlow, $executionUuid);
+        } catch (\RuntimeException $e) {
+            $this->emitDebugException($blob, $e->getMessage(), $executionUuid);
+            throw new FlowStepFailure($e->getMessage(), $step['id'], [], $e);
+        }
+        $tickOverTrails = array_values($this->subflowTrails);
+        foreach ($this->subflowTrails as $trail) {
+            if (!isset($trails[$trail['flowId']])) {
+                $trails[$trail['flowId']] = $trail;
+            } else {
+                $trails[$trail['flowId']]['executedIds'] = array_values(array_unique(array_merge(
+                    $trails[$trail['flowId']]['executedIds'],
+                    $trail['executedIds']
+                )));
+            }
+        }
+        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
+            'name' => $step['name'],
+            'type' => $step['type'],
+        ]);
+        $frame['index']++;
+        if ($frame['kind'] !== 'flow') {
+            $this->recordDebugTrail($trails, $frame, [$step['id']]);
+        }
+
+        $done = \count($frames) === 1 && $frame['index'] >= $total;
+        if ($done) {
+            $blob['done'] = true;
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'flow-finish');
+        }
+
+        return $this->debugResponse($blob, $step, $order, null) + [
+            'rootExecuted' => $frame['kind'] === 'flow' ? [$step['id']] : [],
+            // Only a stepped-OVER invoker carries trails on ITS OWN tick (the visit animation);
+            // in-frame walk bookkeeping must not — it made the editor bounce home every step.
+            '_overTrails' => $tickOverTrails,
+        ];
+    }
+
+    /**
+     * Push a frame for the sub_flow/foreach step the cursor stands on; the tick "executes" the
+     * subflow's TRIGGER (transition 'entered').
+     *
+     * @param array<string, mixed> $blob
+     * @param array<string, mixed> $step
+     */
+    private function debugEnterFrame(array &$blob, array $step, ?OntologyFlow $callerFlow, string $executionUuid): array
+    {
+        $context = &$blob['context'];
+        $frames = &$blob['frames'];
+        $config = \is_array($step['config']) ? $step['config'] : [];
+
+        try {
+            if (\count($frames) >= 10) {
+                throw new \RuntimeException(sprintf('Step "%s": subflow calls nested deeper than 10 levels.', $step['name']));
+            }
+            [$id, $target, $subStepsRaw, $subLinksRaw] = $this->resolveSubflowTarget($step['name'], $config);
+            foreach ($frames as $open) {
+                if ((int) ($open['flowId'] ?? 0) === $id && $open['kind'] !== 'flow') {
+                    throw new \RuntimeException(sprintf(
+                        'Step "%s": circular subflow call — "%s" is already running in this execution.',
+                        $step['name'],
+                        (string) $target->getName()
+                    ));
+                }
+            }
+            $subSteps = $this->normalizeDesignSteps($subStepsRaw, $step['name']);
+            $subLinks = $this->normalizeDesignLinks($subLinksRaw);
+            $this->assertRunnable($subSteps);
+            $subOrder = $this->executionOrder($subSteps, $subLinks);
+
+            $frame = [
+                'kind' => $step['type'] === 'foreach' ? 'each' : 'sub',
+                'flowId' => $id,
+                'flowName' => (string) $target->getName(),
+                'steps' => $subSteps,
+                'links' => $subLinks,
+                'index' => 1, // the trigger is consumed by the ENTER tick itself
+                'callerStepId' => $step['id'],
+                'callerStepName' => $step['name'],
+            ];
+            if ($step['type'] === 'foreach') {
+                $arrayVar = trim((string) ($config['array'] ?? ''));
+                $itemVar = trim((string) ($config['item'] ?? ''));
+                if ($arrayVar === '' || $itemVar === '') {
+                    throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
+                }
+                if (!\array_key_exists($arrayVar, $context)) {
+                    throw new \RuntimeException(sprintf('Step "%s": the variable "%s" is not defined.', $step['name'], $arrayVar));
+                }
+                $list = $context[$arrayVar];
+                if (!\is_array($list) || ($list !== [] && !array_is_list($list))) {
+                    throw new \RuntimeException(sprintf(
+                        'Step "%s": the variable "%s" must hold an array, got %s.',
+                        $step['name'],
+                        $arrayVar,
+                        get_debug_type($list)
+                    ));
+                }
+                if ($list === []) {
+                    // Zero iterations: the loop step simply completes — no frame to enter.
+                    $caller = &$frames[\count($frames) - 1];
+                    $caller['index']++;
+                    $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
+                        'name' => $step['name'],
+                        'type' => $step['type'],
+                    ]);
+                    $done = \count($frames) === 1 && $caller['index'] >= \count($this->executionOrder($caller['steps'], $caller['links'], self::choiceResults($context)));
+                    if ($done) {
+                        $blob['done'] = true;
+                        $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'flow-finish');
+                    }
+                    unset($caller);
+
+                    return $this->debugResponse($blob, $step, $this->executionOrder($frames[\count($frames) - 1]['steps'], $frames[\count($frames) - 1]['links'], self::choiceResults($context)), null)
+                        + ['rootExecuted' => \count($frames) === 1 ? [$step['id']] : []];
+                }
+                $frame['list'] = array_values($list);
+                $frame['iteration'] = 0;
+                $frame['itemVar'] = $itemVar;
+                $frame['hadItem'] = \array_key_exists($itemVar, $context);
+                $frame['prevItem'] = $context[$itemVar] ?? null;
+                $frame['hadIndex'] = \array_key_exists('index', $context);
+                $frame['prevIndex'] = $context['index'] ?? null;
+                $context[$itemVar] = $frame['list'][0];
+                $context['index'] = 0;
+            }
+        } catch (\RuntimeException $e) {
+            $this->emitDebugException($blob, $e->getMessage(), $executionUuid);
+            throw new FlowStepFailure($e->getMessage(), $step['id'], [], $e);
+        }
+
+        $frames[] = $frame;
+        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
+        $trigger = $subOrder[0];
+        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
+            'name' => $trigger['name'],
+            'type' => $trigger['type'],
+        ]);
+
+        return $this->debugResponse($blob, $trigger, $subOrder, 'entered') + ['rootExecuted' => []];
+    }
+
+    /**
+     * The current frame ran out of steps: finish the run, advance a foreach iteration
+     * (transition 'reentered') or pop back to the caller (transition 'returned').
+     *
+     * @param array<string, mixed>             $blob
+     * @param array<int, array<string,mixed>>  $trails
+     * @param array<int, array<string, mixed>> $order the exhausted frame's order
+     */
+    private function debugLeaveFrame(array &$blob, array &$trails, array $order): array
+    {
+        $context = &$blob['context'];
+        $frames = &$blob['frames'];
+        $frame = &$frames[\count($frames) - 1];
+        $executionUuid = (string) ($context['flowUuid'] ?? '');
+
+        if ($frame['kind'] === 'flow') {
+            // Root exhausted (only reachable when the last tick did not already flag it).
+            $blob['done'] = true;
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'flow-finish');
+            $last = $order[\count($order) - 1];
+
+            return $this->debugResponse($blob, $last, $order, null) + ['rootExecuted' => []];
+        }
+
+        if ($frame['kind'] === 'each' && $frame['iteration'] + 1 < \count($frame['list'])) {
+            // Next iteration: same frame, back to the trigger — the editor clears the canvas.
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+            $frame['iteration']++;
+            $frame['index'] = 1;
+            $context[$frame['itemVar']] = $frame['list'][$frame['iteration']];
+            $context['index'] = $frame['iteration'];
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
+            $subOrder = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
+            $trigger = $subOrder[0];
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
+                'name' => $trigger['name'],
+                'type' => $trigger['type'],
+            ]);
+
+            return $this->debugResponse($blob, $trigger, $subOrder, 'reentered') + ['rootExecuted' => []];
+        }
+
+        // Frame complete: restore loop-scoped variables, pop, and complete the caller's step.
+        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+        if ($frame['kind'] === 'each') {
+            if ($frame['hadItem']) {
+                $context[$frame['itemVar']] = $frame['prevItem'];
+            } else {
+                unset($context[$frame['itemVar']]);
+            }
+            if ($frame['hadIndex']) {
+                $context['index'] = $frame['prevIndex'];
+            } else {
+                unset($context['index']);
+            }
+        }
+        $callerStepId = (string) $frame['callerStepId'];
+        unset($frame);
+        array_pop($frames);
+
+        $caller = &$frames[\count($frames) - 1];
+        $callerOrder = $this->executionOrder($caller['steps'], $caller['links'], self::choiceResults($context));
+        $callerStep = null;
+        foreach ($callerOrder as $candidate) {
+            if ($candidate['id'] === $callerStepId) {
+                $callerStep = $candidate;
+                break;
+            }
+        }
+        $callerStep ??= ['id' => $callerStepId, 'name' => $callerStepId, 'type' => 'sub_flow'];
+        $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
+            'name' => $callerStep['name'],
+            'type' => $callerStep['type'],
+        ]);
+        $caller['index']++;
+
+        $done = \count($frames) === 1 && $caller['index'] >= \count($callerOrder);
+        if ($done) {
+            $blob['done'] = true;
+            $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'flow-finish');
+        }
+        $rootExecuted = $caller['kind'] === 'flow' ? [$callerStepId] : [];
+        if ($caller['kind'] !== 'flow') {
+            $this->recordDebugTrail($trails, $caller, [$callerStepId]);
+        }
+        unset($caller);
+
+        return $this->debugResponse($blob, $callerStep, $callerOrder, 'returned') + ['rootExecuted' => $rootExecuted];
+    }
+
+    /**
+     * @param array<string, mixed>             $blob
+     * @param array<string, mixed>             $step
+     * @param array<int, array<string,mixed>>  $order the CURRENT frame's order
+     */
+    private function debugResponse(array $blob, array $step, array $order, ?string $transition): array
+    {
+        $frames = $blob['frames'];
+        $frame = $frames[\count($frames) - 1];
+
+        return [
+            'step' => ['id' => $step['id'], 'name' => $step['name'], 'type' => $step['type']],
+            'index' => max(0, (int) $frame['index'] - 1),
+            'total' => \count($order),
+            'done' => (bool) $blob['done'],
+            'transition' => $transition,
+            'iteration' => $frame['kind'] === 'each' ? (int) $frame['iteration'] : null,
+            'frame' => [
+                'flowId' => $frame['flowId'],
+                'flowName' => $frame['flowName'],
+                'depth' => \count($frames) - 1,
+            ],
+            'executedIds' => [$step['id']],
+        ];
+    }
+
+    /**
+     * @param array<int, array<string,mixed>> $trails
+     * @param array<string, mixed>            $frame
+     * @param array<int, string>              $ids
+     */
+    private function recordDebugTrail(array &$trails, array $frame, array $ids): void
+    {
+        $key = (int) $frame['flowId'];
+        if (!isset($trails[$key])) {
+            $trails[$key] = ['flowId' => $key, 'flowName' => $frame['flowName'], 'executedIds' => []];
+        }
+        $trails[$key]['executedIds'] = array_values(array_unique(array_merge($trails[$key]['executedIds'], $ids)));
+    }
+
+    /** flow-exception for the failing frame AND every enclosing one up to the root. */
+    private function emitDebugException(array $blob, string $message, string $executionUuid): void
+    {
+        foreach (array_reverse($blob['frames']) as $frame) {
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'flow-exception', ['message' => $message]);
+        }
+    }
+
+    /**
+     * Design steps as the executor needs them ({id, type, name, config}) — the stored design is
+     * editor state and may carry extras.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeDesignSteps(array $raw, string $stepName): array
+    {
+        $steps = [];
+        foreach ($raw as $step) {
+            if (!\is_array($step) || !\is_string($step['id'] ?? null) || !\is_string($step['type'] ?? null)) {
+                throw new \RuntimeException(sprintf('Step "%s": the subflow design is unreadable.', $stepName));
+            }
+            $steps[] = [
+                'id' => $step['id'],
+                'type' => $step['type'],
+                'name' => \is_string($step['name'] ?? null) ? $step['name'] : $step['id'],
+                'config' => \is_array($step['config'] ?? null) ? $step['config'] : null,
+            ];
+        }
+
+        return $steps;
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function normalizeDesignLinks(array $raw): array
+    {
+        $links = [];
+        foreach ($raw as $link) {
+            if (\is_array($link) && \is_string($link['from'] ?? null) && \is_string($link['to'] ?? null)) {
+                $links[] = ['from' => $link['from'], 'fromPort' => (int) ($link['fromPort'] ?? 0), 'to' => $link['to']];
             }
         }
 
-        $cursor = $index;
-        $this->lastExecutedIds = [];
-        try {
-            do {
-                $executed = $order[$cursor];
-                $this->executeStepTracked($executed, $context, $flow, $executionUuid);
-                if ($executed['type'] === 'choice') {
-                    $order = $this->executionOrder($steps, $links, self::choiceResults($context));
-                    $total = \count($order);
-                }
-                $cursor++;
-            } while ($runToEnd && $cursor < $total);
-        } finally {
-            // Each call returns control to the user, so nothing is in flight BETWEEN debug steps —
-            // stamping every call (not just the last) keeps a paused debug session from looking
-            // like a run in progress and blocking the scheduler.
-            $this->touchLastFinished($flow);
-        }
-
-        return [
-            'context' => $context,
-            // The id lets the editor highlight the tile that just executed.
-            'step' => ['id' => $executed['id'], 'name' => $executed['name'], 'type' => $executed['type']],
-            'index' => $cursor - 1,
-            'total' => $total,
-            'done' => $cursor >= $total,
-        ];
+        return $links;
     }
 
     /**
@@ -420,7 +838,7 @@ class FlowDebugExecutor
         $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
         if (!\in_array(
             $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'foreach', 'logger', 'ms_teams', 'invoke_php'], $fileOps),
+            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'foreach', 'logger', 'event', 'ms_teams', 'invoke_php'], $fileOps),
             true
         )) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
@@ -467,6 +885,29 @@ class FlowDebugExecutor
                     : (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             }
             $this->logger->info(sprintf('[Aaxis Flow - %s] %s', $flow?->getName() ?? 'unsaved', $text));
+
+            return;
+        }
+
+        // Event has no destination either: it queues a log-message flow event with the resolved
+        // value as the message (plain text, or a DWL expression via its toggle) and continues.
+        if ($step['type'] === 'event') {
+            $raw = trim((string) ($config['value'] ?? ''));
+            if ($raw === '') {
+                throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
+            }
+            $text = $raw;
+            if (($config['value_dwl'] ?? false) === true) {
+                try {
+                    $result = $this->dwl->transform($raw, $context);
+                } catch (\Throwable $e) {
+                    throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
+                }
+                $text = \is_string($result)
+                    ? $result
+                    : (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            }
+            $this->flowEvents->emit($flow, $executionUuid, 'log-message', ['message' => $text]);
 
             return;
         }
@@ -827,11 +1268,13 @@ class FlowDebugExecutor
         $outerTrail = $this->lastExecutedIds;
         $this->subflowStack[] = $id;
         try {
-            return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context);
+            return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, ['trigger' => 'subflow']);
         } catch (\RuntimeException $e) {
             throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
         } finally {
             array_pop($this->subflowStack);
+            // The nested trail (partial on failure) feeds the editor's subflow visit.
+            $this->recordSubflowTrail($id, (string) $target->getName(), $this->lastExecutedIds);
             $this->lastExecutedIds = $outerTrail;
         }
     }
@@ -881,9 +1324,11 @@ class FlowDebugExecutor
                 $context[$itemVar] = $element;
                 $context['index'] = $index;
                 try {
-                    $context = $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context);
+                    $context = $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, ['trigger' => 'subflow']);
                 } catch (\RuntimeException $e) {
                     throw new \RuntimeException(sprintf('Step "%s" (iteration %d): %s', $stepName, $index, $e->getMessage()), 0, $e);
+                } finally {
+                    $this->recordSubflowTrail($id, (string) $target->getName(), $this->lastExecutedIds);
                 }
             }
         } finally {
@@ -903,6 +1348,33 @@ class FlowDebugExecutor
         }
 
         return $context;
+    }
+
+    /**
+     * @return array<int, array{flowId: int, flowName: string, executedIds: array<int, string>}>
+     */
+    public function subflowTrails(): array
+    {
+        return $this->subflowTrails;
+    }
+
+    /**
+     * @param array<int, string> $ids
+     */
+    private function recordSubflowTrail(int $flowId, string $flowName, array $ids): void
+    {
+        if ($ids === []) {
+            return;
+        }
+        foreach ($this->subflowTrails as &$trail) {
+            if ($trail['flowId'] === $flowId) {
+                $trail['executedIds'] = array_values(array_unique(array_merge($trail['executedIds'], $ids)));
+
+                return;
+            }
+        }
+        unset($trail);
+        $this->subflowTrails[] = ['flowId' => $flowId, 'flowName' => $flowName, 'executedIds' => array_values($ids)];
     }
 
     /**

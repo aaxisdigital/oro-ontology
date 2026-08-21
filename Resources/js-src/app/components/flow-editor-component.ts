@@ -251,6 +251,31 @@ function portCount(type: string): number {
 
 const OPPOSITE_SIDE: Record<AnchorSide, AnchorSide> = {north: 'south', south: 'north', east: 'west', west: 'east'};
 
+/**
+ * VSCode-style debugger glyphs (16×16, drawn with currentColor so CSS owns the palette):
+ * continue = bar + hollow triangle, step over = arc onto a dot, step into/out = arrow to/from a
+ * dot, stop = hollow square.
+ */
+const DEBUG_ICONS: Record<string, string> = {
+    continue: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">'
+        + '<rect x="3" y="3" width="2" height="10" fill="currentColor"/>'
+        + '<path d="M7 3.6 L13.2 8 L7 12.4 Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>',
+    over: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">'
+        + '<path d="M2.8 9.2 A5.2 5.2 0 0 1 13 8.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'
+        + '<path d="M13.9 4.6 L13.4 9.3 L9.7 7.1 Z" fill="currentColor"/>'
+        + '<circle cx="8" cy="12.6" r="1.8" fill="currentColor"/></svg>',
+    into: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">'
+        + '<path d="M8 1.6 V7.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>'
+        + '<path d="M4.7 6.2 L11.3 6.2 L8 10.4 Z" fill="currentColor"/>'
+        + '<circle cx="8" cy="13.4" r="1.8" fill="currentColor"/></svg>',
+    out: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">'
+        + '<path d="M8 9.4 V5.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>'
+        + '<path d="M4.7 5.8 L11.3 5.8 L8 1.6 Z" fill="currentColor"/>'
+        + '<circle cx="8" cy="13.4" r="1.8" fill="currentColor"/></svg>',
+    stop: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">'
+        + '<rect x="3.5" y="3.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>'
+};
+
 /** Seeded into a freshly-dropped Endpoint trigger: the Response binding's example shape. */
 const ENDPOINT_RESPONSE_EXAMPLE = '{\n    statusCode: 200,\n    body: payload\n}';
 
@@ -262,7 +287,7 @@ const ENDPOINT_RESPONSE_EXAMPLE = '{\n    statusCode: 200,\n    body: payload\n}
  * placeholder types are valid empty and start clean.
  */
 const REQUIRES_CONFIG = new Set([
-    'choice', 'sub_flow', 'foreach', 'logger', 'ms_teams', 'invoke_php',
+    'choice', 'sub_flow', 'foreach', 'logger', 'event', 'ms_teams', 'invoke_php',
     'dwl_transform', 'invoke', 'entity_read', 'entity_write', 'sql_query',
     'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'
 ]);
@@ -341,6 +366,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private links!: FlowLink[];
     private discarding!: boolean;
     private pendingTabIds!: number[];
+    /** While true, tab switches keep the debug session alive (the subflow visit). */
+    private debugVisiting!: boolean;
+    /** Synchronous copy of the flow catalog once fetched (context menus need sync reads). */
+    private catalogFlowRecords!: FlowRecord[] | null;
+    /** Seconds before a FINISHED debug pane closes itself (System Configuration; 0 = never). */
+    private debugAutoCloseSeconds!: number;
+    /** Index of the tab being dragged for reordering (null when no tab drag is active). */
+    private tabDragIndex!: number | null;
+    /** True while Save all is persisting the dirty tabs (both save buttons disabled). */
+    private savingAll!: boolean;
     private dirtyChecker!: () => boolean;
     private onOpenLinkBefore!: (e: any) => void;
     private onBeforeRefresh!: (queue: any[]) => void;
@@ -403,9 +438,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
         done: boolean;
         busy: boolean;
         /** Which sidebar button started the in-flight request — it carries the spinner. */
-        busyAction: 'next' | 'runAll' | null;
+        busyAction: 'next' | 'runAll' | 'into' | 'out' | 'visit' | null;
         error: string | null;
         statusLabel: string;
+        /** Amber ids per canvas (key: flow id, or 'root' for the debugged flow) — a tab switch
+         * re-renders the canvas, so the marks are repainted from here. */
+        marksByFlow: Record<string, string[]>;
+        failedId: string | null;
+        /** The debugged flow's tab index — where 'returned' transitions come home to. */
+        homeIndex: number;
+        /** What the next tick would execute — Step into appears when it is a subflow invoker. */
+        next: {id: string; name: string; type: string} | null;
+        /** Current frame depth (0 = the debugged flow) — Step out appears inside a subflow. */
+        depth: number;
+        /** The auto-dismiss countdown once the run FINISHED (config seconds; 0 = never). */
+        autoClose: {deadline: number; duration: number; timer: number} | null;
     } | null;
     private debugUi!: {$status: any; $vars: any; $actions: any; evalField: any; $evalRun: any} | null;
     private onPointerMove!: (e: PointerEvent) => void;
@@ -459,6 +506,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         this.spacing = Math.min(100, Math.max(4, Number(options.gridSpacing) || 10));
         const factor = Math.min(16, Math.max(2, Number(options.stepSizeFactor) || 8));
+        this.debugAutoCloseSeconds = Math.max(0, Number((options as any).debugAutoCloseSeconds ?? 15) || 0);
+        this.tabDragIndex = null;
+        this.savingAll = false;
         this.tileSize = factor * this.spacing;
 
         this.syncFlowNameDisplay();
@@ -489,6 +539,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // for in-app (pushState) navigation and the toolbar refresh, plus the checker registry
         // other components (grid inline editing, config form, hidden redirects) consult.
         this.discarding = false;
+        this.debugVisiting = false;
+        this.catalogFlowRecords = null;
         this.dirtyChecker = () => this.anyTabDirty();
         pageStateChecker.registerChecker(this.dirtyChecker);
         $(window).on('beforeunload.aaxisFlowEditor', (e: any) => {
@@ -556,12 +608,32 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Warm the settings catalogs in the background so the first panel opens instantly too.
         this.prefetchCatalogs();
 
+        // While the finished-debug COUNTDOWN runs, any click outside the debug pane (the design
+        // space) dismisses it immediately — the user is back to work, no need to wait it out.
+        // The click keeps its normal effect (select a tile, open a menu, …).
+        this.$el.on('click.aaxisFlowEditor', (e: any) => {
+            if (this.debugSession && this.debugSession.autoClose
+                && !$(e.target).closest('[data-role="debugger"]').length
+            ) {
+                this.closeDebugSession();
+            }
+        });
         this.$el.on('click.aaxisFlowEditor', '[data-role="cancel"]', (e: any) => {
             e.preventDefault();
-            // Discard is EXPLICIT: leaving through this button must not raise the
-            // unsaved-changes prompts — the label already says the work is thrown away.
+            // Discard/Close is SCOPED TO THE ACTIVE TAB: its changes are dropped and the tab
+            // closes; the other tabs keep their work untouched. Only closing the LAST tab
+            // leaves the editor — and being explicit, neither path raises the unsaved prompts
+            // for THIS tab (a lone tab means no other work to guard).
+            if (this.tabs.length > 1) {
+                this.closeTab(this.activeTab, true);
+                return;
+            }
             this.discarding = true;
             window.location.href = this.listUrl;
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="save-all"]', (e: any) => {
+            e.preventDefault();
+            this.saveAll();
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="save"]', (e: any) => {
             e.preventDefault();
@@ -1406,6 +1478,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private syncDirty(): void {
         const dirty = this.snapshot() !== this.savedState;
         this.$el.find('[data-role="save"]').prop('disabled', !dirty);
+        this.$el.find('[data-role="save-all"]').prop('disabled', this.savingAll || !this.anyTabDirty());
         const label = dirty ? __('aaxis.ontology.flow_editor.cancel') : __('aaxis.ontology.flow_editor.close');
         // Only the label SPAN changes (the button also holds the icon); the title follows for
         // the icon-only narrow-viewport mode.
@@ -1526,11 +1599,58 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 'class': 'fa fa-times aaxis-flow-editor__tab-close', 'data-role': 'tab-close',
                 title: __('aaxis.ontology.flow_editor.tab_close'), 'aria-label': __('aaxis.ontology.flow_editor.tab_close')
             }));
+            // Drag to REORDER (flow tabs only): drop before/after by the pointer's half of the
+            // target tab. The active tab travels by IDENTITY — indexes shift under it.
+            $tab.attr('draggable', 'true');
+            $tab.on('dragstart', (e: any) => {
+                this.tabDragIndex = index;
+                (e.originalEvent as DragEvent).dataTransfer?.setData('text/plain', String(index));
+                (e.originalEvent as DragEvent).dataTransfer!.effectAllowed = 'move';
+            });
+            $tab.on('dragover', (e: any) => {
+                if (this.tabDragIndex === null) {
+                    return;
+                }
+                e.preventDefault(); // allow dropping here
+                (e.originalEvent as DragEvent).dataTransfer!.dropEffect = 'move';
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                const after = (e.originalEvent as DragEvent).clientX > rect.left + rect.width / 2;
+                $tab.toggleClass('is-drop-after', after).toggleClass('is-drop-before', !after);
+            });
+            $tab.on('dragleave', () => $tab.removeClass('is-drop-after is-drop-before'));
+            $tab.on('drop', (e: any) => {
+                e.preventDefault();
+                $tab.removeClass('is-drop-after is-drop-before');
+                const from = this.tabDragIndex;
+                this.tabDragIndex = null;
+                if (from === null || from === index) {
+                    return;
+                }
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                const after = (e.originalEvent as DragEvent).clientX > rect.left + rect.width / 2;
+                let to = index + (after ? 1 : 0);
+                if (from < to) {
+                    to--; // removing the dragged tab first shifts the insertion point
+                }
+                const activeTab = this.tabs[this.activeTab];
+                const [moved] = this.tabs.splice(from, 1);
+                this.tabs.splice(to, 0, moved);
+                this.activeTab = this.tabs.indexOf(activeTab);
+                this.renderTabs();
+                this.syncTabsUrl();
+            });
+            $tab.on('dragend', () => {
+                this.tabDragIndex = null;
+                $bar.find('.is-drop-after, .is-drop-before').removeClass('is-drop-after is-drop-before');
+            });
             $bar.append($tab);
         });
-        // The two ACTION tabs: open an existing flow in a new tab / start a new one.
+        // The two ACTION tabs (open an existing flow / start a new one) sit at the FAR RIGHT of
+        // the bar — away from the flow tabs, so a close/switch click cannot slip onto them.
         $bar.append($('<button/>', {
-            type: 'button', 'class': 'aaxis-flow-editor__tab aaxis-flow-editor__tab--action', 'data-role': 'tab-open',
+            type: 'button',
+            'class': 'aaxis-flow-editor__tab aaxis-flow-editor__tab--action aaxis-flow-editor__tab--push-right',
+            'data-role': 'tab-open',
             title: __('aaxis.ontology.flow_editor.tab_open'), 'aria-label': __('aaxis.ontology.flow_editor.tab_open')
         }).append($('<span/>', {'class': 'fa fa-folder-open-o', 'aria-hidden': 'true'})));
         $bar.append($('<button/>', {
@@ -1553,7 +1673,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     /** Clears the canvas completely (steps, links, marks, session) for the next tab's content. */
     private resetCanvas(): void {
-        this.closeDebugSession();
+        if (!this.debugVisiting) {
+            this.closeDebugSession();
+        }
         this.clearSelection();
         this.closeContextMenu();
         this.steps.forEach(s => s.el.remove());
@@ -1595,12 +1717,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /** Closes a tab (confirming when it holds unsaved changes); the editor always keeps one. */
-    private closeTab(index: number): void {
+    private closeTab(index: number, force = false): void {
         const tab = this.tabs[index];
         if (!tab) {
             return;
         }
-        const dirty = this.tabDirty(tab, index === this.activeTab);
+        const dirty = !force && this.tabDirty(tab, index === this.activeTab);
         const doClose = (): void => {
             this.tabs.splice(index, 1);
             if (this.tabs.length === 0) {
@@ -2049,6 +2171,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (step.type === 'logger') {
             $top.prop('hidden', false);
             sections.push(this.loggerSection($top, $body, $panel[0], step.config || {}, $input));
+        } else if (step.type === 'event') {
+            $top.prop('hidden', false);
+            sections.push(this.eventSection($top, $body, $panel[0], step.config || {}, $input));
         } else if (step.type === 'ms_teams') {
             $top.prop('hidden', false);
             sections.push(this.msTeamsSection($top, $body, step.config || {}, $input));
@@ -2493,6 +2618,37 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 params: params.value().trim()
             }),
             ready
+        };
+    }
+
+    /**
+     * Event — Name plus the Value (hardcoded text, or a DWL expression via its toggle): the
+     * resolved value is queued as a log-message FLOW EVENT (aaxis_ontology_flow_events) and the
+     * flow simply continues.
+     */
+    private eventSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput)
+        ));
+
+        const value = createDwlField({
+            label: __('aaxis.ontology.flow_editor.event_value_label'),
+            value: String(initial.value || ''),
+            dwl: initial.value_dwl === true, // toggleable: hardcoded text, or a DWL expression
+            editorClass: 'aaxis-flow-editor__settings-textarea aaxis-flow-editor__settings-textarea--compact'
+        });
+        $body.append(value.$el);
+        $body.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            html: __('aaxis.ontology.flow_editor.event_hint')
+        }));
+        panel.classList.add('is-wide');
+
+        return {
+            error: () => value.value().trim() === ''
+                ? __('aaxis.ontology.flow_editor.event_value_required')
+                : '',
+            merge: config => ({...config, value: value.value(), value_dwl: value.isDwl()})
         };
     }
 
@@ -4202,6 +4358,55 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 // Sub-flow entry point: only offered while no trigger exists and nothing arrives here.
                 addItem(__('aaxis.ontology.flow_editor.menu_start_here'), 'fa-play', () => this.setStart(step.id));
             }
+            if (ordered.length === 1 && (step.type === 'sub_flow' || step.type === 'foreach')) {
+                // Navigate to the configured subflow — shown only when it is set AND still a
+                // valid subflow in the catalog (sync copy; hidden until the catalog loaded).
+                const targetId = Number((step.config || {}).subflow || 0);
+                const record = targetId > 0 && this.catalogFlowRecords
+                    ? this.catalogFlowRecords.find(f => f.id === targetId && f.type === 'subflow')
+                    : undefined;
+                if (record) {
+                    addItem(__('aaxis.ontology.flow_editor.menu_navigate_subflow'), 'fa-external-link', () => {
+                        void this.ensureFlowTab(targetId).then(index => {
+                            if (index !== null) {
+                                this.switchTab(index);
+                            }
+                        });
+                    });
+                }
+            }
+            if (ordered.length === 1 && step.type === 'subflow' && addSubmenu) {
+                // "Called by": every flow whose sub_flow/foreach steps point at THIS subflow —
+                // one child per caller, navigating like "Navigate to subflow" does. Computed from
+                // the sync catalog copy (fetched at editor load); an unsaved subflow has no id
+                // and therefore no callers.
+                const selfId = this.flow ? Number((this.flow as any).id || 0) : 0;
+                const callers = selfId > 0 && this.catalogFlowRecords
+                    ? this.catalogFlowRecords
+                        .filter(f => f.id !== selfId && (((f as any).steps || []) as any[]).some(st =>
+                            st && (st.type === 'sub_flow' || st.type === 'foreach')
+                            && Number(((st.config || {}) as any).subflow || 0) === selfId))
+                        .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
+                    : [];
+                addSubmenu(__('aaxis.ontology.flow_editor.menu_called_by'), 'fa-sitemap', callers.length
+                    ? callers.map(f => ({
+                        label: f.name || String(f.id),
+                        icon: 'fa-external-link',
+                        action: () => {
+                            void this.ensureFlowTab(f.id).then(index => {
+                                if (index !== null) {
+                                    this.switchTab(index);
+                                }
+                            });
+                        }
+                    }))
+                    : [{
+                        label: __('aaxis.ontology.flow_editor.menu_called_by_none'),
+                        icon: 'fa-ban',
+                        action: () => undefined,
+                        disabled: true
+                    }]);
+            }
             if (ordered.length === 1 && addSubmenu) {
                 // Anchor sides: where flow lines arrive (flow-in) and leave (flow-out; a choice
                 // names its two outputs flow-true/flow-false). Hover reveals the side picker.
@@ -4549,7 +4754,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
             busy: false,
             busyAction: null,
             error: null,
-            statusLabel: ''
+            statusLabel: '',
+            marksByFlow: {},
+            failedId: null,
+            homeIndex: this.activeTab,
+            next: null,
+            depth: 0,
+            autoClose: null
         };
         this.syncDebugButtons();
         if (mode === 'run') {
@@ -4557,7 +4768,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.runFullSession();
         } else {
             this.buildDebugger();
-            this.debugAdvance(0, false);
+            this.debugAdvance(false, false);
         }
     }
 
@@ -4644,43 +4855,83 @@ class OntologyFlowEditorComponent extends BaseComponent {
         ui.$evalRun.prop('disabled', !canEvaluate);
 
         ui.$actions.empty();
-        if (session.done || session.error !== null) {
-            const $close = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.close')});
-            $close.on('click', () => this.closeDebugSession());
-            ui.$actions.append($close);
+        // VSCode-style debugger controls: uniform SQUARES, centered SVG glyph, label only in the
+        // tooltip (title + aria-label). stop = discard/close (red), continue = run all,
+        // arc-over-dot = next step (step over), arrow-into-dot = step into, arrow-out = step out.
+        const iconButton = (labelKey: string, icon: string, disabled: boolean): any => {
+            const label = __('aaxis.ontology.flow_editor.' + labelKey);
+            return $('<button/>', {
+                type: 'button',
+                'class': 'aaxis-flow-editor__debug-btn' + (icon === 'stop' ? ' aaxis-flow-editor__debug-btn--stop' : ''),
+                title: label,
+                'aria-label': label,
+                disabled
+            }).append($(DEBUG_ICONS[icon]));
+        };
+        const finished = session.done || session.error !== null;
+        const autoClosing = session.autoClose !== null;
+        const autoCloseBar = (): any => {
+            const remaining = session.autoClose ? Math.max(0, session.autoClose.deadline - Date.now()) : 0;
+            const width = session.autoClose ? (remaining / session.autoClose.duration) * 100 : 0;
+            return $('<div/>', {'class': 'aaxis-flow-editor__debug-autoclose'}).append(
+                $('<div/>', {'class': 'aaxis-flow-editor__debug-autoclose-bar', 'data-role': 'debug-autoclose-bar'})
+                    .css('width', `${width}%`)
+            );
+        };
+        if (session.mode !== 'step') {
+            const $stop = iconButton(finished ? 'close' : 'cancel', 'stop', autoClosing);
+            $stop.on('click', () => this.closeDebugSession());
+            ui.$actions.append($stop);
+            if (autoClosing) {
+                ui.$actions.append(autoCloseBar());
+            }
             return;
         }
-        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
-        $cancel.on('click', () => this.closeDebugSession());
-        ui.$actions.append($cancel);
-        if (session.mode === 'step') {
-            const $runAll = $('<button/>', {
-                type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.debug_run_all'),
-                disabled: session.busy
-            });
-            const $next = $('<button/>', {
-                type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.debug_next_step'),
-                disabled: session.busy
-            });
-            // The button that started the in-flight request keeps a spinner until it resolves.
-            if (session.busy) {
-                const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
-                (session.busyAction === 'runAll' ? $runAll : $next).prepend($spinner);
-            }
-            $runAll.on('click', () => this.debugAdvance(session.index + 1, true));
-            $next.on('click', () => this.debugAdvance(session.index + 1, false));
-            ui.$actions.append($runAll, $next);
+        // ALL FIVE buttons stay visible in FIXED positions (VSCode order: continue, step over,
+        // step into, step out, stop) — availability is enable/disable only, never show/hide,
+        // so a button can never shift under the cursor between clicks.
+        const stepping = !session.busy && !finished && !autoClosing;
+        // Step into applies only when the NEXT step invokes a subflow (Next step then steps
+        // OVER it: the invoker runs atomically); Step out only inside a subflow frame.
+        const nextIsInvoker = session.next !== null && (session.next.type === 'sub_flow' || session.next.type === 'foreach');
+        const $runAll = iconButton('debug_run_all', 'continue', !stepping);
+        const $next = iconButton('debug_next_step', 'over', !stepping);
+        const $into = iconButton('debug_step_into', 'into', !stepping || !nextIsInvoker);
+        const $out = iconButton('debug_step_out', 'out', !stepping || session.depth === 0);
+        const $stop = iconButton(finished ? 'close' : 'cancel', 'stop', autoClosing);
+        // The button that started the in-flight request swaps its glyph for a spinner.
+        if (session.busy) {
+            const $target = session.busyAction === 'runAll'
+                ? $runAll
+                : (session.busyAction === 'into' ? $into : (session.busyAction === 'out' ? $out : $next));
+            $target.empty().append($('<span/>', {'class': 'fa fa-spinner fa-spin', 'aria-hidden': 'true'}));
+        }
+        $runAll.on('click', () => this.debugAdvance(true, false));
+        $next.on('click', () => this.debugAdvance(false, false));
+        $into.on('click', () => this.debugAdvance(false, true));
+        $out.on('click', () => this.debugAdvance(false, false, true));
+        $stop.on('click', () => this.closeDebugSession());
+        ui.$actions.append($runAll, $next, $into, $out, $stop);
+        if (autoClosing) {
+            ui.$actions.append(autoCloseBar());
         }
     }
 
-    /** Executes ONE step (or the rest, with runAll) against the session's client-held context. */
-    private debugAdvance(index: number, runAll: boolean): void {
+    /**
+     * One debugger tick: the next step, the rest of the run (runAll) or a descend into the
+     * upcoming subflow (stepInto). The server owns the cursor — a STACK of frames — and answers
+     * with the executed step, the frame it belongs to and a `transition`:
+     *  'entered'/'reentered' bring the subflow's tab to the front (re-enter WIPES its marks —
+     *  a new foreach iteration starts white with only the trigger amber);
+     *  'returned' comes home to the caller's tab, whose invoker step is only now marked.
+     */
+    private debugAdvance(runAll: boolean, stepInto: boolean, stepOut = false): void {
         const session = this.debugSession;
         if (!session || session.busy || session.done) {
             return;
         }
         session.busy = true;
-        session.busyAction = runAll ? 'runAll' : 'next';
+        session.busyAction = runAll ? 'runAll' : (stepOut ? 'out' : (stepInto ? 'into' : 'next'));
         session.error = null;
         this.updateDebugger();
 
@@ -4689,11 +4940,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             steps: session.steps,
             links: session.links,
             input: session.input,
-            index,
-            // Only the HANDLE travels — the context itself stays server-side (a big context in
-            // the request body would exceed the web server's size limit).
+            // Only the HANDLE travels — the walk state (context + frame stack) stays server-side.
             contextKey: session.contextKey,
-            runAll
+            runAll,
+            stepInto,
+            stepOut
         }).then(res => {
             if (this.debugSession !== session) {
                 return; // the session was cancelled while the request ran
@@ -4705,6 +4956,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (res.data && res.data.failedStepId) {
                     this.markFailedDebugStep(String(res.data.failedStepId));
                 }
+                if (res.data && (res.data.subflowTrails || []).length) {
+                    this.visitSubflowTrails(res.data.subflowTrails, session);
+                }
                 throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
             }
             session.context = res.data.context ?? {};
@@ -4712,18 +4966,193 @@ class OntologyFlowEditorComponent extends BaseComponent {
             session.index = Number(res.data.index);
             session.total = Number(res.data.total);
             session.done = Boolean(res.data.done);
-            session.statusLabel = `${res.data.step.name} (${session.index + 1}/${session.total})`;
-            this.markExecutedDebugSteps(res.data.executedIds || [String(res.data.step.id || '')]);
+            session.next = res.data.next || null;
+            session.depth = Number((res.data.frame && res.data.frame.depth) || 0);
+            const frameName = res.data.frame && res.data.frame.flowName && res.data.frame.depth > 0
+                ? `${res.data.frame.flowName}: `
+                : '';
+            const iteration = res.data.iteration !== null && res.data.iteration !== undefined
+                ? ` [${__('aaxis.ontology.flow_editor.debug_iteration')} ${Number(res.data.iteration) + 1}]`
+                : '';
+            session.statusLabel = `${frameName}${res.data.step.name} (${session.index + 1}/${session.total})${iteration}`;
+            this.applyDebugTick(session, res.data);
+            this.maybeStartDebugAutoClose();
         }).catch((err: Error) => {
             if (this.debugSession === session) {
                 session.error = err.message || __('aaxis.ontology.flow_editor.debug_error');
             }
         }).finally(() => {
-            if (this.debugSession === session) {
+            // A running subflow visit owns the busy flag; its finish() releases it.
+            if (this.debugSession === session && !this.debugVisiting) {
                 session.busy = false;
                 this.updateDebugger();
             }
         });
+    }
+
+    /**
+     * A CLEANLY finished session dismisses itself after the configured seconds (0 = never) —
+     * a decreasing bar under the buttons counts it down; every button is disabled meanwhile.
+     * Failed sessions stay open for inspection.
+     */
+    private maybeStartDebugAutoClose(): void {
+        const session = this.debugSession;
+        if (!session || !session.done || session.error !== null || session.autoClose || this.debugAutoCloseSeconds <= 0) {
+            return;
+        }
+        const duration = this.debugAutoCloseSeconds * 1000;
+        const deadline = Date.now() + duration;
+        session.autoClose = {
+            deadline,
+            duration,
+            timer: window.setInterval(() => {
+                if (this.debugSession !== session || !session.autoClose) {
+                    return;
+                }
+                const remaining = session.autoClose.deadline - Date.now();
+                if (remaining <= 0) {
+                    this.closeDebugSession();
+                    return;
+                }
+                // Only the bar moves — no full re-render per tick.
+                this.debugUi?.$actions
+                    .find('[data-role="debug-autoclose-bar"]')
+                    .css('width', `${(remaining / session.autoClose.duration) * 100}%`);
+            }, 100)
+        };
+        this.updateDebugger();
+    }
+
+    /** Applies one tick's canvas effects: tab focus per frame, mark wipes, amber marks. */
+    private applyDebugTick(session: NonNullable<typeof this.debugSession>, data: any): void {
+        const frame = data.frame || {flowId: null, flowName: null, depth: 0};
+        const frameKey = frame.depth > 0 && frame.flowId ? String(frame.flowId) : 'root';
+        const ids: string[] = (data.executedIds || [String(data.step.id || '')]).map(String);
+
+        const paint = (): void => {
+            if (data.transition === 'reentered') {
+                // A fresh iteration: the subflow canvas starts white again.
+                this.clearDebugMarks();
+                session.marksByFlow[frameKey] = [];
+            }
+            session.marksByFlow[frameKey] = Array.from(new Set([...(session.marksByFlow[frameKey] || []), ...ids]));
+            this.markExecutedDebugSteps(ids);
+        };
+
+        const targetTab = frameKey === 'root'
+            ? Promise.resolve(session.homeIndex)
+            : this.ensureFlowTab(Number(frame.flowId));
+        void targetTab.then(index => {
+            if (this.debugSession !== session || index === null) {
+                paint();
+                return;
+            }
+            if (this.activeTab !== index) {
+                // Session-preserving switch; the fresh render then gets this frame's marks back.
+                this.debugVisiting = true;
+                try {
+                    this.switchTab(index);
+                } finally {
+                    this.debugVisiting = false;
+                }
+                this.markExecutedDebugSteps(session.marksByFlow[frameKey] || []);
+                if (frameKey === 'root' && session.failedId) {
+                    this.markFailedDebugStep(session.failedId);
+                }
+            }
+            paint();
+            if (data.subflowTrails && data.subflowTrails.length) {
+                if (data.transition === null) {
+                    // A stepped-OVER invoker: show where the subflow(s) went, then come home.
+                    this.visitSubflowTrails(data.subflowTrails, session);
+                } else {
+                    // Step out ('returned' with trails): remember the subflow marks silently —
+                    // revisiting that tab shows everything that ran, no animation.
+                    (data.subflowTrails as Array<{flowId: number; executedIds: string[]}>).forEach(t => {
+                        const key = String(t.flowId);
+                        session.marksByFlow[key] = Array.from(new Set([...(session.marksByFlow[key] || []), ...t.executedIds.map(String)]));
+                    });
+                }
+            }
+        });
+    }
+
+    /**
+     * The debug SUBFLOW VISIT: for each subflow the just-executed step ran, bring its tab to the
+     * front (opening it when needed), paint the steps that executed inside it, dwell a moment —
+     * then return to the flow being debugged and repaint its session marks (the tab switch
+     * re-rendered the canvas). Tab switches keep the session alive via `debugVisiting`.
+     */
+    private visitSubflowTrails(trails: Array<{flowId: number; flowName?: string; executedIds: string[]}>, session: NonNullable<typeof this.debugSession>): void {
+        if (this.debugVisiting || !trails.length) {
+            return;
+        }
+        const homeIndex = session.homeIndex;
+        this.debugVisiting = true;
+        session.busy = true;
+        session.busyAction = 'visit';
+        this.updateDebugger();
+
+        const finish = (): void => {
+            if (this.tabs[homeIndex] && this.activeTab !== homeIndex) {
+                this.switchTab(homeIndex);
+            }
+            this.debugVisiting = false;
+            if (this.debugSession === session) {
+                // The re-render dropped the DOM classes — repaint the home canvas's marks.
+                this.markExecutedDebugSteps(session.marksByFlow['root'] || []);
+                if (session.failedId) {
+                    this.markFailedDebugStep(session.failedId);
+                }
+                session.busy = false;
+                session.busyAction = null;
+                this.updateDebugger();
+            } else {
+                this.clearDebugMarks();
+            }
+        };
+        const visitOne = (i: number): void => {
+            if (i >= trails.length || this.debugSession !== session) {
+                finish();
+                return;
+            }
+            this.ensureFlowTab(trails[i].flowId).then(index => {
+                if (this.debugSession !== session || index === null) {
+                    if (index === null) {
+                        visitOne(i + 1);
+                        return;
+                    }
+                    finish();
+                    return;
+                }
+                if (this.activeTab !== index) {
+                    this.switchTab(index);
+                }
+                this.markExecutedDebugSteps(trails[i].executedIds || []);
+                window.setTimeout(() => visitOne(i + 1), 1600);
+            }).catch(() => visitOne(i + 1));
+        };
+        visitOne(0);
+    }
+
+    /**
+     * The tab index showing the given flow — reusing an open tab, otherwise opening a new one
+     * from the flow catalog. Null when the flow is unknown (deleted, or not listed).
+     */
+    private ensureFlowTab(flowId: number): Promise<number | null> {
+        const already = this.tabs.findIndex(t => t.flow !== null && (t.flow as any).id === flowId);
+        if (already >= 0) {
+            return Promise.resolve(already);
+        }
+        return this.flowCatalog().then((data: {records?: FlowRecord[]}) => {
+            const flow = (data.records || []).find(f => f.id === flowId);
+            if (!flow || flow.type === 'native') {
+                return null;
+            }
+            this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
+            this.renderTabs();
+            return this.tabs.length - 1;
+        }).catch(() => null);
     }
 
     /**
@@ -4770,6 +5199,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (this.debugSession === session) {
                 session.busy = false;
                 this.buildDebugger();
+                this.maybeStartDebugAutoClose();
             }
         });
     }
@@ -4828,6 +5258,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (step) {
             step.el.classList.add('is-debug-failed');
         }
+        if (this.debugSession && !this.debugVisiting) {
+            this.debugSession.failedId = String(stepId);
+        }
     }
 
     /** Clears every executed/failed mark (session start and close). */
@@ -4836,6 +5269,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     private closeDebugSession(): void {
+        if (this.debugSession && this.debugSession.autoClose) {
+            window.clearInterval(this.debugSession.autoClose.timer);
+        }
         this.clearDebugMarks();
         this.$el.find('[data-role="debugger"]').prop('hidden', true).empty();
         this.debugSession = null;
@@ -4846,6 +5282,79 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     // --- Persistence -----------------------------------------------------------
+
+    /**
+     * Saves EVERY tab holding unsaved changes, sequentially (parallel saves could race the
+     * unique-name check). The active tab is stashed first so all tabs save from their stashed
+     * design; each success updates the tab's flow/baseline in place — the canvas never reloads.
+     * Failures (missing trigger, name taken, …) are flashed per tab, the rest still save.
+     */
+    private saveAll(): void {
+        if (this.savingAll) {
+            return;
+        }
+        this.stashActiveTab();
+        const dirty = this.tabs.filter(tab => tab.design !== null && this.tabDirty(tab, false));
+        if (!dirty.length) {
+            return;
+        }
+        this.savingAll = true;
+        const $saveAll = this.$el.find('[data-role="save-all"]');
+        const $spinner = $('<span/>', {'class': 'fa fa-spinner fa-spin aaxis-flow-editor__save-spinner', 'aria-hidden': 'true'});
+        $saveAll.prepend($spinner);
+        this.syncDirty();
+
+        let saved = 0;
+        const saveOne = (i: number): Promise<void> => {
+            if (i >= dirty.length) {
+                return Promise.resolve();
+            }
+            const tab = dirty[i];
+            const design = tab.design as any;
+            const trigger = (design.steps || []).find((st: any) => st && this.stepMeta[st.type] && this.stepMeta[st.type].category === 'trigger');
+            if (!trigger) {
+                messenger.notificationFlashMessage('error', `${this.tabTitle(tab, false)}: ${__('aaxis.ontology.flow_editor.trigger_required')}`);
+                return saveOne(i + 1);
+            }
+            const url = tab.flow === null
+                ? routing.generate('aaxis_ontology_flow_api_create')
+                : routing.generate('aaxis_ontology_flow_api_update', {id: (tab.flow as any).id});
+            return apiFetch(url, tab.flow === null ? 'POST' : 'PUT', {
+                steps: (design.steps || []).map((st: any) => ({type: st.type, name: st.name, x: st.x, y: st.y, config: st.config || null})),
+                design
+            }).then(res => {
+                if (!res.ok || !res.data || !res.data.success) {
+                    throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.save_error'));
+                }
+                tab.flow = res.data.flow as FlowRecord;
+                tab.savedState = JSON.stringify({design: tab.design});
+                tab.invalidNames = (res.data.flow && res.data.flow.invalidSteps) || [];
+                saved++;
+            }).catch((err: Error) => {
+                messenger.notificationFlashMessage('error', `${this.tabTitle(tab, false)}: ${err.message || __('aaxis.ontology.flow_editor.save_error')}`);
+            }).then(() => saveOne(i + 1));
+        };
+
+        void saveOne(0).finally(() => {
+            // Bring the LIVE canvas in line with its (possibly just-saved) tab entry.
+            const active = this.tabs[this.activeTab];
+            if (active) {
+                this.flow = active.flow;
+                if (active.savedState !== null) {
+                    this.savedState = active.savedState;
+                }
+                this.applyInvalidStepNames(active.invalidNames);
+            }
+            this.savingAll = false;
+            $spinner.remove();
+            if (saved > 0) {
+                messenger.notificationFlashMessage('success', __('aaxis.ontology.flow_editor.saved_all', {count: saved}));
+            }
+            this.renderTabs();
+            this.syncTabsUrl();
+            this.syncDirty();
+        });
+    }
 
     private save(): void {
         // The trigger IS the flow's identity (name + enabled) — nothing to save without one.
@@ -4928,6 +5437,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private flowCatalog(): Promise<any> {
         this.catalogFlows ??= fetch(routing.generate('aaxis_ontology_flow_list'), {credentials: 'same-origin'})
             .then(r => r.json())
+            .then((data: any) => {
+                // A synchronous copy for consumers that cannot await (context menus).
+                this.catalogFlowRecords = (data && data.records) || [];
+                return data;
+            })
             .catch((err: any) => {
                 this.catalogFlows = null;
                 throw err;
@@ -4973,6 +5487,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private prefetchCatalogs(): void {
         this.entityCatalog().catch(() => undefined);
         this.connectorCatalog().catch(() => undefined);
+        this.flowCatalog().catch(() => undefined);
     }
 
     dispose(): void {

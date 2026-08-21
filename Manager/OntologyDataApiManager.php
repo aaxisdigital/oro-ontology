@@ -40,7 +40,7 @@ class OntologyDataApiManager
         private readonly MessageProducerInterface $producer,
         private readonly ConfigManager $configManager,
         private readonly OntologyAttributeReconciler $attributeReconciler,
-        private readonly OntologyDataEventRecorder $events,
+        private readonly OntologyFlowEventEmitter $flowEvents,
         private readonly OroEntityReader $oroReader,
         private readonly OroEntityWriter $oroWriter,
     ) {
@@ -210,28 +210,23 @@ class OntologyDataApiManager
             'payload' => $payloads,
         ], JSON_THROW_ON_ERROR);
 
-        $eventId = $this->events->open($flow->getId(), $uuid, $entity->getId(), $uniqueIds, $startedAt);
-        $changed = [];
-        $error = null;
-        try {
-            $raw = $connection->fetchOne('SELECT aaxis_ontology_data_upsert(CAST(? AS jsonb))', [$input]);
-            $response = json_decode((string) $raw, true);
-            $outcome = $this->events->parseUpsertResponse(\is_array($response) ? $response : []);
-            $changed = $outcome['changed'];
+        $raw = $connection->fetchOne('SELECT aaxis_ontology_data_upsert(CAST(? AS jsonb))', [$input]);
+        $response = json_decode((string) $raw, true);
+        $outcome = self::parseUpsertResponse(\is_array($response) ? $response : []);
+        $changed = $outcome['changed'];
 
-            if ($outcome['errors'] !== null) {
-                throw OntologyApiException::invalidPayload(implode('; ', $outcome['errors']));
-            }
-        } catch (\Throwable $e) {
-            // Recorded on the event row (the Events page derives Error status from it), then
-            // rethrown for the caller — the flow step receipt keeps failing loudly.
-            $error = $e->getMessage();
-            throw $e;
-        } finally {
-            // Closed however this ends — rejected batch or a database failure included — so an
-            // event never stays open (an open event now reads as "still running").
-            $this->events->close($eventId, $changed, $error);
+        if ($outcome['errors'] !== null) {
+            // The failure surfaces as the run's flow-exception event (the executor emits it) —
+            // no per-write status rows anymore.
+            throw OntologyApiException::invalidPayload(implode('; ', $outcome['errors']));
         }
+
+        // The write became real: one data-upsert event on the run's trail.
+        $this->flowEvents->emit($flow, $uuid, 'data-upsert', [
+            'entity' => (string) $entity->getName(),
+            'uniqueIds' => $uniqueIds,
+            'changedIds' => $changed,
+        ]);
 
         return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
     }
@@ -253,18 +248,13 @@ class OntologyDataApiManager
     {
         [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid, false);
 
-        $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-        $eventId = $this->events->open($flow->getId(), $uuid, $entity->getId(), $uniqueIds, $startedAt);
-        $changed = [];
-        $error = null;
-        try {
-            $changed = $this->oroWriter->update($entity, $uniqueIds, $payloads);
-        } catch (\Throwable $e) {
-            $error = $e->getMessage();
-            throw $e;
-        } finally {
-            $this->events->close($eventId, $changed, $error);
-        }
+        $changed = $this->oroWriter->update($entity, $uniqueIds, $payloads);
+
+        $this->flowEvents->emit($flow, $uuid, 'data-upsert', [
+            'entity' => (string) $entity->getName(),
+            'uniqueIds' => $uniqueIds,
+            'changedIds' => $changed,
+        ]);
 
         return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
     }
@@ -637,5 +627,32 @@ class OntologyDataApiManager
         $data[8] = \chr((\ord($data[8]) & 0x3f) | 0x80);
 
         return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+    }
+
+    /**
+     * Interprets the aaxis_ontology_data_upsert function's response (moved here from the retired
+     * OntologyDataEventRecorder). A REJECTED batch answers with the whole payload being
+     * {errors: [messages…]} — one key, holding a LIST of strings. A successful write is keyed by
+     * unique id, each value the diff OBJECT (or null when untouched) — the SHAPE decides, not the
+     * key, so a record whose unique id is literally "errors" cannot read as a rejected batch.
+     *
+     * @param array<string, mixed> $response
+     *
+     * @return array{changed: array<int, string>, errors: array<int, string>|null}
+     */
+    public static function parseUpsertResponse(array $response): array
+    {
+        $payload = \is_array($response['payload'] ?? null) ? $response['payload'] : [];
+        $errors = $payload['errors'] ?? null;
+        if (array_keys($payload) === ['errors'] && \is_array($errors) && array_is_list($errors)
+            && $errors !== [] && array_filter($errors, 'is_array') === []
+        ) {
+            return ['changed' => [], 'errors' => array_map('strval', $errors)];
+        }
+
+        // array_keys() hands back INTs for numeric-looking unique ids — stringify them.
+        $changed = array_keys(array_filter($payload, static fn ($diff) => $diff !== null));
+
+        return ['changed' => array_values(array_map('strval', $changed)), 'errors' => null];
     }
 }

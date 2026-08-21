@@ -87,8 +87,21 @@ class OntologyFlowApiController extends AbstractController
         // variable: the OAuth application's name, carried by the OAuth2 token as its "client"
         // attribute (null when the caller authenticated another way). Anonymous calls get none.
         $extraInput = [];
-        if ($this->getUser() !== null) {
+        $runInfo = ['trigger' => 'endpoint'];
+        $user = $this->getUser();
+        if ($user !== null) {
             $extraInput['OAuthApplication'] = $this->oauthApplication();
+            // The flow-start event names who called (endpoint runs with credentials).
+            $first = method_exists($user, 'getFirstName') ? (string) $user->getFirstName() : '';
+            $last = method_exists($user, 'getLastName') ? (string) $user->getLastName() : '';
+            $name = trim($first . ' ' . $last);
+            if ($name === '') {
+                $name = (string) $user->getUserIdentifier();
+            }
+            $runInfo['user'] = [
+                'name' => $name,
+                'email' => method_exists($user, 'getEmail') ? (string) $user->getEmail() : '',
+            ];
         }
 
         // Body: JSON when it parses, raw text otherwise, null when empty.
@@ -106,7 +119,7 @@ class OntologyFlowApiController extends AbstractController
         }
 
         try {
-            $context = $runner->run($match, $body, $headers, $request->query->all(), $extraInput);
+            $context = $runner->run($match, $body, $headers, $request->query->all(), $extraInput, $runInfo);
             // The trigger's optional Response binding shapes the HTTP answer from the final
             // context: {statusCode, body}. Without one, the default {success, flowUuid, context}.
             $bound = $runner->respond($match['config'], $context);

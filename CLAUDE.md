@@ -39,7 +39,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 | `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid's row-click-to-edit, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|endpoint|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb — that migration still names the OLD `queue` trigger, deliberately: it is applied history, fresh installs skip it (installer ≥ v1_9), and no row ever used it), `last_finished` (datetime NULL — stamped by `FlowDebugExecutor::touchLastFinished()` when a run ENDS, from a `finally` so failures stamp too; v1_9 backfilled it from `last_executed` so pre-existing rows don't look permanently running; installer at v1_9). **`last_executed` + `last_finished` are the running-state pair** — see "Flow concurrency" below |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique. **Version continuity** (v1_10): `aaxis_ontology_data_upsert` numbers records PAST whatever history survives for the unique id — insert starts at `max(history)+1`, update archives at `GREATEST(live, max(history)+1)` — because a re-created record restarting at version 1 used to CRASH this unique index on its first change (the pre-9582e03 purge deleted data but kept history; inside the async consumer that read as a logged error + a "no changes" event + a silently unchanged record). Never assume live version = history+1 |
-| `OntologyDataEvent` | `aaxis_ontology_data_events` | one row per flow execution (seen vs changed ids); `error` text NULL (v1_10) = how the run failed — status is DERIVED: finished_at null = running, error null = success, else error |
+| `OntologyFlowEvent` | `aaxis_ontology_flow_events` | (v1_12 — REPLACED `OntologyDataEvent`/`aaxis_ontology_data_events`, dropped WITH its data) one row per flow-execution EVENT: flow_id/flow_uuid/flow_name (plain copies, NO FK — records survive flow rename/delete), `event` ∈ flow-start/flow-finish/subflow-start/subflow-finish/flow-exception/data-upsert/log-message/step, `datetime` TIMESTAMP(6) (microseconds — parallel consumers make insertion ids useless for ordering; the emit-time stamp is the truth; the ENTITY maps it as a STRING because Oro's global UTCDateTimeType hydrates `datetime` columns with a STRICT 'Y-m-d H:i:s' parse that rejects fractional seconds — the controller date_create()s the raw value for display, and mapping changes here need the doctrine.metadata.cache pools cleared), jsonb `payload`. Written ASYNCHRONOUSLY (topic `aaxis_ontology_flow_event` → `Async/OntologyFlowEventProcessor`, plain DBAL insert) so logging never blocks a run |
 
 ## Data HTTP API (OAuth) — `Api/` + `Manager/OntologyDataApiManager`
 
@@ -172,7 +172,7 @@ Key facts:
   `OntologyFlow::NAME_REST_API` ("Ontology REST API"), the "Add Data" modal uses
   `OntologyFlow::NAME_MANUAL` ("Manual"). If that flow is **disabled**, the call fails (409
   `flow_disabled`); if it's missing entirely, 500 `flow_misconfigured`. Upserts stamp the flow's id
-  on the queued message / `aaxis_ontology_data_events.flow_id`. The two flows are seeded by the data
+  on the queued message. The two flows are seeded by the data
   fixture `Migrations/Data/ORM/LoadOntologyFlows` (run `oro:migration:data:load`).
 - **Auth**: routes are declared as `/api/...`; Oro's `RouteCollectionListener` prepends `/admin`, so
   they resolve under `/admin/api/...` and ride the **stateless OAuth `api_secured` firewall**
@@ -202,7 +202,7 @@ A flow's running state is **derived from two timestamps, not stored as a flag**:
 
 - **Both stamps go through `FlowDebugExecutor`** (`touchLastExecuted` / `touchLastFinished`), and the
   finish one lives in a **`finally`**: a run that throws must still release the state, or that flow
-  would never be schedulable again. `executeFrom()` (the step debugger) stamps a finish on **every**
+  would never be schedulable again. `debugWalk()` (the step debugger) stamps a finish on **every**
   call, not just the last step — nothing is executing server-side between debug steps, so a paused
   debug session must not look like a run in progress.
 - **The guard is in `ScheduledFlowRunner`**: a due flow whose previous instance is still in flight is
@@ -526,12 +526,15 @@ SAVED tab as `?tabs=<id,id,…>` in tab order — `syncTabsUrl()` on tab load/cl
 the URL; never-saved tabs cannot travel and are not listed). Tab title = the
 TRIGGER STEP's name ("unnamed — add a trigger" until one exists — the flow is NAMED BY ITS
 TRIGGER; there is no top-bar name display anymore), a • marks unsaved changes, × closes (confirm
-when dirty; the editor always keeps at least one tab). Two ICON ACTION tabs sit at the end:
+when dirty; the editor always keeps at least one tab). Two ICON ACTION tabs sit at the FAR RIGHT of the bar (`__tab--push-right` margin-left auto —
+away from the flow tabs so a close/switch click cannot slip onto them):
 folder = open any existing non-native flow in a NEW tab (picker over `aaxis_ontology_flow_list` —
 a full-width name filter + a Flows|Subflows tab pair whose COUNTS follow the filter, only the list
 scrolls and the popup is capped at ~60% of the window;
-an already-open flow just focuses its tab), + = a new empty flow tab. Switching tabs closes any
-debug session. A TRIGGER IS REQUIRED TO SAVE (`structuralErrors`: `trigger_required` — blocks
+an already-open flow just focuses its tab), + = a new empty flow tab. FLOW tabs are
+DRAG-REORDERABLE (HTML5 drag; drop lands before/after the target by pointer half, indicators
+`is-drop-before/-after`; the active tab travels by identity and `syncTabsUrl()` persists the new
+order). Switching tabs closes any debug session. A TRIGGER IS REQUIRED TO SAVE (`structuralErrors`: `trigger_required` — blocks
 save, import and the run gate alike; client pre-checks with a flash; the step-less NATIVE flows
 never pass through save). The save payload carries no name; the server
 derives it (`deriveFlowName()`: trigger step name → stored name → generated `new_flow_<hex>`),
@@ -553,9 +556,9 @@ subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call S
 (`foreach`, IMPLEMENTED — see the step docs) · Operations: DWL transform/Entity
 Read/Entity Write/HTTP Request/SQL Query/Invoke PHP (`invoke_php`, IMPLEMENTED — see the step
 docs) · File Operations:
-Read File/Write File/List Folder/Delete/Rename · Notification: Logger + MS Teams (`logger`,
-`ms_teams` — IMPLEMENTED, see the step docs) /Event/Email (`event`/`email` — PLACEHOLDERS like
-foreach: toolbox tile + name-only settings, valid with any config, no-op at runtime)) is the step
+Read File/Write File/List Folder/Delete/Rename · Notification: Logger + Event + MS Teams
+(`logger`, `event`, `ms_teams` — IMPLEMENTED, see the step docs) /Email (`email` — the LAST
+PLACEHOLDER: toolbox tile + name-only settings, valid with any config, no-op at runtime)) is the step
 palette. Element VISIBILITY is System Configuration (Aaxis Ontology → Flow Elements: one
 `flow_element_<type>` boolean per toolbox item — defaults ALL ON except entity_change, email and
 event). Hidden elements are still RENDERED with the `[hidden]` attribute (an explicit
@@ -598,8 +601,15 @@ pushState navigation — same hook PageStateView uses for forms) and `page:befor
 grid inline-editing / config-form / hidden-redirect checks see the editor too; all use Oro's
 `oro.ui.leave_page_with_unsaved_data_confirm` message and every hook is removed in dispose().
 The editor's own cancel button (labelled "Discard" while dirty, "Close" when clean) is an
-EXPLICIT discard: it sets `discarding = true` before navigating, which makes `anyTabDirty()`
-answer false so none of the guards fire on that exit. Each tile shows its
+EXPLICIT discard SCOPED TO THE ACTIVE TAB: with several tabs open it closes just the active one
+(`closeTab(index, force)` — force skips the dirty confirm, the button IS the confirmation) and
+the others keep their work; only from the LAST tab does it leave the editor, setting
+`discarding = true` so the guards stay quiet for that lone tab's changes. **Save all**
+(`data-role="save-all"`, enabled while `anyTabDirty()`): stashes the active tab, then saves every
+dirty tab SEQUENTIALLY from its stashed design (parallel saves would race the unique-name check),
+updating each tab's flow/baseline in place — no canvas reload; per-tab failures (missing trigger,
+name taken) flash with the tab's title and the rest still save; ends with an "N flows saved"
+flash, renderTabs + syncTabsUrl (created flows gained ids). Each tile shows its
 icon with the step **name** centered below (up to two rows, breaking only at word boundaries):
 names default to `<type>-<n>` (first free n) and are unique per flow (client + server enforced).
 ⚠️ **Settings-panel catalogs are cached in memory** (`entityCatalog()` / `connectorCatalog()`, warmed
@@ -807,7 +817,7 @@ block Confirm (only empty/duplicate NAMES do): the config is stored as-is and th
 (`is-config-invalid`, `markStepInvalid()`), and a flow with any red tile CANNOT RUN — Run
 Now/Debug are disabled client-side (`syncDebugButtons`, jsmessage `invalid_steps_blocked`) and the
 EXECUTOR enforces the same bar on every entry point (`FlowDebugExecutor::assertRunnable()` at
-execute()/executeFrom() start — UI, scheduler and future triggers all pass through it, throwing
+execute()/debugWalk() start — UI, scheduler and future triggers all pass through it, throwing
 the first problem BEFORE lastExecuted is stamped). The red set is server-computed
 (`invalidStepNames()`, shipped as `invalidSteps` in the flow serialization — applied at editor
 load and after every save) and locally updated on each popup Confirm. A NULL (never-confirmed)
@@ -898,20 +908,51 @@ step); a DWL EVALUATOR just before the buttons (a `createDwlField` fixed instanc
 button POSTs {expression, context} to the exposed `aaxis_ontology_flow_debug_eval` endpoint →
 `DwlTransformer::transform` against the CURRENT variables, enabled once a context exists — the
 result/engine error opens in a MODAL Dialog, class `aaxis-debug-eval-error` for failures, not
-inline); and the action buttons (Cancel | Run all | Next step while stepping, just Close when
-done/failed). **Debug** (mode 'step', `data-role="debug-step"`) walks one step per POST to
-`aaxis_ontology_flow_debug_step` (`FlowDebugExecutor::executeFrom()` — index 0 seeds the context
-and mints the run's flowUuid; the context is held SERVER-SIDE between calls (cache.app,
-key aaxis_ontology_debug_ctx.<flowUuid>, TTL 1h — storeDebugContext/loadDebugContext): the
-client round-trips only `contextKey`, because shipping a large context (a reader loading
-thousands of records) in the request body blew past nginx's client_max_body_size and returned
-an HTML 413 page; an expired key 422s with 'restart the debug'; the full-run endpoint stores
-its final context too, so the sidebar evaluator works after Run Now; `runAll: true` finishes
-the rest in one call. **Canvas marks**: every EXECUTED step keeps the AMBER `is-debug-active`
+inline); and the action buttons — VSCode-style, ICON-ONLY: uniform 34px squares
+(`aaxis-flow-editor__debug-btn`), inline-SVG glyphs from the `DEBUG_ICONS` map drawn with
+currentColor (blue; the stop button's `--stop` modifier turns it red), labels only in the
+title/aria-label tooltips. Hollow red square = discard/close, |▷ continue = Run all, arc-onto-dot
+= Next step (STEP OVER: an invoker runs atomically with the visit animation after),
+arrow-into-dot = **Step into** (ENABLED only when the NEXT step is a sub_flow/foreach),
+arrow-out-of-dot = **Step out** (ENABLED only inside a subflow frame: runs the frame to
+completion — remaining foreach iterations included — in one call, landing on the caller's
+invoker step). ALL FIVE stay VISIBLE in fixed positions (VSCode order, stop last) — availability
+is enable/disable only, never show/hide, so buttons cannot shift under the cursor. The busy button swaps
+its glyph for a spinner. A CLEANLY finished pane AUTO-DISMISSES after
+`aaxis_ontology.flow_debug_autoclose_seconds` (System Configuration → Flows, default 15, 0 =
+never; shipped to the editor as the `debugAutoCloseSeconds` option): a full-width DECREASING bar
+under the buttons counts it down (`__debug-autoclose`, the actions row is flex-WRAP so the bar
+takes its own line; only the bar updates per 100ms tick, no re-render) and EVERY button — stop
+included — is disabled meanwhile; any CLICK OUTSIDE the pane (the design space) during the
+countdown dismisses it immediately, the click keeping its normal effect. Failed sessions stay
+open for inspection; both stepwise and Run Now panes auto-close.
+**Debug** (mode 'step', `data-role="debug-step"`) is a STEP-INTO walker: one tick per POST to
+`aaxis_ontology_flow_debug_step` (`FlowDebugExecutor::debugWalk()` — executeFrom is GONE). The
+server owns the whole cursor: the stored blob is `{context, frames, done}` where `frames` is a
+CALL STACK (root flow at the bottom; a stepped-INTO sub_flow pushes a frame, a foreach pushes one
+frame and RE-ENTERS it per iteration, loop vars seeded/restored like the atomic path). One tick
+is one of: executing the current frame's next step (`transition: null`); ENTERING a subflow
+('entered' — the target's TRIGGER is the returned step, nothing else ran); RE-ENTERING for the
+next foreach iteration ('reentered' — the editor WIPES the subflow canvas so it starts white with
+only the trigger amber, `iteration` says which pass); RETURNING ('returned' — the caller's
+invoker step completes only now). Responses carry `frame: {flowId, flowName, depth}` (the editor
+switches tabs to follow — `applyDebugTick`, session-preserving via debugVisiting — and repaints
+that canvas's marks from `session.marksByFlow`), `next` ({id,name,type} of the upcoming step —
+what makes the Step-into button appear) and `subflowTrails` ONLY when meaningful: a stepped-OVER
+invoker's own tick (transition null → the editor's visit animation) or a Step-out 'returned'
+(merged silently into that canvas's marks). Plain in-frame ticks carry NO trails — attaching the
+walk bookkeeping to them made the editor bounce home after every inner step. `stepOut: true` in
+the request loops ticks (stepping OVER nested invokers) until the current frame pops. The blob
+is held SERVER-SIDE between calls (cache.app, key aaxis_ontology_debug_ctx.<uuid>, TTL 1h —
+storeDebugContext/loadDebugContext; debug-eval unwraps `blob['context']`): the client round-trips
+only `contextKey`, because shipping a large context in the request body blew past nginx's
+client_max_body_size; an expired key 422s with 'restart the debug'; the full-run endpoint stores
+its final context too, so the sidebar evaluator works after Run Now; `runAll: true` loops ticks
+(stepping OVER invokers) to the end in one call — including from MID-STACK, unwinding frames. **Canvas marks**: every EXECUTED step keeps the AMBER `is-debug-active`
 class for the whole session (marks accumulate, cleared only on session start/close), a FAILED
 step turns RED (`is-debug-failed`, declared after amber so it wins) with the error text in the
 sidebar as before. Both debug endpoints return `executedIds` (this call's successful trail —
-`FlowDebugExecutor::lastExecutedIds()`, reset per execute/executeFrom) and, on a step failure,
+`FlowDebugExecutor::lastExecutedIds()`, reset per execute/tick) and, on a step failure,
 `failedStepId` + `executedIds` via `Exception/FlowStepFailure` (executeStepTracked wraps step
 errors; callers catching plain \RuntimeException still work). **Run Now** (mode
 'run', `data-role="debug"`) executes everything in ONE POST to `aaxis_ontology_flow_debug`
@@ -936,7 +977,7 @@ panels' `destinationError()` — jsmessage `destination_reserved`). **choice** s
 context: truthy continues on the GREEN port 0, falsy on the RED port 1 (optional — no link ends
 the flow); the verdict lands in the context under `choiceResults` (step id => bool), which is what
 `executionOrder(steps, links, choiceResults)` uses to follow only the taken branch — an
-undecided choice ends the walk, so `execute()`/`executeFrom()` RE-DERIVE the order after each
+undecided choice ends the walk, so `execute()` and every debug tick RE-DERIVE the order after each
 executed choice (the stepper's `total` grows as branches resolve; the prefix never reorders
 because every port drives one link and every step accepts one incoming). Executed for real: **entity_read** (`all`
 = EVERY record via `OntologyDataApiManager::queryForFlow()` — not page-capped, optional
@@ -971,25 +1012,59 @@ other step types are no-ops for now. Both writers resolve their content through 
 `resolveContent()` (context key, or the DWL expression when `content_dwl` is on), so the two cannot
 drift on how a step's content is read. `prepareUpsertBatch()` (shared by both paths)
 rejects a batch that REPEATS a unique id, naming both record numbers.
-**`Manager/OntologyDataEventRecorder` is the SINGLE writer of `aaxis_ontology_data_events`** — used
-by BOTH the synchronous path (`upsertRecordsSync`, internal-writer arm included) and the async
-consumer, because the two used to
-duplicate this bookkeeping and drifted (the consumer left every successful event open, so Manual
-"Add Data" rows showed no Changed Ids and no Finished At). `open()` inserts the row,
-`close(id, changedIds, ?error)` stamps changed_ids + finished_at + the failure description from a
-**`finally`** on both paths, so a rejected batch or a crash
-never leaves an event "open"; `parseUpsertResponse()` is the one place that reads the PG function's
-answer (an UNTOUCHED record is marked json null, so "changed" = the keys carrying a diff;
-numeric-looking unique ids come back as INT array keys and are strval'd; the failure payload is
-recognised BY SHAPE — the whole payload being `{errors: [strings]}` — so a record whose unique id
-is literally `errors` is not misread as a rejection). `encodeIds()` writes NULL, never `''`, for an
-empty list: Doctrine's simple_array reads `''` back as `['']`, a phantom blank element that would
-show up as a count of 1. The `error` column (v1_10) carries HOW a run failed (rejected-batch
-reasons joined, or the crash message; null = success): every close site records it — the async
-processor from its catch/rejection arms, the sync store arm and the internal-writer arm via a
-record-then-rethrow catch — and the Events page derives a Status badge from finished_at + error
-(running / success / error + description). Rows from before v1_10 are all null, i.e. read as
-Success — historical failures are only in the logs. The Events page also accepts **`?uuid=`**
+**FLOW EVENTS (v1_12)** — `Manager/OntologyFlowEventEmitter` queues ONE MQ message per event
+(datetime stamped at EMIT time with microseconds; producer failures are logged and swallowed —
+logging never breaks a run) and `Async/OntologyFlowEventProcessor` writes the rows. WHO EMITS
+WHAT: `FlowDebugExecutor.execute()` emits flow-start — or SUBFLOW-start/-finish when the run is a
+NESTED one (trigger 'subflow'; flow-exception keeps its name either way) — ({trigger:
+debug|schedule|endpoint|subflow,
+user?: {name, email} — set by the ENTRY POINTS via the new `$runInfo` param: the flow controller's
+debug endpoints pass the acting back-office user, the flow-API controller the authenticated
+caller, ScheduledFlowRunner 'schedule', nested sub_flow/foreach runs 'subflow'), then
+flow-exception ({message}) on failure OR flow-finish ({}) on success; `executeStepTracked` emits
+one `step` ({name, type: the step TYPE KEY}) per successfully executed step — the run's trail;
+stepwise debug (`debugWalk`) emits flow-start at session init, per-tick step events, subflow-
+start/-finish around frames and iterations, and flow-finish when the walk completes; a failing
+tick emits flow-exception for the failing frame AND every enclosing one. The executor also COLLECTS `subflowTrails()` per top-level run
+([{flowId, flowName, executedIds}], union-merged per flow — reset only when subflowStack is
+empty, captured in callSubflow's finally and per foreach iteration): the debug endpoints ship
+them (success AND FlowStepFailure responses) so the editor can visit the subflow tabs. GOTCHA
+(hit twice now): changing the entity's EVENTS const or the processor requires `supervisorctl
+restart oro_message_consumer:*` — stale consumers silently REJECT new event kinds. The **`event` notification step** (IMPLEMENTED — Name + a Value that is plain
+text or DWL via its toggle, config `{value, value_dwl}`; `flow_element_event` now defaults ON)
+emits log-message ({message: strings verbatim, anything else JSON-stringified}). `data-upsert`
+({entity, uniqueIds, changedIds}) is emitted by `OntologyDataApiManager` on the sync write paths
+(store + internal-writer arms, AFTER the write succeeds — failures surface as the run's
+flow-exception instead, no per-write status anymore) and by the async upsert consumer (which
+emits flow-exception itself on rejected batches/crashes since no executor wraps it).
+`parseUpsertResponse()` moved to `OntologyDataApiManager` as a public static (failure payloads
+recognised BY SHAPE — the whole payload being `{errors: [strings]}`). REMOVED: the
+OntologyDataEvent entity, OntologyDataEventRecorder and the data_events table.
+⚠️ REMOVING AN ENTITY CLASS (learned here the hard way): stale references survive in THREE places
+that each break `oro:entity-config:update`/migrations differently — the `oro_entity_config`(+
+_field/_index_value) ROWS (delete them), composer's CLASSMAP (`composer dump-autoload`) and the
+doctrine metadata CACHE POOLS (`cache:pool:clear doctrine.metadata.cache
+doctrine.metadata.cache.config oro_security.entity_security_metadata_provider.cache`) — clear all
+three before the migration run comes back green.
+**DEBUG SUBFLOW VISIT** (editor): when a debugged step of type sub_flow/foreach returns
+`subflowTrails`, `visitSubflowTrails()` brings each subflow's tab to the front (`ensureFlowTab`:
+reuse the open tab or open one from the flow catalog), paints its executed steps amber, dwells
+~1.6s each, then returns to the debugged flow's tab and REPAINTS its session marks (the switch
+re-rendered the canvas — the session now tracks `markedIds`/`failedId` for exactly this). Tab
+switches during the visit keep the session alive via the `debugVisiting` flag (resetCanvas skips
+closeDebugSession); the sidebar shows busyAction 'visit' meanwhile. RIGHT-CLICKING a sub_flow or
+foreach tile offers **"Navigate to subflow"** (only when the configured id exists as a subflow in
+the catalog — checked against `catalogFlowRecords`, the SYNC copy flowCatalog() maintains since
+context menus cannot await; the flow catalog is prefetched at editor load): it opens/focuses the
+subflow's tab like the debug visit does (plain navigation — closes any debug session).
+RIGHT-CLICKING a **subflow TRIGGER** tile offers a **"Called by"** SUBMENU (anchor-submenu style):
+one child per flow whose sub_flow/foreach steps reference this subflow (scanned from the catalog
+records' `steps` by config KEY `subflow`, name-sorted), each navigating like Navigate-to-subflow;
+a disabled "No flow calls this subflow." child when none (or when the subflow was never saved —
+no id, no callers). The catalog copy is load-time — callers created in another window appear
+after a reload.
+The Events page (rebuilt: columns Flow/Event/Date-Time/UUID/Payload — kind badge, one-line JSON
+payload preview with tooltip+copy, list ordered by datetime DESC) still accepts **`?uuid=`**
 (first load pre-filters the grid, same pattern as Entities' `?system=` and Data View's
 `?entity=`) — it is what a cmd/ctrl+click on a row's uuid-filter icon opens in a new tab; plain
 click filters in place. Grid actions that NAVIGATE (entity → Data View, system → Entities, flow →

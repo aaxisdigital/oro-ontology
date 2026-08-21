@@ -10,6 +10,7 @@
                  flow: flow,
                  gridSpacing: gridSpacing,
                  stepSizeFactor: stepSizeFactor,
+                 debugAutoCloseSeconds: debugAutoCloseSeconds,
                  listUrl: path('aaxis_ontology_flows')
              }|json_encode }}">
 
@@ -54,6 +55,11 @@
                                 title="{{ 'aaxis.ontology.flow_editor.save'|trans }}">
                             <span class="fa fa-check" aria-hidden="true"></span>
                             <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.save'|trans }}</span>
+                        </button>
+                        <button type="button" class="btn btn-primary" data-role="save-all" disabled
+                                title="{{ 'aaxis.ontology.flow_editor.save_all'|trans }}">
+                            <span class="fa fa-check-square-o" aria-hidden="true"></span>
+                            <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.save_all'|trans }}</span>
                         </button>
                     </div>
                 </div>

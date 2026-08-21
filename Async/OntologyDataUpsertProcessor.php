@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Aaxis\Bundle\OntologyBundle\Async;
 
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyDataUpsertTopic;
-use Aaxis\Bundle\OntologyBundle\Manager\OntologyDataEventRecorder;
+use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
+use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager;
+use Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter;
 use Doctrine\DBAL\Connection;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Component\MessageQueue\Client\TopicSubscriberInterface;
@@ -28,7 +31,7 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
     public function __construct(
         private readonly ManagerRegistry $doctrine,
         private readonly LoggerInterface $logger,
-        private readonly OntologyDataEventRecorder $events,
+        private readonly OntologyFlowEventEmitter $flowEvents,
     ) {
     }
 
@@ -52,66 +55,54 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
         /** @var Connection $connection */
         $connection = $this->doctrine->getConnection();
 
-        $eventId = null;
-        $changed = [];
-        $error = null;
+        $flowId = null;
+        $flowName = null;
+        $uuid = null;
         try {
-            $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-
-            // Reject a malformed message BEFORE opening an event: casting garbage would bury a
-            // broken producer as flow_id 0 / uuid "Array" in a row that looks legitimate.
+            // Reject a malformed message BEFORE emitting anything: casting garbage would bury a
+            // broken producer as flow_id 0 / uuid "Array" in events that look legitimate.
             $flowId = $this->asId($body['flow_id'] ?? null, 'flow_id');
             $entityId = $this->asId($body['entity_id'] ?? null, 'entity_id');
             $uuid = $body['uuid'] ?? null;
             if ($uuid !== null && !\is_string($uuid)) {
                 throw new \InvalidArgumentException('uuid must be a string, got ' . get_debug_type($uuid));
             }
-
-            // Open the inbound event (everything but changed_ids, finished_at and error).
-            $eventId = $this->events->open(
-                $flowId,
-                $uuid,
-                $entityId,
-                \is_array($body['unique_id'] ?? null) ? array_values($body['unique_id']) : [],
-                $startedAt
-            );
+            $flowName = $flowId !== null
+                ? $this->doctrine->getRepository(OntologyFlow::class)->find($flowId)?->getName()
+                : null;
 
             // Delegate validation + upsert to the database function.
-            $outcome = $this->events->parseUpsertResponse($this->callUpsertFunction($connection, $body));
-            $changed = $outcome['changed'];
+            $outcome = OntologyDataApiManager::parseUpsertResponse($this->callUpsertFunction($connection, $body));
 
             if ($outcome['errors'] !== null) {
-                // A rejected batch: the reasons land on the event row (the Events page shows them)
-                // and in the log.
-                $error = implode('; ', $outcome['errors']);
+                // A rejected batch surfaces as a flow-exception event (and the log).
                 $this->logger->error((string) json_encode(['errors' => $outcome['errors']]));
+                $this->flowEvents->emitRaw($flowId, $flowName, $uuid, 'flow-exception', [
+                    'message' => implode('; ', $outcome['errors']),
+                ]);
+
+                return self::ACK;
             }
 
-            // TODO: no validation errors - publish the upsert result to the next
-            // TODO: queue/topic once that destination is defined.
+            $entityName = $entityId !== null
+                ? (string) $this->doctrine->getRepository(OntologyEntity::class)->find($entityId)?->getName()
+                : '';
+            $this->flowEvents->emitRaw($flowId, $flowName, $uuid, 'data-upsert', [
+                'entity' => $entityName,
+                'uniqueIds' => \is_array($body['unique_id'] ?? null) ? array_values($body['unique_id']) : [],
+                'changedIds' => $outcome['changed'],
+            ]);
 
             return self::ACK;
         } catch (\Throwable $e) {
-            // A crash (a database failure included) is a failed run like any other: the message
-            // reaches the event row too, not just the log — otherwise the Events page shows a
-            // finished, unchanged event indistinguishable from a no-op success.
-            $error = $e->getMessage();
+            // A crash (a database failure included) is a failed run like any other: it surfaces
+            // as a flow-exception event, not just a log line.
             $this->logger->error('aaxis_ontology_data_upsert: failed to process message.', ['exception' => $e]);
+            $this->flowEvents->emitRaw($flowId, $flowName, \is_string($uuid) ? $uuid : null, 'flow-exception', [
+                'message' => $e->getMessage(),
+            ]);
 
             return self::REJECT;
-        } finally {
-            // The run is over whichever way it ended — rejected batch, crash or success — so the
-            // event never stays open (an open event now reads as "still running").
-            if ($eventId !== null) {
-                try {
-                    $this->events->close($eventId, $changed, $error);
-                } catch (\Throwable $closeError) {
-                    $this->logger->error(
-                        'aaxis_ontology_data_upsert: could not close the event.',
-                        ['exception' => $closeError]
-                    );
-                }
-            }
         }
     }
 

@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_11';
+        return 'v1_12';
     }
 
     #[\Override]
@@ -134,22 +134,23 @@ class AaxisOntologyBundleInstaller implements Installation
 
     private function createDataEventsTable(Schema $schema): void
     {
-        $table = $schema->createTable('aaxis_ontology_data_events');
+        // Flow-execution events — one row per flow-start/flow-finish/flow-exception/data-upsert/
+        // log-message/step event, written asynchronously by the flow-event queue processor.
+        // flow_id/flow_name are plain copies (no FK): the record survives flow rename/delete.
+        $table = $schema->createTable('aaxis_ontology_flow_events');
         $table->addColumn('id', 'integer', ['autoincrement' => true]);
-        $table->addColumn('flow_id', 'integer', []);
-        $table->addColumn('uuid', 'string', ['length' => 36]);
-        $table->addColumn('entity_id', 'integer', ['notnull' => false]);
-        $table->addColumn('unique_ids', 'simple_array', ['notnull' => false]);
-        $table->addColumn('changed_ids', 'simple_array', ['notnull' => false]);
-        $table->addColumn('started_at', 'datetime', ['notnull' => false]);
-        $table->addColumn('finished_at', 'datetime', ['notnull' => false]);
-        // How the run FAILED (null on success) — the Events page derives Running/Success/Error
-        // from finished_at + this.
-        $table->addColumn('error', 'text', ['notnull' => false]);
+        $table->addColumn('flow_id', 'integer', ['notnull' => false]);
+        $table->addColumn('flow_uuid', 'string', ['length' => 36, 'notnull' => false]);
+        $table->addColumn('flow_name', 'string', ['length' => 128, 'notnull' => false]);
+        $table->addColumn('event', 'string', ['length' => 32]);
+        // Microsecond precision: several parallel consumers write these rows, so insertion ids
+        // do NOT follow emission order — the emit-time stamp is the only truthful ordering.
+        $table->addColumn('datetime', 'datetime', ['columnDefinition' => 'TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL']);
+        $table->addColumn('payload', 'json', ['notnull' => false, 'columnDefinition' => self::JSONB_NULL]);
         $table->setPrimaryKey(['id']);
-        $table->addIndex(['flow_id'], 'aaxis_ontology_data_events_flow_idx');
-        $table->addIndex(['entity_id'], 'aaxis_ontology_data_events_entity_idx');
-        $table->addIndex(['started_at'], 'aaxis_ontology_data_events_started_at_idx');
+        $table->addIndex(['flow_id'], 'aaxis_ontology_flow_events_flow_idx');
+        $table->addIndex(['flow_uuid'], 'aaxis_ontology_flow_events_uuid_idx');
+        $table->addIndex(['datetime'], 'aaxis_ontology_flow_events_datetime_idx');
     }
 
     private function createFlowTable(Schema $schema): void

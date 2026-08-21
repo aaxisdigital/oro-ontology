@@ -10,68 +10,56 @@ interface OntologyEventOptions {
     _sourceElement: any;
 }
 
-interface EventRecord {
+interface FlowEventRecord {
     id: number;
     flowId: number | null;
-    flow: string | null;
-    uuid: string | null;
-    entityId: number | null;
-    entity: string | null;
-    uniqueIds: string;
-    uniqueIdsCount: number;
-    changedIds: string;
-    changedIdsCount: number;
-    startedAt: string | null;
-    finishedAt: string | null;
-    status: 'running' | 'success' | 'error';
-    error: string | null;
+    flowName: string | null;
+    flowUuid: string | null;
+    event: string;
+    datetime: string | null;
+    payload: Record<string, any> | null;
 }
 
 /**
- * Read-only Events page built on the reusable DataGrid widget. Shows data from
- * aaxis_ontology_data_events; there is intentionally no "add" action.
+ * Read-only Events page built on the reusable DataGrid widget. Shows the FLOW-EXECUTION events
+ * (aaxis_ontology_flow_events — one row per flow-start/flow-finish/flow-exception/data-upsert/
+ * log-message/step event, written asynchronously by the flow-event queue processor); there is
+ * intentionally no "add" action.
  */
 class OntologyEventComponent extends BaseComponent {
     private $el!: any;
     private grid!: DataGrid;
-    private uuidFilterApplied = false;
+    private uuidFilterApplied!: boolean;
 
     initialize(options: OntologyEventOptions): void {
         this.$el = options._sourceElement;
+        this.uuidFilterApplied = false;
 
         this.grid = new DataGrid({
             columns: [
-                {key: 'flow', label: __('aaxis.ontology.event_view.flow'), type: 'text'},
-                {key: 'entity', label: __('aaxis.ontology.event_view.entity'), type: 'text'},
+                {key: 'flowName', label: __('aaxis.ontology.event_view.flow'), type: 'text', width: '180px'},
                 {
-                    key: 'uuid', label: __('aaxis.ontology.event_view.uuid'), type: 'text',
-                    render: (row: EventRecord) => this.renderUuid(row),
-                    copyValue: (row: EventRecord) => row.uuid || ''
+                    key: 'event', label: __('aaxis.ontology.event_view.event'), type: 'text', width: '130px',
+                    render: (row: FlowEventRecord) => $('<span/>', {
+                        'class': 'aaxis-event-kind aaxis-event-kind--' + row.event,
+                        text: row.event
+                    }),
+                    copyValue: (row: FlowEventRecord) => row.event
                 },
                 {
-                    key: 'uniqueIds', label: __('aaxis.ontology.event_view.unique_ids'), type: 'text',
+                    key: 'datetime', label: __('aaxis.ontology.event_view.datetime'), type: 'datetime',
+                    width: '190px', render: (row: FlowEventRecord) => formatDateTime(row.datetime)
+                },
+                {
+                    key: 'flowUuid', label: __('aaxis.ontology.event_view.uuid'), type: 'text', width: '300px',
+                    render: (row: FlowEventRecord) => this.renderUuid(row),
+                    copyValue: (row: FlowEventRecord) => row.flowUuid || ''
+                },
+                {
+                    key: 'payload', label: __('aaxis.ontology.event_view.payload'), type: 'text',
                     sortable: false,
-                    render: (row: EventRecord) => this.renderIds(row.uniqueIds, row.uniqueIdsCount),
-                    copyValue: (row: EventRecord) => row.uniqueIds || ''
-                },
-                {
-                    key: 'changedIds', label: __('aaxis.ontology.event_view.changed_ids'), type: 'text',
-                    sortable: false,
-                    render: (row: EventRecord) => this.renderIds(row.changedIds, row.changedIdsCount),
-                    copyValue: (row: EventRecord) => row.changedIds || ''
-                },
-                {
-                    key: 'status', label: __('aaxis.ontology.event_view.status'), type: 'text',
-                    render: (row: EventRecord) => this.renderStatus(row),
-                    copyValue: (row: EventRecord) => row.error || row.status
-                },
-                {
-                    key: 'startedAt', label: __('aaxis.ontology.event_view.started_at'), type: 'datetime',
-                    width: '190px', render: (row: EventRecord) => formatDateTime(row.startedAt)
-                },
-                {
-                    key: 'finishedAt', label: __('aaxis.ontology.event_view.finished_at'), type: 'datetime',
-                    width: '190px', render: (row: EventRecord) => formatDateTime(row.finishedAt)
+                    render: (row: FlowEventRecord) => this.renderPayload(row),
+                    copyValue: (row: FlowEventRecord) => this.payloadText(row)
                 }
             ],
             gridKey: 'ontology-event-view',
@@ -89,7 +77,7 @@ class OntologyEventComponent extends BaseComponent {
         this.setBusy(true);
         fetch(routing.generate('aaxis_ontology_event_list'), {credentials: 'same-origin'})
             .then(r => r.json())
-            .then((data: {records: EventRecord[]}) => {
+            .then((data: {records: FlowEventRecord[]}) => {
                 this.grid.setRows(data.records || []);
                 this.applyUuidFromUrl();
             })
@@ -99,7 +87,7 @@ class OntologyEventComponent extends BaseComponent {
 
     /**
      * A `?uuid=` in the URL pre-filters the grid — the address a cmd/ctrl+clicked filter icon
-     * opens in a new tab ({@see renderUuid}). First load only, like the Entities page's `?system=`.
+     * opens in a new tab ({@see renderUuid}). First load only.
      */
     private applyUuidFromUrl(): void {
         if (this.uuidFilterApplied) {
@@ -108,36 +96,38 @@ class OntologyEventComponent extends BaseComponent {
         this.uuidFilterApplied = true;
         const uuid = new URLSearchParams(window.location.search).get('uuid');
         if (uuid !== null && uuid.trim() !== '') {
-            this.grid.setFilter('uuid', {operator: 'equals', value: uuid.trim()});
+            this.grid.setFilter('flowUuid', {operator: 'equals', value: uuid.trim()});
         }
     }
 
-    /**
-     * Id list prefixed with how many there are — "(3) - a, b, c" — since a single event can carry
-     * thousands and the cell only ever shows its first line. The raw list stays the tooltip and
-     * the copied value (the grid takes those from `copyValue`, not from this node).
-     */
-    private renderIds(ids: string, count: number): any {
-        if (!count) {
+    private payloadText(row: FlowEventRecord): string {
+        if (row.payload === null || Object.keys(row.payload).length === 0) {
+            return '';
+        }
+        return JSON.stringify(row.payload);
+    }
+
+    /** One-line JSON preview; the (capped) full text rides as the tooltip and the copied value. */
+    private renderPayload(row: FlowEventRecord): any {
+        const text = this.payloadText(row);
+        if (text === '') {
             return $('<span/>');
         }
-        // A native tooltip holding thousands of ids is unusable — cap it; the cell still carries
-        // the whole list as text and copying yields it in full.
-        const title = ids.length > 2000 ? `${ids.slice(0, 2000)}…` : ids;
-        return $('<span/>', {'class': 'aaxis-event-ids', title}).append(
-            $('<span/>', {'class': 'aaxis-event-ids__count', text: `(${count})`}),
-            document.createTextNode(` - ${ids}`)
-        );
+        return $('<span/>', {
+            'class': 'aaxis-event-payload',
+            text,
+            title: text.length > 2000 ? `${text.slice(0, 2000)}…` : text
+        });
     }
 
     /**
-     * The uuid plus a button that filters the grid down to the rows sharing it — one flow run
+     * The run uuid plus a button that filters the grid down to the rows sharing it — one flow run
      * writes several events under one uuid, and this is how they are read together. `data-role`
      * (never `data-action`, which the grid delegates globally to its row actions) and
      * stopPropagation so the click filters instead of copying the cell.
      */
-    private renderUuid(row: EventRecord): any {
-        const uuid = row.uuid || '';
+    private renderUuid(row: FlowEventRecord): any {
+        const uuid = row.flowUuid || '';
         const $wrap = $('<span/>', {'class': 'aaxis-event-uuid'});
         $wrap.append($('<span/>', {'class': 'aaxis-event-uuid__text', text: uuid, title: uuid}));
         if (uuid === '') {
@@ -162,27 +152,9 @@ class OntologyEventComponent extends BaseComponent {
                 );
                 return;
             }
-            this.grid.setFilter('uuid', {operator: 'equals', value: uuid});
+            this.grid.setFilter('flowUuid', {operator: 'equals', value: uuid});
         });
         $wrap.append($filter);
-        return $wrap;
-    }
-
-    /**
-     * Status badge derived server-side from finished_at + error: Running (still open), Success
-     * (finished clean) or Error — where the badge is followed by the description, with the full
-     * text as the tooltip (and as the copied value via `copyValue`).
-     */
-    private renderStatus(row: EventRecord): any {
-        const $wrap = $('<span/>', {'class': 'aaxis-event-status aaxis-event-status--' + row.status});
-        $wrap.append($('<span/>', {
-            'class': 'aaxis-event-status__badge',
-            text: __(`aaxis.ontology.event_view.status_${row.status}`)
-        }));
-        if (row.status === 'error' && row.error) {
-            $wrap.attr('title', row.error.length > 2000 ? `${row.error.slice(0, 2000)}…` : row.error);
-            $wrap.append($('<span/>', {'class': 'aaxis-event-status__message', text: row.error}));
-        }
         return $wrap;
     }
 

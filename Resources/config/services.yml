@@ -73,6 +73,7 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Manager\DatabaseQueryRunner'
             - '@aaxis_ontology.flow_logger'
             - '@Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
 
     # The "Invoke PHP" step's engine. The first argument is a placeholder: InvokableServicesPass
     # replaces it with a class-keyed service locator over EVERY container service; the System
@@ -136,7 +137,7 @@ services:
             - '@oro_message_queue.client.message_producer'
             - '@oro_config.global'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyAttributeReconciler'
-            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyDataEventRecorder'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityWriter'
 
@@ -153,11 +154,13 @@ services:
             - '@doctrine'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader'
 
-    # The single writer of aaxis_ontology_data_events, shared by the synchronous upsert path and
-    # the async consumer so their event rows can never drift apart.
-    Aaxis\Bundle\OntologyBundle\Manager\OntologyDataEventRecorder:
+    # Queues flow-execution events (flow-start/finish/exception, data-upsert, log-message, step)
+    # for the async flow-event processor — logging never blocks a running flow.
+    Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter:
+        public: true
         arguments:
-            - '@doctrine'
+            - '@oro_message_queue.client.message_producer'
+            - '@logger'
 
     # Masks/restores secret values inside connector JSON configs (form + view page).
     Aaxis\Bundle\OntologyBundle\Manager\ConnectorConfigSecrets: ~
@@ -195,6 +198,18 @@ services:
         arguments:
             - '@doctrine'
             - '@logger'
-            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyDataEventRecorder'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
+        tags:
+            - { name: oro_message_queue.client.message_processor }
+
+    # Message queue: flow-execution events (written to aaxis_ontology_flow_events).
+    Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowEventTopic:
+        tags:
+            - { name: oro_message_queue.topic }
+
+    Aaxis\Bundle\OntologyBundle\Async\OntologyFlowEventProcessor:
+        arguments:
+            - '@doctrine'
+            - '@logger'
         tags:
             - { name: oro_message_queue.client.message_processor }
