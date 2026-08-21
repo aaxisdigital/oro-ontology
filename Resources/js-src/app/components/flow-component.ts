@@ -27,8 +27,8 @@ interface FlowRecord {
 
 /**
  * Flows page built on the reusable DataGrid widget. Shows data from aaxis_ontology_flow.
- * "Add Flow" and the per-row edit action open the flow editor page; the edit action is
- * disabled for the two built-in (type = native) flows.
+ * "Add Flow" opens a blank editor and CLICKING ANYWHERE ON A ROW opens that flow's editor
+ * (no separate edit action) — except the two built-in (type = native) flows.
  */
 class OntologyFlowComponent extends BaseComponent {
     private $el!: any;
@@ -38,13 +38,6 @@ class OntologyFlowComponent extends BaseComponent {
         this.$el = options._sourceElement;
 
         const actions: GridAction[] = [
-            {
-                key: 'edit',
-                label: __('aaxis.common.grid.edit'),
-                icon: 'fa-pencil',
-                disabled: (row: FlowRecord) => row.type === 'native',
-                disabledTitle: __('aaxis.ontology.flow_view.edit_builtin_disabled')
-            },
             {
                 key: 'export',
                 label: __('aaxis.ontology.flow_view.export'),
@@ -96,7 +89,14 @@ class OntologyFlowComponent extends BaseComponent {
             gridKey: 'ontology-flow-view',
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-flow-view'}),
             emptyText: __('aaxis.ontology.flow_view.empty'),
-            onAction: (action, row, event) => this.onAction(action, row as FlowRecord, event)
+            onAction: (action, row, event) => this.onAction(action, row as FlowRecord, event),
+            // The whole row opens the editor (there is no separate edit action) — except the two
+            // built-in flows, which are not editable.
+            onRowClick: (row, event) => {
+                if ((row as FlowRecord).type !== 'native') {
+                    navigateTo(routing.generate('aaxis_ontology_flow_editor', {id: (row as FlowRecord).id}), event);
+                }
+            }
         });
         this.grid.mount(this.$el.find('[data-role="list"]'));
 
@@ -114,10 +114,8 @@ class OntologyFlowComponent extends BaseComponent {
     }
 
     private onAction(action: string, row: FlowRecord, event?: MouseEvent): void {
-        if (action === 'edit' && row.type !== 'native') {
-            navigateTo(routing.generate('aaxis_ontology_flow_editor', {id: row.id}), event);
-        } else if (action === 'export' && row.type !== 'native') {
-            // The grid dispatches disabled actions too, so re-check here (as 'edit' does).
+        // The grid dispatches disabled actions too, so re-check the built-in guard here.
+        if (action === 'export' && row.type !== 'native') {
             this.exportFlow(row);
         } else if (action === 'delete' && row.type !== 'native') {
             this.confirmDelete(row);

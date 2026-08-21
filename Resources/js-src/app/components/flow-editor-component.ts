@@ -340,6 +340,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     private links!: FlowLink[];
     private discarding!: boolean;
+    private pendingTabIds!: number[];
     private dirtyChecker!: () => boolean;
     private onOpenLinkBefore!: (e: any) => void;
     private onBeforeRefresh!: (queue: any[]) => void;
@@ -525,9 +526,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.setToolboxVisible(!this.toolbox().hidden, false);
         this.markSaved();
         // The tab bar: the URL's flow is the first tab; more open via the folder/+ action tabs.
+        // ?tabs= (a previous session's open set) is parsed BEFORE anything rewrites the URL.
+        this.pendingTabIds = (new URLSearchParams(window.location.search).get('tabs') || '')
+            .split(',')
+            .map(x => parseInt(x, 10))
+            .filter(n => Number.isFinite(n) && n > 0);
         this.tabs = [{flow: this.flow, design: null, savedState: null, invalidNames: (this.flow as any)?.invalidSteps || []}];
         this.activeTab = 0;
         this.renderTabs();
+        this.restoreTabsFromUrl();
         this.$el.on('click.aaxisFlowEditor', '[data-role="tab"]', (e: any) => {
             e.preventDefault();
             this.switchTab(Number($(e.currentTarget).data('tabIndex')));
@@ -1434,6 +1441,69 @@ class OntologyFlowEditorComponent extends BaseComponent {
             && JSON.stringify({design: tab.design}) !== tab.savedState;
     }
 
+    /**
+     * The URL mirrors the WHOLE tab set: the path is the active tab (deep links keep working)
+     * and `?tabs=` lists every open SAVED flow in tab order — so a refresh restores all tabs.
+     * Unsaved (never-saved) tabs cannot travel through a URL and are simply not listed.
+     */
+    private syncTabsUrl(): void {
+        const active = this.tabs[this.activeTab];
+        const activeId = active && active.flow ? (active.flow as any).id : null;
+        const base = activeId
+            ? routing.generate('aaxis_ontology_flow_editor', {id: activeId})
+            : routing.generate('aaxis_ontology_flow_editor');
+        const ids = this.tabs
+            .filter(t => t.flow !== null && (t.flow as any).id)
+            .map(t => (t.flow as any).id);
+        // The param only appears when it adds information beyond the path itself.
+        const url = ids.length > 1 || (ids.length === 1 && activeId === null)
+            ? base + '?tabs=' + ids.join(',')
+            : base;
+        window.history.replaceState(null, '', url);
+    }
+
+    /** Reopens the tabs a previous session listed in `?tabs=` (parsed BEFORE the first URL sync). */
+    private restoreTabsFromUrl(): void {
+        const ids = this.pendingTabIds;
+        this.pendingTabIds = [];
+        const currentId = this.flow ? (this.flow as any).id : null;
+        if (!ids.length || (ids.length === 1 && ids[0] === currentId)) {
+            return;
+        }
+        this.flowCatalog().then((data: {records?: FlowRecord[]}) => {
+            const byId: Record<number, FlowRecord> = {};
+            (data.records || []).forEach(f => {
+                if (f.type !== 'native') {
+                    byId[f.id] = f;
+                }
+            });
+            const activeTab = this.tabs[this.activeTab];
+            const rebuilt: EditorTab[] = [];
+            let activeIndex = -1;
+            ids.forEach(id => {
+                if (id === currentId) {
+                    activeIndex = rebuilt.length;
+                    rebuilt.push(activeTab);
+                    return;
+                }
+                if (byId[id] && !rebuilt.some(t => t.flow !== null && (t.flow as any).id === id)) {
+                    rebuilt.push({flow: byId[id], design: null, savedState: null, invalidNames: byId[id].invalidSteps || []});
+                }
+            });
+            if (activeIndex < 0) {
+                // The path's flow (or a brand-new tab) was not in the list — keep it, in front.
+                rebuilt.unshift(activeTab);
+                activeIndex = 0;
+            }
+            if (!rebuilt.length) {
+                return;
+            }
+            this.tabs = rebuilt;
+            this.activeTab = activeIndex;
+            this.renderTabs();
+        }).catch(() => undefined);
+    }
+
     private renderTabs(): void {
         const $bar = this.$el.find('[data-role="tabs"]');
         if (!$bar.length || !this.tabs) {
@@ -1518,10 +1588,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else {
             this.markSaved();
         }
-        // The URL follows the active tab, so refresh/bookmark lands on what is on screen.
-        window.history.replaceState(null, '', this.flow && this.flow.id
-            ? routing.generate('aaxis_ontology_flow_editor', {id: this.flow.id})
-            : routing.generate('aaxis_ontology_flow_editor'));
+        // The URL follows the active tab AND lists every open saved tab (?tabs=), so a refresh
+        // or bookmark restores the whole set with this flow on screen.
+        this.syncTabsUrl();
         this.syncDirty();
     }
 
@@ -1545,6 +1614,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     this.activeTab--;
                 }
                 this.renderTabs();
+                this.syncTabsUrl();
             }
         };
         if (dirty) {
@@ -1560,43 +1630,92 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /** The "open" action tab: pick any existing (non-native) flow and open it in a NEW tab. */
+    /**
+     * The "open a flow in a new tab" picker: a full-width name filter, a Flows | Subflows tab
+     * pair whose COUNTS follow the filter, and the matching list below (only the LIST scrolls;
+     * the popup itself is capped at ~60% of the window).
+     */
     private openFlowPicker(): void {
         const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.tab_open'), width: '560px'});
         const $content = dialog.open();
-        const $list = $('<div/>', {'class': 'aaxis-flow-picker'});
-        $content.append($list);
-        $list.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.loading')}));
+        const $picker = $('<div/>', {'class': 'aaxis-flow-picker'});
+        $content.append($picker);
+        $picker.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.loading')}));
         fetch(routing.generate('aaxis_ontology_flow_list'), {credentials: 'same-origin'})
             .then(r => r.json())
             .then((data: {records?: FlowRecord[]}) => {
-                $list.empty();
+                $picker.empty();
                 const rows = (data.records || []).filter(f => f.type !== 'native');
                 if (!rows.length) {
-                    $list.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.tab_open_empty')}));
+                    $picker.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.tab_open_empty')}));
                     return;
                 }
-                rows.forEach(flow => {
-                    const $row = $('<button/>', {type: 'button', 'class': 'aaxis-flow-picker__row'});
-                    $row.append($('<span/>', {'class': 'aaxis-flow-picker__name', text: flow.name || ''}));
-                    $row.append($('<span/>', {'class': 'aaxis-flow-picker__badge', text: flow.type}));
-                    if (!flow.enabled) {
-                        $row.append($('<span/>', {'class': 'aaxis-flow-picker__badge aaxis-flow-picker__badge--off', text: __('aaxis.ontology.flow_editor.tab_open_disabled')}));
-                    }
-                    $row.on('click', () => {
-                        dialog.close();
-                        const already = this.tabs.findIndex(t => t.flow !== null && t.flow.id === flow.id);
-                        if (already >= 0) {
-                            this.switchTab(already);
-                            return;
-                        }
-                        this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
-                        this.switchTab(this.tabs.length - 1);
-                    });
-                    $list.append($row);
+
+                const $filter = $('<input/>', {
+                    type: 'text', 'class': 'form-control aaxis-flow-picker__filter',
+                    placeholder: __('aaxis.ontology.flow_editor.tab_open_filter_placeholder'),
+                    autocomplete: 'off', spellcheck: false
                 });
+                const $tabs = $('<div/>', {'class': 'aaxis-flow-picker__tabs'});
+                const $list = $('<div/>', {'class': 'aaxis-flow-picker__list'});
+                $picker.append($filter, $tabs, $list);
+
+                let active: 'flow' | 'subflow' = 'flow';
+                const matches = (kind: 'flow' | 'subflow'): FlowRecord[] => {
+                    const query = String($filter.val() || '').trim().toLowerCase();
+                    return rows.filter(f => f.type === kind
+                        && (query === '' || (f.name || '').toLowerCase().indexOf(query) >= 0));
+                };
+                const render = (): void => {
+                    $tabs.empty();
+                    const kinds: Array<['flow' | 'subflow', string]> = [
+                        ['flow', __('aaxis.ontology.flow_editor.tab_open_flows')],
+                        ['subflow', __('aaxis.ontology.flow_editor.tab_open_subflows')]
+                    ];
+                    kinds.forEach(([kind, label]) => {
+                        const $tab = $('<button/>', {
+                            type: 'button',
+                            'class': 'aaxis-flow-picker__tab' + (active === kind ? ' is-active' : ''),
+                            text: `${label} (${matches(kind).length})`
+                        });
+                        $tab.on('click', () => {
+                            active = kind;
+                            render();
+                        });
+                        $tabs.append($tab);
+                    });
+
+                    $list.empty();
+                    const visible = matches(active);
+                    if (!visible.length) {
+                        $list.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.tab_open_no_match')}));
+                        return;
+                    }
+                    visible.forEach(flow => {
+                        const $row = $('<button/>', {type: 'button', 'class': 'aaxis-flow-picker__row'});
+                        $row.append($('<span/>', {'class': 'aaxis-flow-picker__name', text: flow.name || ''}));
+                        if (!flow.enabled) {
+                            $row.append($('<span/>', {'class': 'aaxis-flow-picker__badge aaxis-flow-picker__badge--off', text: __('aaxis.ontology.flow_editor.tab_open_disabled')}));
+                        }
+                        $row.on('click', () => {
+                            dialog.close();
+                            const already = this.tabs.findIndex(t => t.flow !== null && t.flow.id === flow.id);
+                            if (already >= 0) {
+                                this.switchTab(already);
+                                return;
+                            }
+                            this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
+                            this.switchTab(this.tabs.length - 1);
+                        });
+                        $list.append($row);
+                    });
+                };
+                $filter.on('input', render);
+                render();
+                $filter.trigger('focus');
             })
             .catch(() => {
-                $list.empty();
+                $picker.empty();
                 messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error'));
             });
     }
@@ -4757,8 +4876,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
             this.applyInvalidStepNames((res.data.flow && res.data.flow.invalidSteps) || []);
             if (created && this.flow && this.flow.id) {
-                // Refreshing after the first save must reopen THIS flow, not a fresh editor.
-                window.history.replaceState(null, '', routing.generate('aaxis_ontology_flow_editor', {id: this.flow.id}));
+                // Refreshing after the first save must reopen THIS flow (and the other tabs).
+                this.syncTabsUrl();
             }
             messenger.notificationFlashMessage('success', __('aaxis.ontology.flow_editor.saved'));
             // Stay in the editor: the state is clean now (Save disabled, the cancel button

@@ -10,6 +10,7 @@ use Aaxis\Bundle\OntologyBundle\Exception\FlowImportException;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowPortability;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator;
 use Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker;
 use Doctrine\Persistence\ManagerRegistry;
@@ -515,6 +516,12 @@ class OntologyFlowController extends AbstractOntologyController
             return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
         }
 
+        // Snapshot the STORED definition before the payload mutates the entity — the archiver
+        // needs the version being replaced (history is written only for executed revisions).
+        $previousName = (string) $entity->getName();
+        $previousSteps = $entity->getSteps();
+        $previousDesign = $entity->getDesign();
+
         if (\array_key_exists('design', $payload)) {
             // The design is the editor's own (versioned) canvas representation — stored opaquely;
             // the editor validates it on load and treats unreadable values as corrupted.
@@ -562,6 +569,19 @@ class OntologyFlowController extends AbstractOntologyController
         $entity->setTriggerType(OntologyFlow::computeTriggerType($entity->getSteps()));
         // Every save rewrites the flow definition — that IS a modification.
         $entity->setLastModified(new \DateTime('now', new \DateTimeZone('UTC')));
+
+        // History: archive the replaced definition first — but only when it actually RAN (an
+        // unexecuted revision is simply overwritten, see FlowHistoryArchiver).
+        if ($entity->getId() !== null) {
+            $this->container->get(FlowHistoryArchiver::class)->archiveIfExecuted(
+                $entity->getId(),
+                $previousName,
+                $previousSteps,
+                $previousDesign,
+                $entity->getSteps(),
+                $entity->getDesign()
+            );
+        }
 
         $em = $this->registry()->getManagerForClass(OntologyFlow::class);
         $em->persist($entity);
@@ -651,6 +671,7 @@ class OntologyFlowController extends AbstractOntologyController
             FlowDebugExecutor::class,
             FlowPortability::class,
             FlowStepValidator::class,
+            FlowHistoryArchiver::class,
             PhpMethodInvoker::class,
             DwlTransformer::class,
             CacheItemPoolInterface::class,

@@ -36,7 +36,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 > `logo_id` unique index).
 | `OntologyEntityAttribute` | `aaxis_ontology_entity_attribute` | name, datatype (`TYPES` const), required |
 | `OntologyConnector` | `aaxis_ontology_connector` | belongs to a system; `type` ∈ sftp, rest_api, file_system, bucket, database — **all five now have a Configure popup and a Test** (`openUnsupportedPopup()` survives only as the safety net for a type added to `TYPES` before its form); JSON config authored via the per-type "Configure" popup; secret config values are masked on every read path (see "Connector config & secrets" below) |
-| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid edit action, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|endpoint|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb — that migration still names the OLD `queue` trigger, deliberately: it is applied history, fresh installs skip it (installer ≥ v1_9), and no row ever used it), `last_finished` (datetime NULL — stamped by `FlowDebugExecutor::touchLastFinished()` when a run ENDS, from a `finally` so failures stamp too; v1_9 backfilled it from `last_executed` so pre-existing rows don't look permanently running; installer at v1_9). **`last_executed` + `last_finished` are the running-state pair** — see "Flow concurrency" below |
+| `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid's row-click-to-edit, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|endpoint|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb — that migration still names the OLD `queue` trigger, deliberately: it is applied history, fresh installs skip it (installer ≥ v1_9), and no row ever used it), `last_finished` (datetime NULL — stamped by `FlowDebugExecutor::touchLastFinished()` when a run ENDS, from a `finally` so failures stamp too; v1_9 backfilled it from `last_executed` so pre-existing rows don't look permanently running; installer at v1_9). **`last_executed` + `last_finished` are the running-state pair** — see "Flow concurrency" below |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique. **Version continuity** (v1_10): `aaxis_ontology_data_upsert` numbers records PAST whatever history survives for the unique id — insert starts at `max(history)+1`, update archives at `GREATEST(live, max(history)+1)` — because a re-created record restarting at version 1 used to CRASH this unique index on its first change (the pre-9582e03 purge deleted data but kept history; inside the async consumer that read as a logged error + a "no changes" event + a silently unchanged record). Never assume live version = history+1 |
 | `OntologyDataEvent` | `aaxis_ontology_data_events` | one row per flow execution (seen vs changed ids); `error` text NULL (v1_10) = how the run failed — status is DERIVED: finished_at null = running, error null = success, else error |
@@ -463,8 +463,10 @@ docker compose exec php sh -c 'grep -c <route_name> public/media/js/admin_routes
 
 The **flow editor** (`aaxis_ontology_flow_editor`, `Flow/editor.html.twig` +
 `flow-editor-component.ts`, styles in `ontology.scss` under `.aaxis-flow-editor`) is opened by
-"Add Flow" and by the flows grid's edit action (disabled for the built-in `type = native` flows,
-enforced again by the editor page + update endpoint). The flows grid also carries a DELETE action
+"Add Flow" and by CLICKING ANYWHERE ON A FLOWS-GRID ROW (`DataGrid.onRowClick` — there is no
+separate edit action anymore, and enabling row click disables the grid's cell click-to-copy;
+built-in `type = native` rows do nothing, enforced again by the editor page + update endpoint).
+The flows grid also carries a DELETE action
 (trash, `variant: 'danger'`, disabled for native — enforced again by `deleteAction`, route
 `aaxis_ontology_flow_delete`, ACL `aaxis_ontology_flow_delete`/DELETE): confirm dialog, then the
 flow definition is removed permanently while its events/data stay (events reference `flow_id`
@@ -518,11 +520,16 @@ the CSS `min-height` calc is only a fallback; the resize handler also re-clamps 
 **TABS**: the editor is multi-flow — one CANVAS, one tab per open flow (`EditorTab[]`: the
 active tab mirrors the live canvas; switching STASHES the working state — `currentDesign()` +
 dirty baseline + red-mark names — and restores the target's, reusing the design
-serialize/restore machinery; the URL replaceState-follows the active tab). Tab title = the
+serialize/restore machinery; the URL replaceState-follows the active tab AND carries every open
+SAVED tab as `?tabs=<id,id,…>` in tab order — `syncTabsUrl()` on tab load/close/first-save,
+`restoreTabsFromUrl()` at init reopens them from the flow catalog (parsed BEFORE anything rewrites
+the URL; never-saved tabs cannot travel and are not listed). Tab title = the
 TRIGGER STEP's name ("unnamed — add a trigger" until one exists — the flow is NAMED BY ITS
 TRIGGER; there is no top-bar name display anymore), a • marks unsaved changes, × closes (confirm
 when dirty; the editor always keeps at least one tab). Two ICON ACTION tabs sit at the end:
-folder = open any existing non-native flow in a NEW tab (picker over `aaxis_ontology_flow_list`;
+folder = open any existing non-native flow in a NEW tab (picker over `aaxis_ontology_flow_list` —
+a full-width name filter + a Flows|Subflows tab pair whose COUNTS follow the filter, only the list
+scrolls and the popup is capped at ~60% of the window;
 an already-open flow just focuses its tab), + = a new empty flow tab. Switching tabs closes any
 debug session. A TRIGGER IS REQUIRED TO SAVE (`structuralErrors`: `trigger_required` — blocks
 save, import and the run gate alike; client pre-checks with a flash; the step-less NATIVE flows
@@ -808,6 +815,17 @@ config is NOT a free pass: `isStepConfigValid` swaps it for `[]` and runs the ty
 freshly-dropped dwl_transform/choice/file op/… is exactly as red and run-blocking as a
 half-confirmed one (triggers pass via `$onlyEnabled()`, parameterless placeholders via the
 default arm) — the editor pre-marks those drops red client-side via `REQUIRES_CONFIG`.
+**Flow HISTORY** (`aaxis_ontology_flow_history`, v1_11 + installer): every editor save of an
+EXISTING flow first hands the replaced definition to `Manager/FlowHistoryArchiver` (hooked in
+OntologyFlowController::save() — the pre-payload name/steps/design are snapshotted at the top of
+the method). Only EXECUTED revisions are archived: skipped when the flow never ran, when
+steps+design are unchanged, or when the flow's raw `last_executed` EQUALS the latest history
+row's `last_executed` (string-exact on the raw column values — no run since that archive means
+the replaced revision never executed and is simply overwritten). Rows: (flow_id, version 1..N
+unique per flow, name, steps, design, last_executed at archive time, archived_at UTC), FK CASCADE
+with the flow. KNOWN LIMIT: `last_executed` has SECOND precision — a run in the same wall-clock
+second as the previously archived one is indistinguishable from "not run since". No UI yet —
+storage only.
 **`Manager/FlowStepValidator` owns those step rules**, now split by consumer:
 `structuralErrors()` (duplicate names — the only thing that BLOCKS the editor's `save()`),
 `stepErrors()` (per-step map name → first problem: completeness `isStepConfigValid`, `Cron\\

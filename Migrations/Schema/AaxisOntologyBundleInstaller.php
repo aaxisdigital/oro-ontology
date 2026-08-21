@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_10';
+        return 'v1_11';
     }
 
     #[\Override]
@@ -167,6 +167,20 @@ class AaxisOntologyBundleInstaller implements Installation
         $table->addColumn('trigger_type', 'string', ['length' => 16, 'notnull' => false]);
         $table->setPrimaryKey(['id']);
         $table->addUniqueIndex(['name'], 'aaxis_ontology_flow_name_uidx');
+
+        // Flow version history: executed definitions archived before a save replaces them
+        // (see Manager/FlowHistoryArchiver — unexecuted revisions are just overwritten).
+        $table = $schema->createTable('aaxis_ontology_flow_history');
+        $table->addColumn('id', 'integer', ['autoincrement' => true]);
+        $table->addColumn('flow_id', 'integer');
+        $table->addColumn('version', 'integer');
+        $table->addColumn('name', 'string', ['length' => 128]);
+        $table->addColumn('steps', 'json', ['notnull' => false, 'columnDefinition' => self::JSONB_NULL]);
+        $table->addColumn('design', 'json', ['notnull' => false, 'columnDefinition' => self::JSONB_NULL]);
+        $table->addColumn('last_executed', 'datetime', ['notnull' => false]);
+        $table->addColumn('archived_at', 'datetime', []);
+        $table->setPrimaryKey(['id']);
+        $table->addUniqueIndex(['flow_id', 'version'], 'aaxis_ontology_flow_hist_uidx');
     }
 
     private function addForeignKeys(Schema $schema): void
@@ -204,6 +218,12 @@ class AaxisOntologyBundleInstaller implements Installation
         $schema->getTable('aaxis_ontology_data_history')->addForeignKeyConstraint(
             $schema->getTable('aaxis_ontology_entity'),
             ['entity_id'],
+            ['id'],
+            ['onDelete' => self::FK_CASCADE, 'onUpdate' => null]
+        );
+        $schema->getTable('aaxis_ontology_flow_history')->addForeignKeyConstraint(
+            $schema->getTable('aaxis_ontology_flow'),
+            ['flow_id'],
             ['id'],
             ['onDelete' => self::FK_CASCADE, 'onUpdate' => null]
         );

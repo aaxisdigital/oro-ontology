@@ -92,6 +92,13 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer'
             - '@translator'
 
+    # Archives EXECUTED flow definitions into aaxis_ontology_flow_history before a save
+    # replaces them (unexecuted revisions are overwritten without a snapshot).
+    Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver:
+        public: true
+        arguments:
+            - '@doctrine'
+
     # Moves flows between environments as JSON (connector ids <-> name/type descriptors).
     Aaxis\Bundle\OntologyBundle\Manager\FlowPortability:
         arguments:
