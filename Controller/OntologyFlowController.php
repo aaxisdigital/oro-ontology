@@ -12,6 +12,7 @@ use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowPortability;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator;
+use Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter;
 use Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
@@ -371,6 +372,33 @@ class OntologyFlowController extends AbstractOntologyController
                     'message' => 'The debug session expired — restart the debug.',
                 ], 422);
             }
+            // Inactivity timeout: a session idle longer than the configured minutes is DEAD —
+            // the run was (or now is) closed with a flow-exception "debug-timeout" event, and
+            // stepping it further is refused.
+            if (($blob['terminated'] ?? null) !== null) {
+                return new JsonResponse([
+                    'success' => false,
+                    'message' => 'The debug session was terminated by timeout — restart the debug.',
+                ], 422);
+            }
+            $timeoutMinutes = max(0, (int) $this->container->get(ConfigManager::class)->get('aaxis_ontology.flow_debug_timeout_minutes'));
+            if ($timeoutMinutes > 0 && isset($blob['lastTickAt']) && time() - (int) $blob['lastTickAt'] > $timeoutMinutes * 60) {
+                $root = $blob['frames'][0] ?? [];
+                $this->container->get(OntologyFlowEventEmitter::class)->emitRaw(
+                    isset($root['flowId']) ? (int) $root['flowId'] : null,
+                    $root['flowName'] ?? null,
+                    (string) ($blob['context']['flowUuid'] ?? '') ?: null,
+                    'flow-exception',
+                    ['message' => 'debug-timeout']
+                );
+                $blob['terminated'] = 'debug-timeout';
+                $this->storeDebugContext($blob);
+
+                return new JsonResponse([
+                    'success' => false,
+                    'message' => 'The debug session was terminated by timeout — restart the debug.',
+                ], 422);
+            }
         }
 
         $executor = $this->container->get(FlowDebugExecutor::class);
@@ -397,6 +425,9 @@ class OntologyFlowController extends AbstractOntologyController
         } catch (\RuntimeException $e) {
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }
+
+        // Every tick refreshes the inactivity clock.
+        $result['blob']['lastTickAt'] = time();
 
         return new JsonResponse([
             'success' => true,
@@ -719,6 +750,7 @@ class OntologyFlowController extends AbstractOntologyController
             FlowPortability::class,
             FlowStepValidator::class,
             FlowHistoryArchiver::class,
+            OntologyFlowEventEmitter::class,
             PhpMethodInvoker::class,
             DwlTransformer::class,
             CacheItemPoolInterface::class,

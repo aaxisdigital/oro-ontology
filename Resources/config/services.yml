@@ -114,6 +114,9 @@ services:
             - '@doctrine'
             - '@Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor'
             - '@logger'
+            - '@oro_config.global'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
+            - '@cache.app'
 
     # Resolves + runs the flow whose Endpoint trigger matches an incoming API request
     # (the /api/aaxis/ontology/flow/... catch-all in Api/OntologyFlowApiController).

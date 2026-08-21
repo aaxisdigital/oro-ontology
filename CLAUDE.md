@@ -948,7 +948,15 @@ storeDebugContext/loadDebugContext; debug-eval unwraps `blob['context']`): the c
 only `contextKey`, because shipping a large context in the request body blew past nginx's
 client_max_body_size; an expired key 422s with 'restart the debug'; the full-run endpoint stores
 its final context too, so the sidebar evaluator works after Run Now; `runAll: true` loops ticks
-(stepping OVER invokers) to the end in one call — including from MID-STACK, unwinding frames. **Canvas marks**: every EXECUTED step keeps the AMBER `is-debug-active`
+(stepping OVER invokers) to the end in one call — including from MID-STACK, unwinding frames.
+**INACTIVITY TIMEOUT** (`aaxis_ontology.flow_debug_timeout_minutes`, default 10, 0 = off): each
+tick stamps `lastTickAt` into the blob; a step arriving after the window emits a flow-exception
+event with message `debug-timeout` for the run, marks the blob `terminated` and 422s ("terminated
+by timeout — restart the debug"; every later step gets the same answer). Abandoned sessions
+(window closed, never stepped again) are swept by the MINUTELY scheduler
+(`ScheduledFlowRunner::sweepStaleDebugSessions`, runs before the due-flows pass): any uuid with a
+debug-triggered flow-start, NO finish/exception, and no event newer than the window gets the same
+debug-timeout exception event, and its cached walk blob is marked terminated too. **Canvas marks**: every EXECUTED step keeps the AMBER `is-debug-active`
 class for the whole session (marks accumulate, cleared only on session start/close), a FAILED
 step turns RED (`is-debug-failed`, declared after amber so it wins) with the error text in the
 sidebar as before. Both debug endpoints return `executedIds` (this call's successful trail —
@@ -1063,8 +1071,19 @@ records' `steps` by config KEY `subflow`, name-sorted), each navigating like Nav
 a disabled "No flow calls this subflow." child when none (or when the subflow was never saved —
 no id, no callers). The catalog copy is load-time — callers created in another window appear
 after a reload.
-The Events page (rebuilt: columns Flow/Event/Date-Time/UUID/Payload — kind badge, one-line JSON
-payload preview with tooltip+copy, list ordered by datetime DESC) still accepts **`?uuid=`**
+The Events page shows ONE ROW PER RUN (GROUP BY flow_uuid server-side, `aaxis_ontology_event_list`):
+columns Flow name | UUID | Started At (the flow-start event's time; falls back to the earliest
+event for start-less runs like bare consumer upserts) | Finished At (the LAST flow-finish or
+flow-exception) | Elapsed (server ships `elapsedMs`, the client humanizes; null = "Running") |
+Events (count) — newest started first. Row actions: **view events** (a Dialog listing the run's
+events datetime ASC via `aaxis_ontology_event_run` ?uuid=; the FULL timestamp shows only on the
+flow-start/flow-finish/flow-exception boundary rows — every other row shows `+<delta>` since the
+PREVIOUS event, computed from the endpoint's `ms` field (micro-precision epoch millis; the ATOM
+`datetime` is second-precision and would render every step as +0s) — and instead of flow name +
+raw payload JSON each row carries a per-kind summary (`summarizeEvent()`): flow/subflow-start =
+trigger + user.name when present, data-upsert = entity + uniqueIds/changedIds counts, step =
+name (type), flow-exception/log-message = the message, finishes = nothing) and **view flow**
+(opens the editor; disabled when the flow is gone). `?uuid=`
 (first load pre-filters the grid, same pattern as Entities' `?system=` and Data View's
 `?entity=`) — it is what a cmd/ctrl+click on a row's uuid-filter icon opens in a new tab; plain
 click filters in place. Grid actions that NAVIGATE (entity → Data View, system → Entities, flow →

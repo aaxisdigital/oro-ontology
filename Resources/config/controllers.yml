@@ -43,6 +43,7 @@ services:
             - { name: container.service_subscriber, id: oro_config.global, key: Oro\Bundle\ConfigBundle\Config\ConfigManager }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker, key: Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver, key: Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter, key: Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter }
 
     Aaxis\Bundle\OntologyBundle\Api\OntologyFlowApiController:
         calls:

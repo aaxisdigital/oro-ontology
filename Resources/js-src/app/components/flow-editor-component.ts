@@ -3984,6 +3984,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (this.discarding) {
             return false;
         }
+        // syncDirty runs during the INITIAL canvas restore too, before the tab bar exists
+        // (restore() → addStep() → syncDirty() precedes the tabs assignment in initialize).
+        if (!this.tabs) {
+            return this.snapshot() !== this.savedState;
+        }
         return this.tabs.some((tab, index) => this.tabDirty(tab, index === this.activeTab));
     }
 

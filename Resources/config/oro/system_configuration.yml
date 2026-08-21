@@ -46,6 +46,14 @@ system_configuration:
                 tooltip: aaxis.ontology.config.flows.debug_autoclose.tooltip
                 required: false
 
+        aaxis_ontology.flow_debug_timeout_minutes:
+            data_type: integer
+            type: Symfony\Component\Form\Extension\Core\Type\IntegerType
+            options:
+                label: aaxis.ontology.config.flows.debug_timeout.label
+                tooltip: aaxis.ontology.config.flows.debug_timeout.tooltip
+                required: false
+
         aaxis_ontology.invoke_php_namespaces:
             data_type: string
             type: Symfony\Component\Form\Extension\Core\Type\TextareaType
@@ -264,6 +272,7 @@ system_configuration:
                                             - aaxis_ontology.flow_editor_grid_spacing
                                             - aaxis_ontology.flow_editor_step_size_factor
                                             - aaxis_ontology.flow_debug_autoclose_seconds
+                                            - aaxis_ontology.flow_debug_timeout_minutes
                                             - aaxis_ontology.invoke_php_namespaces
                                     aaxis_ontology_api:
                                         priority: 80

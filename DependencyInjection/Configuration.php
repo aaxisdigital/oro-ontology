@@ -29,6 +29,9 @@ class Configuration implements ConfigurationInterface
             'flow_editor_step_size_factor' => ['type' => 'integer', 'value' => 8],
             // Debugger: seconds before a FINISHED debug pane closes itself (0 disables it).
             'flow_debug_autoclose_seconds' => ['type' => 'integer', 'value' => 15],
+            // Debugger: minutes of INACTIVITY before a stepwise session is terminated (the run
+            // gets a flow-exception "debug-timeout" event; 0 disables the timeout).
+            'flow_debug_timeout_minutes' => ['type' => 'integer', 'value' => 10],
             // "Invoke PHP" flow step: namespace prefixes whose container services may be called
             // (one per line). The compile-time locator holds EVERY service; this runtime filter
             // decides what flows may actually reach.

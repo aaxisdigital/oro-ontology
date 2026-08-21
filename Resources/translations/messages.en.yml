@@ -32,6 +32,9 @@ aaxis:
             enabled:
                 label: Enabled
             flows:
+                debug_timeout:
+                    label: 'Debugger inactivity timeout (minutes)'
+                    tooltip: 'A stepwise debug session idle longer than this is terminated: the run is closed with a flow-exception event carrying "debug-timeout", and further stepping is refused. 0 disables the timeout.'
                 debug_autoclose:
                     label: 'Debugger auto-close (seconds)'
                     tooltip: 'A FINISHED debug pane dismisses itself after this many seconds, with a countdown bar under the buttons. 0 keeps it open until closed manually.'
@@ -335,6 +338,7 @@ aaxis:
             incomplete_subflow_ref: 'A subflow reference in this file is incomplete (the subflow name is required).'
         flow_editor:
             title: 'New Flow'
+            save_all: 'Save all'
             name_label: 'Flow name'
             enabled_label: 'Enabled'
             cancel: 'Cancel'

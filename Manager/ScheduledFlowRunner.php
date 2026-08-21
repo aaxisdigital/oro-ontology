@@ -7,6 +7,8 @@ namespace Aaxis\Bundle\OntologyBundle\Manager;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Cron\CronExpression;
 use Doctrine\Persistence\ManagerRegistry;
+use Oro\Bundle\ConfigBundle\Config\ConfigManager;
+use Psr\Cache\CacheItemPoolInterface;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -39,6 +41,9 @@ class ScheduledFlowRunner
         private readonly ManagerRegistry $doctrine,
         private readonly FlowDebugExecutor $executor,
         private readonly LoggerInterface $logger,
+        private readonly ConfigManager $config,
+        private readonly OntologyFlowEventEmitter $flowEvents,
+        private readonly CacheItemPoolInterface $cache,
     ) {
     }
 
@@ -49,6 +54,8 @@ class ScheduledFlowRunner
     public function runDue(?\DateTimeImmutable $now = null): array
     {
         $now ??= new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
+        $this->sweepStaleDebugSessions($now);
 
         /** @var OntologyFlow[] $flows */
         $flows = $this->doctrine->getRepository(OntologyFlow::class)->findBy([
@@ -93,6 +100,57 @@ class ScheduledFlowRunner
             $this->logger->error(sprintf('Scheduled flow "%s" failed: %s', $name, $e->getMessage()), ['exception' => $e]);
 
             return ['flow' => $name, 'status' => 'failed', 'detail' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Terminates ABANDONED stepwise debug sessions (this command runs every minute): a run whose
+     * flow-start says trigger "debug", that never finished, and whose LAST event is older than
+     * the configured inactivity timeout gets a flow-exception "debug-timeout" event — and its
+     * server-side walk blob is marked terminated, so a late "next step" is refused. Run Now uses
+     * the same trigger but finishes synchronously, so only stale stepwise sessions (and crashed
+     * runs, which are equally dead) match.
+     */
+    private function sweepStaleDebugSessions(\DateTimeImmutable $now): void
+    {
+        $minutes = max(0, (int) $this->config->get('aaxis_ontology.flow_debug_timeout_minutes'));
+        if ($minutes === 0) {
+            return;
+        }
+        try {
+            $stale = $this->doctrine->getConnection()->fetchAllAssociative(
+                "SELECT flow_uuid,
+                        (array_agg(flow_id ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS flow_id,
+                        (array_agg(flow_name ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS flow_name
+                 FROM aaxis_ontology_flow_events
+                 WHERE flow_uuid IS NOT NULL
+                 GROUP BY flow_uuid
+                 HAVING bool_or(event = 'flow-start' AND payload->>'trigger' = 'debug')
+                    AND NOT bool_or(event IN ('flow-finish', 'flow-exception'))
+                    AND max(datetime) < :cutoff",
+                ['cutoff' => $now->modify(sprintf('-%d minutes', $minutes))->format('Y-m-d H:i:s')]
+            );
+        } catch (\Throwable $e) {
+            $this->logger->error('Stale debug sweep failed.', ['exception' => $e]);
+
+            return;
+        }
+        foreach ($stale as $run) {
+            $this->flowEvents->emitRaw(
+                isset($run['flow_id']) ? (int) $run['flow_id'] : null,
+                $run['flow_name'] ?? null,
+                (string) $run['flow_uuid'],
+                'flow-exception',
+                ['message' => 'debug-timeout']
+            );
+            // Mark the walk blob dead so a late "next step" is refused with the timeout message.
+            $item = $this->cache->getItem('aaxis_ontology_debug_ctx.' . strtolower((string) $run['flow_uuid']));
+            if ($item->isHit() && \is_array($item->get())) {
+                $blob = $item->get();
+                $blob['terminated'] = 'debug-timeout';
+                $item->set($blob);
+                $this->cache->save($item);
+            }
         }
     }
 

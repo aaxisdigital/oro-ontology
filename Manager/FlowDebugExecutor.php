@@ -360,6 +360,14 @@ class FlowDebugExecutor
             $this->recordDebugTrail($trails, $frame, [$step['id']]);
         }
 
+        // A CHOICE extends the walk with the branch its verdict just picked (the pre-verdict
+        // order ENDED at the choice) — re-derive before judging whether the frame is done, or a
+        // decided choice would read as the end of the run.
+        if ($step['type'] === 'choice') {
+            $order = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
+            $total = \count($order);
+        }
+
         $done = \count($frames) === 1 && $frame['index'] >= $total;
         if ($done) {
             $blob['done'] = true;

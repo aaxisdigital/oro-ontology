@@ -181,6 +181,88 @@
     }
 }
 
+// The "view events" popup: one line per event of a run, execution order.
+.aaxis-event-run {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: calc(60vh - 88px);
+    overflow-y: auto;
+
+    &__row {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        padding: 6px 10px;
+        border: 1px solid #e4e9ee;
+        border-radius: 6px;
+        background: #fff;
+    }
+
+    // Three fixed-grid columns: time | kind | summary. The first two are FIXED and centered —
+    // sized for their largest values (a full boundary datetime / the longest kind name) — so the
+    // rows line up whatever mix of full timestamps and "+…" deltas a run produces; the summary
+    // takes whatever is left.
+    &__time {
+        flex: 0 0 170px;
+        font-size: 12px;
+        color: #6b7a89;
+        white-space: nowrap;
+        text-align: center;
+    }
+
+    &__row .aaxis-event-kind {
+        flex: 0 0 110px;
+        text-align: center;
+    }
+
+    &__flow {
+        flex: 0 0 auto;
+        font-size: 12px;
+        color: #1b3a5b;
+        font-weight: font-weight('bold');
+    }
+
+    &__summary {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12.5px;
+        color: #2b3a4a;
+    }
+}
+
+// Run status badge: how the run ended (or that it has not).
+.aaxis-event-status {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    white-space: nowrap;
+
+    &--success {
+        background: #e8f6ec;
+        color: #1a7f37;
+    }
+
+    &--exception {
+        background: #fdecea;
+        color: #c0392b;
+    }
+
+    &--running {
+        background: #fef7e6;
+        color: #8a6d1a;
+    }
+}
+
+.aaxis-event-running {
+    color: #8a6d1a;
+    font-style: italic;
+}
+
 .aaxis-event-payload {
     display: inline-block;
     max-width: 480px;
