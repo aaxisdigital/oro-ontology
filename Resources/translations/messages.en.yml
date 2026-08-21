@@ -26,9 +26,51 @@ aaxis:
             label: 'Ontology'
         config:
             group:
-                title: 'Aaxis Ontology'
+                title: 'Ontology'
             general:
                 title: 'Settings'
+                bucket_base_path:
+                    label: 'Bucket base path'
+                    tooltip: 'Base path (key prefix) inside the configured bucket under which archived ontology data is stored.'
+                flow_execution_history_days:
+                    label: 'Flow execution history days'
+                    tooltip: 'How many days of flow execution events are kept.'
+                flow_version_history_days:
+                    label: 'Flow version history days'
+                    tooltip: 'How many days archived flow versions are kept.'
+                entity_version_history_days:
+                    label: 'Entity version history days'
+                    tooltip: 'How many days entity data record versions are kept.'
+                flow_history_bucket_archive_after_history_days:
+                    label: 'Flow History Bucket archive after history days'
+                    tooltip: 'When enabled, flow history rows (versions and execution events) aging out of the windows above are archived to the configured bucket instead of being deleted. This requires working connectivity to the bucket (see the Bucket section) to work.'
+                data_history_bucket_archive_after_history_days:
+                    label: 'Data History Bucket archive after history days'
+                    tooltip: 'When enabled, entity data record versions aging out of the window above are archived to the configured bucket instead of being deleted. This requires working connectivity to the bucket (see the Bucket section) to work.'
+                allow_ui_view_of_archived_data:
+                    label: 'Allow UI view of archived data'
+                    tooltip: 'When enabled, the history views may load versions already archived to the bucket.'
+                db_usage:
+                    label: 'DB Usage'
+                    tooltip: 'Current on-disk size (table + indexes) of the ontology data and history tables — information only, to support the retention choices above.'
+            bucket:
+                title: 'Bucket'
+                enabled:
+                    label: 'Enabled'
+                endpoint_url:
+                    label: 'Endpoint URL'
+                    tooltip: 'S3-compatible endpoint URL, e.g. http://minio:9000 or https://<namespace>.compat.objectstorage.<region>.oraclecloud.com (as reachable from the application container; the port defaults from the scheme).'
+                access_key:
+                    label: 'Access key'
+                secret_key:
+                    label: 'Secret key'
+                bucket_name:
+                    label: 'Bucket name'
+                    tooltip: 'Name of the bucket (what Cyberduck calls "Path").'
+                test:
+                    label: 'Connectivity'
+                    tooltip: 'Probes the values currently in the form (unsaved edits included): a TCP socket to the server, then a signed one-object listing of the bucket — the same checks as a bucket connector''s Test.'
+                    button: 'Test connection'
             enabled:
                 label: Enabled
             flows:
@@ -339,6 +381,8 @@ aaxis:
         flow_editor:
             title: 'New Flow'
             save_all: 'Save all'
+            view_source: 'View source'
+            history: 'History'
             name_label: 'Flow name'
             enabled_label: 'Enabled'
             cancel: 'Cancel'

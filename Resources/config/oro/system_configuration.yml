@@ -5,13 +5,33 @@ system_configuration:
             icon: fa-database
         aaxis_ontology_general:
             title: aaxis.ontology.config.general.title
+            icon: fa-cog
+        aaxis_ontology_general_section:
+            title: aaxis.ontology.config.general.title
+        aaxis_ontology_bucket:
+            title: aaxis.ontology.config.bucket.title
+            icon: fa-archive
+        aaxis_ontology_bucket_section:
+            title: aaxis.ontology.config.bucket.title
         aaxis_ontology_flows:
+            title: aaxis.ontology.config.flows.title
+            icon: fa-sitemap
+        aaxis_ontology_flows_section:
             title: aaxis.ontology.config.flows.title
         aaxis_ontology_api:
             title: aaxis.ontology.config.api.title
+            icon: fa-exchange
+        aaxis_ontology_api_section:
+            title: aaxis.ontology.config.api.title
         aaxis_ontology_flow_api:
             title: aaxis.ontology.config.flow_api.title
+            icon: fa-plug
+        aaxis_ontology_flow_api_section:
+            title: aaxis.ontology.config.flow_api.title
         aaxis_ontology_flow_elements:
+            title: aaxis.ontology.config.flow_elements.title
+            icon: fa-th
+        aaxis_ontology_flow_elements_section:
             title: aaxis.ontology.config.flow_elements.title
 
     fields:
@@ -21,6 +41,113 @@ system_configuration:
             options:
                 label: aaxis.ontology.config.enabled.label
                 required: false
+
+        # --- Settings: retention / bucket archiving (config only — logic to come) ---
+        aaxis_ontology.bucket_base_path:
+            data_type: string
+            type: Symfony\Component\Form\Extension\Core\Type\TextType
+            options:
+                label: aaxis.ontology.config.general.bucket_base_path.label
+                tooltip: aaxis.ontology.config.general.bucket_base_path.tooltip
+                required: false
+        aaxis_ontology.flow_execution_history_days:
+            data_type: integer
+            type: Symfony\Component\Form\Extension\Core\Type\IntegerType
+            options:
+                label: aaxis.ontology.config.general.flow_execution_history_days.label
+                tooltip: aaxis.ontology.config.general.flow_execution_history_days.tooltip
+                required: false
+        aaxis_ontology.flow_version_history_days:
+            data_type: integer
+            type: Symfony\Component\Form\Extension\Core\Type\IntegerType
+            options:
+                label: aaxis.ontology.config.general.flow_version_history_days.label
+                tooltip: aaxis.ontology.config.general.flow_version_history_days.tooltip
+                required: false
+        aaxis_ontology.entity_version_history_days:
+            data_type: integer
+            type: Symfony\Component\Form\Extension\Core\Type\IntegerType
+            options:
+                label: aaxis.ontology.config.general.entity_version_history_days.label
+                tooltip: aaxis.ontology.config.general.entity_version_history_days.tooltip
+                required: false
+        aaxis_ontology.flow_history_bucket_archive_after_history_days:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.general.flow_history_bucket_archive_after_history_days.label
+                tooltip: aaxis.ontology.config.general.flow_history_bucket_archive_after_history_days.tooltip
+                required: false
+        aaxis_ontology.data_history_bucket_archive_after_history_days:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.general.data_history_bucket_archive_after_history_days.label
+                tooltip: aaxis.ontology.config.general.data_history_bucket_archive_after_history_days.tooltip
+                required: false
+        aaxis_ontology.allow_ui_view_of_archived_data:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.general.allow_ui_view_of_archived_data.label
+                tooltip: aaxis.ontology.config.general.allow_ui_view_of_archived_data.tooltip
+                required: false
+        aaxis_ontology.db_usage:
+            ui_only: true
+            data_type: string
+            type: Aaxis\Bundle\OntologyBundle\Form\Type\DbUsageType
+            options:
+                label: aaxis.ontology.config.general.db_usage.label
+                tooltip: aaxis.ontology.config.general.db_usage.tooltip
+                required: false
+                # informational widget — no "Use Default" wrapper
+                resettable: false
+
+        # --- Bucket (S3-compatible object storage the archive features write to) ---
+        aaxis_ontology.bucket_enabled:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.bucket.enabled.label
+                required: false
+        aaxis_ontology.bucket_endpoint_url:
+            data_type: string
+            type: Symfony\Component\Form\Extension\Core\Type\TextType
+            options:
+                label: aaxis.ontology.config.bucket.endpoint_url.label
+                tooltip: aaxis.ontology.config.bucket.endpoint_url.tooltip
+                required: false
+        aaxis_ontology.bucket_access_key:
+            data_type: string
+            type: Oro\Bundle\FormBundle\Form\Type\OroEncodedPlaceholderPasswordType
+            options:
+                label: aaxis.ontology.config.bucket.access_key.label
+                resettable: true
+                required: false
+        aaxis_ontology.bucket_secret_key:
+            data_type: string
+            type: Oro\Bundle\FormBundle\Form\Type\OroEncodedPlaceholderPasswordType
+            options:
+                label: aaxis.ontology.config.bucket.secret_key.label
+                resettable: true
+                required: false
+        aaxis_ontology.bucket_name:
+            data_type: string
+            type: Symfony\Component\Form\Extension\Core\Type\TextType
+            options:
+                label: aaxis.ontology.config.bucket.bucket_name.label
+                tooltip: aaxis.ontology.config.bucket.bucket_name.tooltip
+                required: false
+        aaxis_ontology.bucket_test:
+            ui_only: true
+            data_type: string
+            type: Aaxis\Bundle\OntologyBundle\Form\Type\BucketTestType
+            options:
+                label: aaxis.ontology.config.bucket.test.label
+                tooltip: aaxis.ontology.config.bucket.test.tooltip
+                required: false
+                # just the button — no "Use Default" wrapper (checked, it disabled the button)
+                resettable: false
 
         # --- Flows ---
         aaxis_ontology.flow_editor_grid_spacing:
@@ -257,25 +384,48 @@ system_configuration:
         system_configuration:
             aaxis:
                 children:
-                    aaxis_general:
+                    aaxis_ontology:
+                        priority: 90
                         children:
-                            aaxis_ontology:
-                                priority: 90
+                            aaxis_ontology_general:
+                                priority: 100
                                 children:
-                                    aaxis_ontology_general:
-                                        priority: 100
+                                    aaxis_ontology_general_section:
                                         children:
                                             - aaxis_ontology.enabled
-                                    aaxis_ontology_flows:
-                                        priority: 90
+                                            - aaxis_ontology.bucket_base_path
+                                            - aaxis_ontology.flow_execution_history_days
+                                            - aaxis_ontology.flow_version_history_days
+                                            - aaxis_ontology.entity_version_history_days
+                                            - aaxis_ontology.flow_history_bucket_archive_after_history_days
+                                            - aaxis_ontology.data_history_bucket_archive_after_history_days
+                                            - aaxis_ontology.allow_ui_view_of_archived_data
+                                            - aaxis_ontology.db_usage
+                            aaxis_ontology_bucket:
+                                priority: 95
+                                children:
+                                    aaxis_ontology_bucket_section:
+                                        children:
+                                            - aaxis_ontology.bucket_enabled
+                                            - aaxis_ontology.bucket_endpoint_url
+                                            - aaxis_ontology.bucket_access_key
+                                            - aaxis_ontology.bucket_secret_key
+                                            - aaxis_ontology.bucket_name
+                                            - aaxis_ontology.bucket_test
+                            aaxis_ontology_flows:
+                                priority: 90
+                                children:
+                                    aaxis_ontology_flows_section:
                                         children:
                                             - aaxis_ontology.flow_editor_grid_spacing
                                             - aaxis_ontology.flow_editor_step_size_factor
                                             - aaxis_ontology.flow_debug_autoclose_seconds
                                             - aaxis_ontology.flow_debug_timeout_minutes
                                             - aaxis_ontology.invoke_php_namespaces
-                                    aaxis_ontology_api:
-                                        priority: 80
+                            aaxis_ontology_api:
+                                priority: 80
+                                children:
+                                    aaxis_ontology_api_section:
                                         children:
                                             - aaxis_ontology.api_read_enabled
                                             - aaxis_ontology.api_upsert_enabled
@@ -283,13 +433,17 @@ system_configuration:
                                             - aaxis_ontology.api_auto_create
                                             - aaxis_ontology.api_auto_create_unique_attribute
                                             - aaxis_ontology.api_query_max_page_size
-                                    aaxis_ontology_flow_api:
-                                        priority: 70
+                            aaxis_ontology_flow_api:
+                                priority: 70
+                                children:
+                                    aaxis_ontology_flow_api_section:
                                         children:
                                             - aaxis_ontology.flow_api_secure_enabled
                                             - aaxis_ontology.flow_api_public_enabled
-                                    aaxis_ontology_flow_elements:
-                                        priority: 60
+                            aaxis_ontology_flow_elements:
+                                priority: 60
+                                children:
+                                    aaxis_ontology_flow_elements_section:
                                         children:
                                             - aaxis_ontology.flow_element_cron
                                             - aaxis_ontology.flow_element_endpoint

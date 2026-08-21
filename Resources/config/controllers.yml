@@ -29,6 +29,14 @@ services:
             - { name: container.service_subscriber }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager, key: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager }
 
+    Aaxis\Bundle\OntologyBundle\Controller\OntologyConfigController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+            - { name: container.service_subscriber, id: oro_config.global, key: Oro\Bundle\ConfigBundle\Config\ConfigManager }
+            - { name: container.service_subscriber, id: oro_security.encoder.default, key: Oro\Bundle\SecurityBundle\Encoder\SymmetricCrypterInterface }
+
     Aaxis\Bundle\OntologyBundle\Controller\OntologyEventController:
         calls:
             - [setContainer, ['@Psr\Container\ContainerInterface']]

@@ -1,0 +1,4 @@
+# Form-theme templates registered the Oro way (cumulative twig.yml, like OroFormBundle's own):
+# holds the widget block for the DB-usage System Configuration field (DbUsageType).
+bundles:
+    - '@AaxisOntology/Form/fields.html.twig'

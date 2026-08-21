@@ -177,7 +177,10 @@ class OntologyEventComponent extends BaseComponent {
     private openRunEvents(row: FlowRunRecord): void {
         const dialog = new Dialog({
             title: `${__('aaxis.ontology.event_view.run_events_title')} — ${row.flowName || row.flowUuid}`,
-            width: '760px'
+            width: '760px',
+            // Flex-column body (like the DWL playground's): the dialog's resize handle then
+            // grows the event list instead of leaving dead space under it.
+            bodyClass: 'aaxis-event-run-host'
         });
         const $content = dialog.open();
         const $list = $('<div/>', {'class': 'aaxis-event-run'});

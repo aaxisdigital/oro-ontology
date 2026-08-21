@@ -23,6 +23,31 @@ class Configuration implements ConfigurationInterface
         SettingsBuilder::append($rootNode, [
             'enabled' => ['type' => 'boolean', 'value' => true],
 
+            // Retention / bucket archiving (CONFIG ONLY for now — the purge/archive logic
+            // consuming these is still to come). bucket_base_path is the key prefix inside the
+            // bucket under which archives land.
+            'bucket_base_path' => ['type' => 'string', 'value' => 'aaxis-ontology'],
+            'flow_execution_history_days' => ['type' => 'integer', 'value' => 30],
+            'flow_version_history_days' => ['type' => 'integer', 'value' => 365],
+            'entity_version_history_days' => ['type' => 'integer', 'value' => 365],
+            // Archive rows aging out of the windows above to the bucket instead of deleting —
+            // split per store: flow history (versions + execution events) and data history.
+            'flow_history_bucket_archive_after_history_days' => ['type' => 'boolean', 'value' => true],
+            'data_history_bucket_archive_after_history_days' => ['type' => 'boolean', 'value' => true],
+            'allow_ui_view_of_archived_data' => ['type' => 'boolean', 'value' => true],
+
+            // Bucket connection (S3-compatible object storage) for the archive features. The two
+            // keys are stored ENCRYPTED by OroEncodedPlaceholderPasswordType — consumers must
+            // decrypt them via SymmetricCrypterInterface (service oro_security.encoder.default,
+            // the same one that form type encrypts with), like Oro's own integration settings.
+            'bucket_enabled' => ['type' => 'boolean', 'value' => false],
+            // Full URL like the DevTools Bucket Viewer's (scheme://host[:port]; port defaults
+            // from the scheme) — NOT the connector-style separate server/port pair.
+            'bucket_endpoint_url' => ['type' => 'string', 'value' => ''],
+            'bucket_access_key' => ['type' => 'string', 'value' => ''],
+            'bucket_secret_key' => ['type' => 'string', 'value' => ''],
+            'bucket_name' => ['type' => 'string', 'value' => ''],
+
             // Flow editor: spacing (px) of the canvas dot-matrix background.
             'flow_editor_grid_spacing' => ['type' => 'integer', 'value' => 10],
             // Flow editor: step tile size, as a multiple of the dot spacing (tile = factor × spacing px).

@@ -1,0 +1,24 @@
+{# Form-theme blocks for the bundle's custom form types (registered globally via
+   Resources/config/oro/app.yml → twig.form_themes). #}
+
+{% block aaxis_ontology_bucket_test_widget %}
+    <div data-page-component-module="aaxisontology/js/app/components/bucket-config-test-component">
+        <button type="button" class="btn" data-role="bucket-config-test">
+            {{ 'aaxis.ontology.config.bucket.test.button'|trans }}
+        </button>
+        <div class="aaxis-connector-test" data-role="bucket-config-test-result" hidden></div>
+    </div>
+{% endblock %}
+
+{% block aaxis_ontology_db_usage_widget %}
+    <table class="aaxis-config-db-usage">
+        <tbody>
+            {% for row in db_usage %}
+                <tr>
+                    <td class="aaxis-config-db-usage__name">{{ row.table }}</td>
+                    <td class="aaxis-config-db-usage__size">{{ row.size }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endblock %}

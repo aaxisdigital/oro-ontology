@@ -8,3 +8,4 @@ dynamic-imports:
         - aaxisontology/js/app/components/flow-editor-component
         - aaxisontology/js/app/components/connector-config-component
         - aaxisontology/js/app/components/connector-view-test-component
+        - aaxisontology/js/app/components/bucket-config-test-component

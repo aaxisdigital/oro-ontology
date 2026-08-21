@@ -185,6 +185,13 @@ services:
     # Screens playground scripts for environment introspection (dw::Runtime::props).
     Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard: ~
 
+    # System Configuration: read-only DB-usage widget (table sizes for the retention settings).
+    Aaxis\Bundle\OntologyBundle\Form\Type\DbUsageType:
+        arguments:
+            - '@doctrine'
+        tags:
+            - { name: form.type }
+
     # Connector CRUD form type
     Aaxis\Bundle\OntologyBundle\Form\Type\OntologyConnectorType:
         arguments:

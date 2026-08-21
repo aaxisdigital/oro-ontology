@@ -181,12 +181,62 @@
     }
 }
 
-// The "view events" popup: one line per event of a run, execution order.
+// View source / Flow history dialogs (flow editor): flex body so the JSON pane fills the panel
+// and follows the dialog's resize handle; the toolbar row keeps its own height.
+.aaxis-dialog__body.aaxis-flow-json-host {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+
+    .aaxis-json-view {
+        flex: 1 1 auto;
+        min-height: 0;
+        max-height: none;
+    }
+}
+
+.aaxis-flow-json-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+
+    &__label {
+        font-size: 12.5px;
+        color: #6b7a89;
+        white-space: nowrap;
+    }
+
+    &__select {
+        max-width: 320px;
+    }
+
+    &__spacer {
+        flex: 1 1 auto;
+    }
+}
+
+// Run-events dialog body (Dialog bodyClass): a flex column so the list below can both grow with
+// a user resize and scroll when the dialog hits its max-height — same pattern as .aaxis-dwl.
+.aaxis-dialog__body.aaxis-event-run-host {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
 .aaxis-event-run {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    max-height: calc(60vh - 88px);
+    // Fills the dialog body (no viewport-based cap): the PANEL's max-height/resize decide the
+    // available room; the list scrolls inside whatever that is.
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
 
     &__row {
@@ -231,6 +281,29 @@
         white-space: nowrap;
         font-size: 12.5px;
         color: #2b3a4a;
+    }
+}
+
+// System Configuration → Settings: the read-only DB Usage table (DbUsageType widget).
+.aaxis-config-db-usage {
+    border-collapse: collapse;
+
+    td {
+        padding: 2px 0;
+        font-size: 12.5px;
+        border: 0;
+    }
+
+    &__name {
+        font-family: Menlo, Consolas, monospace;
+        color: #2b3a4a;
+    }
+
+    &__size {
+        padding-left: 24px;
+        text-align: right;
+        color: #6b7a89;
+        white-space: nowrap;
     }
 }
 

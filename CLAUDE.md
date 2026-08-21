@@ -186,13 +186,58 @@ Key facts:
   `_flow` OR `_all` (public ones need nothing).
   Administrator gets `_all` via `Migrations/Data/ORM/LoadAaxisOntologyApiAdminPermissions`
   (run `oro:migration:data:load`).
-- **Config** (System Config → Aaxis → General → Aaxis Ontology → Data API; the tree hangs under
-  CommonBundle's shared `aaxis > aaxis_general` tab): per-endpoint enables
+- **Config** (System Config → Aaxis → Ontology → Data API; the bundle owns the `aaxis_ontology`
+  "Ontology" level-2 menu group under CommonBundle's `aaxis` tab — pages Settings | Bucket |
+  Flows | Data API | Flow API | Flow Elements, each a level-3 page whose fields sit in a
+  `<page>_section` fieldset): per-endpoint enables
   (`api_read_enabled`/`api_upsert_enabled`/`api_query_enabled`, default off → disabled endpoint = 404),
   `api_auto_create` (upsert auto-creates unknown system/entity; read/query on unknown always error),
   `api_auto_create_unique_attribute` (default `id`), `api_query_max_page_size` (default 200).
 - Disabled system/entity → error on every call. Query filters/orderBy are fully parameterized
   (attribute keys + values bound; operators/direction whitelisted) — never interpolate user input.
+
+## System Configuration: retention + Bucket (CONFIG ONLY so far)
+
+The Settings PAGE (Aaxis → Ontology → Settings; after Enabled) carries retention/archiving settings whose CONSUMING LOGIC IS
+NOT BUILT YET — they are knobs awaiting their features: `bucket_base_path` ('aaxis-ontology', the
+key prefix archives will land under), `flow_execution_history_days` (30),
+`flow_version_history_days` (365), `entity_version_history_days` (365),
+`flow_history_bucket_archive_after_history_days` + `data_history_bucket_archive_after_history_days`
+(bools, true — archive aging FLOW-history rows / DATA-history rows to the bucket instead of
+deleting; tooltips warn they need working bucket connectivity) and `allow_ui_view_of_archived_data`
+(bool, true). Below them sits **DB Usage** — a read-only `ui_only` field (`Form/Type/DbUsageType`,
+tagged form.type) listing `pg_total_relation_size` of aaxis_ontology_data/_data_history/_flow/
+_flow_history/_flow_events formatted kb/mb/gb ("flow execution history" = the flow EVENTS table;
+missing tables render "—", never an error). Its widget block lives in
+`Resources/views/Form/fields.html.twig`, registered as a form theme via
+`Resources/config/oro/twig.yml` (`bundles:` list — Oro's cumulative form-theme mechanism, same as
+OroFormBundle's own; NOT app.yml, which has no precedent for twig config). A **Bucket** page
+(priority 95, right after Settings) holds the S3-compatible connection for those features:
+`bucket_enabled` (bool, false — FIRST field), `bucket_endpoint_url` ('', a FULL scheme://host[:port]
+URL like the DevTools Bucket Viewer's "Endpoint URL" — deliberately NOT the connector-style
+server/port pair; the test action passes it as the tester's `server`, whose resolveHttpEndpoint
+parses scheme/host/port and defaults the port from the scheme), `bucket_access_key`/`bucket_secret_key`
+('', `OroEncodedPlaceholderPasswordType` with `resettable: true` — stored ENCRYPTED, so consumers
+must decrypt via `SymmetricCrypterInterface` — service `oro_security.encoder.default`, the one
+that form type encrypts with — unlike the connector configs' plain-text+mask scheme) and
+`bucket_name` (''). The section ends with a **Test connection** button: a `ui_only`
+`Form/Type/BucketTestType` field (constructor-less — Symfony's FormRegistry news up argument-free
+types, no service registration) whose widget block mounts `bucket-config-test-component.ts`. The
+component collects the section's CURRENT input values by config-form field name
+(`[name$="[aaxis_ontology___bucket_<f>][value]"]` — unsaved edits are what gets tested) and POSTs
+them to `Controller/OntologyConfigController::bucketTestAction`
+(`aaxis_ontology_config_bucket_test`, exposed, CSRF, `AclAncestor('oro_config_system')`,
+registered in controllers.yml with oro_config.global + oro_security.encoder.default subscriber
+tags): untouched key inputs still hold the OroEncodedPlaceholderPasswordType placeholder (a run
+of '*'), which the action resolves from the SAVED encrypted values before delegating to the SAME
+`ConnectorTester` bucket arm as the connector popups (socket + SigV4 one-object list — the two
+features share the tester so they cannot drift). Result lines reuse the connector view page's
+`.aaxis-connector-test` styles. ⚠️ Pure-widget config fields (the test button, DB Usage) need
+`resettable: false` in their options — without it the config FormFieldType wraps them in a
+checked "Use Default" that DISABLES the widget (the button was unclickable until unchecked). Config-page labels/tooltips are `messages` domain
+(`aaxis.ontology.config.general.*` / `.bucket.*`). The Bucket settings live on their own PAGE
+(Aaxis → Ontology → Bucket) since the 2026-08 config restructure — the bucket-test component's
+name-suffix selectors are unaffected (its fields render on that same page).
 
 ## Flow concurrency (one instance at a time)
 
@@ -834,8 +879,20 @@ row's `last_executed` (string-exact on the raw column values — no run since th
 the replaced revision never executed and is simply overwritten). Rows: (flow_id, version 1..N
 unique per flow, name, steps, design, last_executed at archive time, archived_at UTC), FK CASCADE
 with the flow. KNOWN LIMIT: `last_executed` has SECOND precision — a run in the same wall-clock
-second as the previously archived one is indistinguishable from "not run since". No UI yet —
-storage only.
+second as the previously archived one is indistinguishable from "not run since". UI: the editor
+topbar's **History** button (with **View source** between Run Now and the exit button; History is
+enabled only for SAVED flows, synced in syncDebugButtons) opens `openFlowHistory()` — versions
+from `aaxis_ontology_flow_history_list` (`GET /flows/api/{id}/history`, exposed, flow-view ACL,
+steps/design decoded server-side), a version select + the Data-View-style "Diff only" toggle, and
+a coloured JSON pane diffing the CURRENT CANVAS `{name, steps, design}` against the selected
+revision (changes since it highlighted, removed parts struck through). **View source** opens
+`openViewSource()`: the current canvas as the full document `{id, name, type, enabled, steps,
+design}` (unsaved edits included), syntax-coloured, with Copy. Both dialogs use bodyClass
+`aaxis-flow-json-host` (flex body — the JSON pane follows the dialog resize handle) and render
+through **`widgets/json-diff.ts`**: the JSON colouring/diff machinery EXTRACTED from the Data
+View's version dialog (highlightJson, renderVersionDiffHtml, pruneToDiff, escapeHtml,
+isPlainObject as pure module functions; data-view-component keeps thin private wrappers so its
+call sites didn't change). Change diff behavior THERE, not in either component.
 **`Manager/FlowStepValidator` owns those step rules**, now split by consumer:
 `structuralErrors()` (duplicate names — the only thing that BLOCKS the editor's `save()`),
 `stepErrors()` (per-step map name → first problem: completeness `isStepConfigValid`, `Cron\\
@@ -1082,7 +1139,10 @@ PREVIOUS event, computed from the endpoint's `ms` field (micro-precision epoch m
 `datetime` is second-precision and would render every step as +0s) — and instead of flow name +
 raw payload JSON each row carries a per-kind summary (`summarizeEvent()`): flow/subflow-start =
 trigger + user.name when present, data-upsert = entity + uniqueIds/changedIds counts, step =
-name (type), flow-exception/log-message = the message, finishes = nothing) and **view flow**
+name (type), flow-exception/log-message = the message, finishes = nothing; the dialog opens with
+bodyClass `aaxis-event-run-host` — a flex-column body like the DWL playground's, so the list has
+NO viewport-based max-height of its own: it fills the panel, scrolls when the panel hits the
+dialog's 84vh cap, and GROWS when the user drags the resize handle) and **view flow**
 (opens the editor; disabled when the flow is gone). `?uuid=`
 (first load pre-filters the grid, same pattern as Entities' `?system=` and Data View's
 `?entity=`) — it is what a cmd/ctrl+click on a row's uuid-filter icon opens in a new tab; plain

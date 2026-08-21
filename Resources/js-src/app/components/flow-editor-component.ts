@@ -7,7 +7,8 @@ import pageStateChecker from 'oronavigation/js/app/services/page-state-checker';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import createDwlField from '../widgets/dwl-field';
-import {apiFetch, csrfToken} from './component-support';
+import {apiFetch, csrfToken, formatDateTime} from './component-support';
+import {highlightJson, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 
 interface FlowStep {
     type: string;
@@ -657,6 +658,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.$el.on('click.aaxisFlowEditor', '[data-role="toolbox-hide"]', (e: any) => {
             e.preventDefault();
             this.setToolboxVisible(false);
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="view-source"]', (e: any) => {
+            e.preventDefault();
+            this.openViewSource();
+        });
+        this.$el.on('click.aaxisFlowEditor', '[data-role="flow-history"]', (e: any) => {
+            e.preventDefault();
+            this.openFlowHistory();
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="organize"]', (e: any) => {
             e.preventDefault();
@@ -4722,6 +4731,140 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const $buttons = this.$el.find('[data-role="debug"], [data-role="debug-step"]');
         $buttons.prop('disabled', !enabled || invalid || this.debugSession !== null);
         $buttons.attr('title', invalid ? __('aaxis.ontology.flow_editor.invalid_steps_blocked') : null);
+        // History compares against ARCHIVED revisions — meaningless until the flow is saved.
+        this.$el.find('[data-role="flow-history"]').prop('disabled', !(this.flow && this.flow.id));
+    }
+
+    // --- View source / Flow history --------------------------------------------------------
+
+    /** The current canvas serialized as the flow's JSON document (unsaved edits included). */
+    private flowSourceDoc(): Record<string, any> {
+        const trigger = this.findTrigger();
+        return {
+            id: this.flow ? this.flow.id : null,
+            name: (trigger && trigger.name) || (this.flow ? this.flow.name : null),
+            type: this.flow ? this.flow.type : null,
+            enabled: this.flowEnabled(),
+            steps: this.steps.map(s => ({type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null})),
+            design: this.currentDesign()
+        };
+    }
+
+    /** Toolbar row shared by the two JSON dialogs: extra controls left, Copy pinned right. */
+    private jsonDialogBar(extra: any[], copyText: () => string): any {
+        const $copy = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.copy')});
+        $copy.on('click', () => {
+            const text = copyText();
+            const done = () => {
+                $copy.text(__('aaxis.ontology.flow_editor.copied'));
+                window.setTimeout(() => $copy.text(__('aaxis.ontology.flow_editor.copy')), 1200);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(done).catch(() => {});
+            } else {
+                const $ta = $('<textarea/>').val(text).appendTo(document.body);
+                ($ta.get(0) as HTMLTextAreaElement).select();
+                document.execCommand('copy');
+                $ta.remove();
+                done();
+            }
+        });
+        return $('<div/>', {'class': 'aaxis-flow-json-bar'}).append(
+            ...extra,
+            $('<span/>', {'class': 'aaxis-flow-json-bar__spacer'}),
+            $copy
+        );
+    }
+
+    /** "View source": the current canvas as coloured, copyable JSON. */
+    private openViewSource(): void {
+        const doc = this.flowSourceDoc();
+        const dialog = new Dialog({
+            title: `${__('aaxis.ontology.flow_editor.source_title')} — ${doc.name || ''}`,
+            width: '760px',
+            bodyClass: 'aaxis-flow-json-host'
+        });
+        const $content = dialog.open();
+        const plain = JSON.stringify(doc, null, 2);
+        const $pre = $('<pre/>', {'class': 'aaxis-json-view'}).html(highlightJson(plain));
+        $content.append(this.jsonDialogBar([], () => plain), $pre);
+    }
+
+    /**
+     * "Flow history": diffs the CURRENT canvas against a selected archived revision
+     * (aaxis_ontology_flow_history — written only when a save replaced an executed revision).
+     * Changes since that revision are highlighted, removed parts struck through; "Diff only"
+     * prunes to what differs, exactly like the Data View's version dialog.
+     */
+    private openFlowHistory(): void {
+        if (!this.flow || !this.flow.id) {
+            return;
+        }
+        const dialog = new Dialog({
+            title: `${__('aaxis.ontology.flow_editor.history_title')} — ${this.flow.name || ''}`,
+            width: '860px',
+            bodyClass: 'aaxis-flow-json-host'
+        });
+        const $content = dialog.open();
+        $content.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.event_view.loading')}));
+
+        fetch(routing.generate('aaxis_ontology_flow_history_list', {id: this.flow.id}), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .then((data: {versions?: any[]}) => {
+                $content.empty();
+                const versions = data.versions || [];
+                if (versions.length === 0) {
+                    $content.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.history_empty')}));
+                    return;
+                }
+                const source = this.flowSourceDoc();
+                const currentDoc = {name: source.name, steps: source.steps, design: source.design};
+                const docOf = (v: any): any => ({name: v.name, steps: v.steps, design: v.design});
+
+                const $select = $('<select/>', {'class': 'aaxis-flow-json-bar__select'});
+                versions.forEach((v: any, i: number) => {
+                    $select.append($('<option/>', {value: String(i), text: `v${v.version} — ${formatDateTime(v.archivedAt)}`}));
+                });
+                const $diffToggle = $('<input/>', {type: 'checkbox', 'class': 'aaxis-json-mode__check'});
+                const $diffLabel = $('<label/>', {
+                    'class': 'aaxis-json-mode', title: __('aaxis.ontology.data_view.diff_only_hint')
+                }).append(
+                    $diffToggle,
+                    $('<span/>', {'class': 'aaxis-json-mode__label', text: __('aaxis.ontology.data_view.diff_only')})
+                );
+                const $pre = $('<pre/>', {'class': 'aaxis-json-view'});
+                let plain = '';
+                const render = (): void => {
+                    const versionDoc = docOf(versions[Number($select.val()) || 0]);
+                    if ($diffToggle.is(':checked')) {
+                        const pruned = pruneToDiff(currentDoc, versionDoc);
+                        if (pruned === null) {
+                            plain = '';
+                            $pre.empty().append($('<span/>', {
+                                'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.history_no_changes')
+                            }));
+                            return;
+                        }
+                        plain = JSON.stringify(pruned.sel, null, 2);
+                        $pre.html(renderVersionDiffHtml(pruned.sel, pruned.prev));
+                        return;
+                    }
+                    plain = JSON.stringify(currentDoc, null, 2);
+                    $pre.html(renderVersionDiffHtml(currentDoc, versionDoc));
+                };
+                $select.on('change', render);
+                $diffToggle.on('change', render);
+                $content.append(this.jsonDialogBar([
+                    $('<span/>', {'class': 'aaxis-flow-json-bar__label', text: __('aaxis.ontology.flow_editor.history_compare')}),
+                    $select,
+                    $diffLabel
+                ], () => plain), $pre);
+                render();
+            })
+            .catch(() => {
+                $content.empty();
+                $content.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.history_error')}));
+            });
     }
 
     /** Marks/unmarks one tile as having an incomplete/invalid config (red border). */

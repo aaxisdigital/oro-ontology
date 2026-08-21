@@ -194,6 +194,45 @@ class OntologyFlowController extends AbstractOntologyController
     }
 
     /**
+     * The flow's archived revisions (aaxis_ontology_flow_history, newest first) with their full
+     * definitions — the editor's "Flow history" popup diffs the current canvas against them.
+     * Rows are written by {@see FlowHistoryArchiver} only when a save replaces an EXECUTED
+     * revision, so a flow edited but never run in between has no rows here.
+     */
+    #[Route(
+        path: '/flows/api/{id}/history',
+        name: 'aaxis_ontology_flow_history_list',
+        requirements: ['id' => '\d+'],
+        options: ['expose' => true],
+        methods: ['GET']
+    )]
+    #[AclAncestor('aaxis_ontology_flow_view')]
+    public function historyAction(OntologyFlow $entity): JsonResponse
+    {
+        $rows = $this->registry()->getConnection()->fetchAllAssociative(
+            'SELECT version, name, steps, design, last_executed, archived_at
+             FROM aaxis_ontology_flow_history
+             WHERE flow_id = ?
+             ORDER BY version DESC',
+            [$entity->getId()]
+        );
+        $atom = static fn (?string $raw): ?string => $raw !== null
+            ? date_create($raw, new \DateTimeZone('UTC'))->format(\DateTimeInterface::ATOM)
+            : null;
+
+        return new JsonResponse([
+            'versions' => array_map(static fn (array $row): array => [
+                'version' => (int) $row['version'],
+                'name' => $row['name'],
+                'steps' => json_decode((string) $row['steps'], true),
+                'design' => json_decode((string) $row['design'], true),
+                'lastExecuted' => $atom($row['last_executed']),
+                'archivedAt' => $atom($row['archived_at']),
+            ], $rows),
+        ]);
+    }
+
+    /**
      * Exports a flow as a portable JSON document (see {@see FlowPortability}) — connector ids are
      * rewritten as name/type descriptors so another environment can match them. The client saves
      * the returned document as a file.

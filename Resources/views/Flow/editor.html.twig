@@ -43,6 +43,18 @@
                             <span class="fa fa-play" aria-hidden="true"></span>
                             <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.run_now'|trans }}</span>
                         </button>
+                        <button type="button" class="btn" data-role="view-source"
+                                title="{{ 'aaxis.ontology.flow_editor.view_source'|trans }}">
+                            <span class="fa fa-code" aria-hidden="true"></span>
+                            <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.view_source'|trans }}</span>
+                        </button>
+                        {# Enabled only for SAVED flows (synced with the debug buttons) — an unsaved
+                           canvas has no history rows to compare against. #}
+                        <button type="button" class="btn" data-role="flow-history" disabled
+                                title="{{ 'aaxis.ontology.flow_editor.history'|trans }}">
+                            <span class="fa fa-history" aria-hidden="true"></span>
+                            <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.history'|trans }}</span>
+                        </button>
                         {# Clean state at load: the exit button reads Close and Save is disabled until
                            something changes (the component syncs the LABEL span + title, not the button text,
                            so the icon survives). #}
