@@ -4,7 +4,7 @@ import routing from 'routing';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FormField, TestOutcome} from 'aaxiscommon/js/app/widgets/record-form-modal';
-import {apiFetch, csrfToken} from './component-support';
+import {apiFetch} from './component-support';
 
 interface ConnectorConfigOptions {
     _sourceElement: any;

@@ -7,7 +7,7 @@ import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FieldChangeContext, FormField, SelectOption} from 'aaxiscommon/js/app/widgets/record-form-modal';
 import DwlPlayground from '../widgets/dwl-playground';
-import {apiFetch, bindGridToolbar, csrfToken, setRefreshBusy} from './component-support';
+import {apiFetch, bindGridToolbar, setRefreshBusy} from './component-support';
 
 interface OntologyEntityOptions {
     _sourceElement: any;

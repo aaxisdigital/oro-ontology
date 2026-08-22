@@ -7,7 +7,7 @@ import pageStateChecker from 'oronavigation/js/app/services/page-state-checker';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import createDwlField from '../widgets/dwl-field';
-import {apiFetch, csrfToken, formatDateTime} from './component-support';
+import {apiFetch, formatDateTime} from './component-support';
 import {highlightJson, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 
 interface FlowStep {
@@ -582,7 +582,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // ?tabs= (a previous session's open set) is parsed BEFORE anything rewrites the URL.
         this.pendingTabIds = (new URLSearchParams(window.location.search).get('tabs') || '')
             .split(',')
-            .map(x => parseInt(x, 10))
+            .map(x => Number.parseInt(x, 10))
             .filter(n => Number.isFinite(n) && n > 0);
         this.tabs = [{flow: this.flow, design: null, savedState: null, invalidNames: (this.flow as any)?.invalidSteps || []}];
         this.activeTab = 0;

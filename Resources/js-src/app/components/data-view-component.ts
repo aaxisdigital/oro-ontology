@@ -7,7 +7,7 @@ import 'jquery.select2';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
-import {apiFetch, bindGridToolbar, csrfToken, formatDateTime, setRefreshBusy} from './component-support';
+import {apiFetch, bindGridToolbar, formatDateTime, setRefreshBusy} from './component-support';
 import {escapeHtml, highlightJson, isPlainObject, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 
 interface OntologyDataViewOptions {

@@ -6,7 +6,7 @@ import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal from 'aaxiscommon/js/app/widgets/record-form-modal';
-import {apiFetch, bindGridToolbar, csrfToken, setRefreshBusy} from './component-support';
+import {apiFetch, bindGridToolbar, setRefreshBusy} from './component-support';
 interface OntologySystemOptions {
     _sourceElement: any;
     canCreate: boolean;
