@@ -198,14 +198,11 @@ Key facts:
 
 ## System Configuration: retention + Bucket (CONFIG ONLY so far)
 
-The Settings PAGE (Aaxis → Ontology → Settings; after Enabled) carries retention/archiving settings whose CONSUMING LOGIC IS
-NOT BUILT YET — they are knobs awaiting their features: `bucket_base_path` ('aaxis-ontology', the
-key prefix archives will land under), `flow_execution_history_days` (30),
-`flow_version_history_days` (365), `entity_version_history_days` (365),
-`flow_history_bucket_archive_after_history_days` + `data_history_bucket_archive_after_history_days`
-(bools, true — archive aging FLOW-history rows / DATA-history rows to the bucket instead of
-deleting; tooltips warn they need working bucket connectivity) and `allow_ui_view_of_archived_data`
-(bool, true). Below them sits **DB Usage** — a read-only `ui_only` field (`Form/Type/DbUsageType`,
+The Settings PAGE (Aaxis → Ontology → Settings; after Enabled) carries retention settings whose
+CONSUMING LOGIC IS NOT BUILT YET — knobs awaiting their features: `flow_execution_history_days`
+(30), `flow_version_history_days` (365) and `entity_version_history_days` (365). (The three archive booleans that briefly lived here —
+flow/data "bucket archive after history days" and "allow UI view of archived data" — were REMOVED
+by request before any logic consumed them.) Below them sits **DB Usage** — a read-only `ui_only` field (`Form/Type/DbUsageType`,
 tagged form.type) listing `pg_total_relation_size` of aaxis_ontology_data/_data_history/_flow/
 _flow_history/_flow_events formatted kb/mb/gb ("flow execution history" = the flow EVENTS table;
 missing tables render "—", never an error). Its widget block lives in
@@ -213,7 +210,10 @@ missing tables render "—", never an error). Its widget block lives in
 `Resources/config/oro/twig.yml` (`bundles:` list — Oro's cumulative form-theme mechanism, same as
 OroFormBundle's own; NOT app.yml, which has no precedent for twig config). A **Bucket** page
 (priority 95, right after Settings) holds the S3-compatible connection for those features:
-`bucket_enabled` (bool, false — FIRST field), `bucket_endpoint_url` ('', a FULL scheme://host[:port]
+`use_bucket_for_entity_data` (bool, false — FIRST field: store entity data record content in the
+bucket; replaced the short-lived `bucket_enabled`), `bucket_base_path` ('aaxis-ontology', the key
+prefix bucket-stored data lands under — LAST field before the Test button, label key
+`config.bucket.base_path.*`; it briefly lived on the Settings page), `bucket_endpoint_url` ('', a FULL scheme://host[:port]
 URL like the DevTools Bucket Viewer's "Endpoint URL" — deliberately NOT the connector-style
 server/port pair; the test action passes it as the tester's `server`, whose resolveHttpEndpoint
 parses scheme/host/port and defaults the port from the scheme), `bucket_access_key`/`bucket_secret_key`

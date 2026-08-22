@@ -30,17 +30,12 @@ class Configuration implements ConfigurationInterface
             'flow_execution_history_days' => ['type' => 'integer', 'value' => 30],
             'flow_version_history_days' => ['type' => 'integer', 'value' => 365],
             'entity_version_history_days' => ['type' => 'integer', 'value' => 365],
-            // Archive rows aging out of the windows above to the bucket instead of deleting —
-            // split per store: flow history (versions + execution events) and data history.
-            'flow_history_bucket_archive_after_history_days' => ['type' => 'boolean', 'value' => true],
-            'data_history_bucket_archive_after_history_days' => ['type' => 'boolean', 'value' => true],
-            'allow_ui_view_of_archived_data' => ['type' => 'boolean', 'value' => true],
-
-            // Bucket connection (S3-compatible object storage) for the archive features. The two
-            // keys are stored ENCRYPTED by OroEncodedPlaceholderPasswordType — consumers must
-            // decrypt them via SymmetricCrypterInterface (service oro_security.encoder.default,
-            // the same one that form type encrypts with), like Oro's own integration settings.
-            'bucket_enabled' => ['type' => 'boolean', 'value' => false],
+            // Bucket (S3-compatible object storage). The two keys are stored ENCRYPTED by
+            // OroEncodedPlaceholderPasswordType — consumers must decrypt them via
+            // SymmetricCrypterInterface (service oro_security.encoder.default, the same one that
+            // form type encrypts with), like Oro's own integration settings.
+            // use_bucket_for_entity_data: store entity data record content in the bucket.
+            'use_bucket_for_entity_data' => ['type' => 'boolean', 'value' => false],
             // Full URL like the DevTools Bucket Viewer's (scheme://host[:port]; port defaults
             // from the scheme) — NOT the connector-style separate server/port pair.
             'bucket_endpoint_url' => ['type' => 'string', 'value' => ''],
