@@ -21,6 +21,10 @@ interface FlowRunRecord {
     elapsedMs: number | null;
     status: 'success' | 'exception' | 'running';
     events: number;
+    /** Bucket-backed run (Use Bucket for Flow Events): the popup addresses it by these. */
+    bucket?: boolean;
+    startedAtRaw?: string | null;
+    finishedAtRaw?: string | null;
 }
 
 interface RunEventRecord {
@@ -187,7 +191,13 @@ class OntologyEventComponent extends BaseComponent {
         $content.append($list);
         $list.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.event_view.loading')}));
 
-        fetch(routing.generate('aaxis_ontology_event_run') + '?uuid=' + encodeURIComponent(row.flowUuid || ''), {credentials: 'same-origin'})
+        let runUrl = routing.generate('aaxis_ontology_event_run') + '?uuid=' + encodeURIComponent(row.flowUuid || '');
+        if (row.bucket) {
+            runUrl += '&bucket=1&flowId=' + encodeURIComponent(row.flowId === null ? '' : String(row.flowId))
+                + '&startedAt=' + encodeURIComponent(row.startedAtRaw || '')
+                + '&finishedAt=' + encodeURIComponent(row.finishedAtRaw || '');
+        }
+        fetch(runUrl, {credentials: 'same-origin'})
             .then(r => r.json())
             .then((data: {records?: RunEventRecord[]}) => {
                 $list.empty();

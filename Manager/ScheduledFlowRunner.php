@@ -44,6 +44,7 @@ class ScheduledFlowRunner
         private readonly ConfigManager $config,
         private readonly OntologyFlowEventEmitter $flowEvents,
         private readonly CacheItemPoolInterface $cache,
+        private readonly BucketFlowEventStore $bucketEvents,
     ) {
     }
 
@@ -118,18 +119,24 @@ class ScheduledFlowRunner
             return;
         }
         try {
-            $stale = $this->doctrine->getConnection()->fetchAllAssociative(
-                "SELECT flow_uuid,
-                        (array_agg(flow_id ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS flow_id,
-                        (array_agg(flow_name ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS flow_name
-                 FROM aaxis_ontology_flow_events
-                 WHERE flow_uuid IS NOT NULL
-                 GROUP BY flow_uuid
-                 HAVING bool_or(event = 'flow-start' AND payload->>'trigger' = 'debug')
-                    AND NOT bool_or(event IN ('flow-finish', 'flow-exception'))
-                    AND max(datetime) < :cutoff",
-                ['cutoff' => $now->modify(sprintf('-%d minutes', $minutes))->format('Y-m-d H:i:s')]
-            );
+            // "Use Bucket for Flow Events": the sweep reads the bucket store instead of the table
+            // (today + yesterday's runs — older stale sessions were swept on earlier minutes).
+            if ($this->bucketEvents->isEnabled()) {
+                $stale = $this->bucketEvents->staleDebugRuns($now->modify(sprintf('-%d minutes', $minutes)));
+            } else {
+                $stale = $this->doctrine->getConnection()->fetchAllAssociative(
+                    "SELECT flow_uuid,
+                            (array_agg(flow_id ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS flow_id,
+                            (array_agg(flow_name ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS flow_name
+                     FROM aaxis_ontology_flow_events
+                     WHERE flow_uuid IS NOT NULL
+                     GROUP BY flow_uuid
+                     HAVING bool_or(event = 'flow-start' AND payload->>'trigger' = 'debug')
+                        AND NOT bool_or(event IN ('flow-finish', 'flow-exception'))
+                        AND max(datetime) < :cutoff",
+                    ['cutoff' => $now->modify(sprintf('-%d minutes', $minutes))->format('Y-m-d H:i:s')]
+                );
+            }
         } catch (\Throwable $e) {
             $this->logger->error('Stale debug sweep failed.', ['exception' => $e]);
 

@@ -148,7 +148,13 @@ class OntologyDataViewComponent extends BaseComponent {
         });
         $content.append($loading);
 
-        fetch(routing.generate('aaxis_ontology_data_versions', {id: row.id}), {credentials: 'same-origin'})
+        // Bucket-store rows have no numeric row id — their versions are addressed by key.
+        const versionsUrl = (row as any).bucket
+            ? routing.generate('aaxis_ontology_data_versions_by_key')
+                + '?entityId=' + encodeURIComponent(String(row.entityId ?? ''))
+                + '&uniqueId=' + encodeURIComponent(row.uniqueId || '')
+            : routing.generate('aaxis_ontology_data_versions', {id: row.id});
+        fetch(versionsUrl, {credentials: 'same-origin'})
             .then(r => r.json())
             .then((data: {versions?: VersionEntry[]}) => {
                 $loading.remove();

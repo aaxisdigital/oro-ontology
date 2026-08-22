@@ -36,6 +36,8 @@ class Configuration implements ConfigurationInterface
             // form type encrypts with), like Oro's own integration settings.
             // use_bucket_for_entity_data: store entity data record content in the bucket.
             'use_bucket_for_entity_data' => ['type' => 'boolean', 'value' => false],
+            // use_bucket_for_flow_events: store/read flow-execution events on the bucket.
+            'use_bucket_for_flow_events' => ['type' => 'boolean', 'value' => false],
             // Full URL like the DevTools Bucket Viewer's (scheme://host[:port]; port defaults
             // from the scheme) — NOT the connector-style separate server/port pair.
             'bucket_endpoint_url' => ['type' => 'string', 'value' => ''],

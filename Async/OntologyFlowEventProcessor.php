@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Async;
 
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowEventTopic;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlowEvent;
+use Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Component\MessageQueue\Client\TopicSubscriberInterface;
 use Oro\Component\MessageQueue\Consumption\MessageProcessorInterface;
@@ -24,6 +25,7 @@ class OntologyFlowEventProcessor implements MessageProcessorInterface, TopicSubs
     public function __construct(
         private readonly ManagerRegistry $doctrine,
         private readonly LoggerInterface $logger,
+        private readonly BucketFlowEventStore $bucketEvents,
     ) {
     }
 
@@ -50,6 +52,23 @@ class OntologyFlowEventProcessor implements MessageProcessorInterface, TopicSubs
         }
 
         try {
+            // "Use Bucket for Flow Events": the event lands on the bucket instead of the table
+            // (independent backends — flipping the toggle migrates nothing either way).
+            if ($this->bucketEvents->isEnabled()) {
+                $this->bucketEvents->append(
+                    isset($body['flow_id']) && \is_numeric($body['flow_id']) ? (int) $body['flow_id'] : null,
+                    \is_string($body['flow_name'] ?? null) ? mb_substr($body['flow_name'], 0, 128) : null,
+                    \is_string($body['flow_uuid'] ?? null) ? $body['flow_uuid'] : null,
+                    $event,
+                    \is_string($body['datetime'] ?? null)
+                        ? $body['datetime']
+                        : (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.u'),
+                    \is_array($body['payload'] ?? null) ? $body['payload'] : []
+                );
+
+                return self::ACK;
+            }
+
             $this->doctrine->getConnection()->executeStatement(
                 'INSERT INTO aaxis_ontology_flow_events (flow_id, flow_uuid, flow_name, event, datetime, payload)
                  VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb))',

@@ -47,6 +47,14 @@ class OntologyEntity
     private bool $enabled = true;
 
     /**
+     * Keep this entity's records in the DATABASE even while the global "Use Bucket for Entity
+     * Data" toggle is on — the per-entity escape hatch for hot entities where the bucket's
+     * LIST+GET-per-record reads are too slow.
+     */
+    #[ORM\Column(name: 'force_db_storage', type: Types::BOOLEAN, options: ['default' => false])]
+    private bool $forceDbStorage = false;
+
+    /**
      * @var Collection<int, OntologyEntityAttribute>
      */
     #[ORM\OneToMany(
@@ -107,6 +115,18 @@ class OntologyEntity
     public function isEnabled(): bool
     {
         return $this->enabled;
+    }
+
+    public function isForceDbStorage(): bool
+    {
+        return $this->forceDbStorage;
+    }
+
+    public function setForceDbStorage(bool $forceDbStorage): self
+    {
+        $this->forceDbStorage = $forceDbStorage;
+
+        return $this;
     }
 
     public function setEnabled(bool $enabled): self

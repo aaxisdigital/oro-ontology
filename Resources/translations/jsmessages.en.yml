@@ -14,6 +14,9 @@ aaxis:
             flow_count:
                 label: 'Flows'
         entity:
+            force_db_storage:
+                label: 'Force DB storage'
+                hint: 'Keep records in the database even when the bucket backend is on.'
             name:
                 label: 'Name'
             system:

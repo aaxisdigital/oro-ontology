@@ -28,6 +28,7 @@ interface EntityRecord {
     displayName: string;
     uniqueAttribute: string | null;
     enabled: boolean;
+    forceDbStorage: boolean;
     systemId: number | null;
     systemName: string | null;
     attributeCount: number;
@@ -271,9 +272,10 @@ class OntologyEntityComponent extends BaseComponent {
             ? {
                 name: entity.name, systemId: String(entity.systemId ?? ''),
                 uniqueAttribute: entity.uniqueAttribute ?? '', enabled: entity.enabled,
+                forceDbStorage: !!entity.forceDbStorage,
                 attributes: entity.attributes
             }
-            : {enabled: true, attributes: []};
+            : {enabled: true, forceDbStorage: false, attributes: []};
 
         // Editing an internal-system entity: preload the OroCommerce entity list and this entity's
         // fields so the comboboxes render populated, then open.
@@ -333,7 +335,11 @@ class OntologyEntityComponent extends BaseComponent {
         return [
             {
                 key: 'systemId', label: __('aaxis.ontology.entity.system.label'), type: 'select',
-                required: true, options: this.systems
+                required: true, options: this.systems, row: 'system', width: '70%'
+            },
+            {
+                key: 'forceDbStorage', label: __('aaxis.ontology.entity.force_db_storage.label'), type: 'boolean',
+                hint: __('aaxis.ontology.entity.force_db_storage.hint'), row: 'system', width: '30%'
             },
             nameField,
             {
@@ -477,6 +483,7 @@ class OntologyEntityComponent extends BaseComponent {
             systemId: values.systemId ? Number(values.systemId) : null,
             uniqueAttribute: values.uniqueAttribute,
             enabled: !!values.enabled,
+            forceDbStorage: !!values.forceDbStorage,
             attributes: (values.attributes || []).map((a: any) => ({
                 name: a.name,
                 datatype: a.datatype || 'undefined',

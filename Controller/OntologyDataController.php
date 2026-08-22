@@ -10,6 +10,7 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
+use Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\SecurityBundle\Attribute\Acl;
@@ -42,10 +43,52 @@ class OntologyDataController extends AbstractController
     {
         $registry = $this->container->get(ManagerRegistry::class);
 
-        /** @var OntologyData[] $records */
-        $records = $registry->getRepository(OntologyData::class)->findBy([], ['updatedAt' => 'DESC']);
         $systems = $registry->getRepository(OntologySystem::class)->findBy([], ['name' => 'ASC']);
         $entities = $registry->getRepository(OntologyEntity::class)->findBy([], ['name' => 'ASC']);
+
+        // While "Use Bucket for Entity Data" is on, EXTERNAL entities' records come from the
+        // bucket store (the aaxis_ontology_data rows are a different, inactive backend then).
+        $store = $this->container->get(BucketEntityDataStore::class);
+        if ($store->isEnabled()) {
+            $rows = [];
+            foreach ($entities as $entity) {
+                if (!($entity->getSystem()?->isExternal() ?? false)) {
+                    continue;
+                }
+                if ($entity->isForceDbStorage()) {
+                    // Per-entity opt-out: this entity's records still live in (and read from) the DB.
+                    foreach ($registry->getRepository(OntologyData::class)->findBy(['entity' => $entity]) as $dbRecord) {
+                        $rows[] = $this->serialize($dbRecord);
+                    }
+
+                    continue;
+                }
+                foreach ($store->listLatest($entity) as $envelope) {
+                    $rows[] = $this->serializeBucketRecord($entity, $envelope);
+                }
+            }
+            usort($rows, static fn (array $a, array $b): int => strcmp((string) $b['updatedAt'], (string) $a['updatedAt']));
+
+            return new JsonResponse([
+                'records' => $rows,
+                'systems' => array_map(
+                    static fn (OntologySystem $s) => ['id' => $s->getId(), 'name' => $s->getName()],
+                    $systems
+                ),
+                'entities' => array_map(
+                    static fn (OntologyEntity $e) => [
+                        'id' => $e->getId(),
+                        'name' => $e->getName(),
+                        'systemId' => $e->getSystem()?->getId(),
+                        'uniqueAttribute' => $e->getUniqueAttribute(),
+                    ],
+                    $entities
+                ),
+            ]);
+        }
+
+        /** @var OntologyData[] $records */
+        $records = $registry->getRepository(OntologyData::class)->findBy([], ['updatedAt' => 'DESC']);
 
         return new JsonResponse([
             'records' => array_map($this->serialize(...), $records),
@@ -217,6 +260,59 @@ class OntologyDataController extends AbstractController
         return \is_array($value) && ($value === [] ? false : !array_is_list($value));
     }
 
+    /**
+     * The bucket-store twin of versionsAction: bucket records have no numeric row id, so the
+     * client addresses them by entity id + unique id. Snapshots come back FULL (each history
+     * object stores the complete payload of its version — no diff reconstruction on this backend).
+     */
+    #[Route(path: '/data-view/api/versions-by-key', name: 'aaxis_ontology_data_versions_by_key', options: ['expose' => true], methods: ['GET'])]
+    #[AclAncestor('aaxis_ontology_data_view')]
+    public function versionsByKeyAction(Request $request): JsonResponse
+    {
+        $entityId = (int) $request->query->get('entityId', 0);
+        $uniqueId = (string) $request->query->get('uniqueId', '');
+        $entity = $entityId > 0
+            ? $this->container->get(ManagerRegistry::class)->getRepository(OntologyEntity::class)->find($entityId)
+            : null;
+        if ($entity === null || $uniqueId === '') {
+            return new JsonResponse(['success' => false, 'message' => 'Record not found.'], 404);
+        }
+
+        $versions = $this->container->get(BucketEntityDataStore::class)
+            ->versions($entity, $uniqueId);
+        if ($versions === []) {
+            return new JsonResponse(['success' => false, 'message' => 'Record not found.'], 404);
+        }
+
+        return new JsonResponse(['versions' => $versions]);
+    }
+
+    /**
+     * A bucket-store record serialized in the grid's row shape. `id` is a synthetic string (the
+     * store has no numeric row ids) and `bucket: true` routes the row's Versions action to the
+     * by-key endpoint above.
+     *
+     * @param array<string, mixed> $envelope
+     *
+     * @return array<string, mixed>
+     */
+    private function serializeBucketRecord(OntologyEntity $entity, array $envelope): array
+    {
+        return [
+            'id' => 'bucket:' . $entity->getId() . ':' . $envelope['uniqueId'],
+            'bucket' => true,
+            'system' => $entity->getSystem()?->getName(),
+            'entity' => $entity->getName(),
+            'systemId' => $entity->getSystem()?->getId(),
+            'entityId' => $entity->getId(),
+            'uniqueId' => $envelope['uniqueId'],
+            'uuid' => $envelope['uuid'],
+            'version' => $envelope['version'],
+            'payload' => json_encode($envelope['payload']),
+            'updatedAt' => $envelope['updatedAt'],
+        ];
+    }
+
     #[Route(path: '/data-view/api', name: 'aaxis_ontology_data_create', options: ['expose' => true], methods: ['POST'])]
     #[Acl(id: 'aaxis_ontology_data_create', type: 'entity', class: OntologyData::class, permission: 'CREATE')]
     #[CsrfProtection]
@@ -360,6 +456,7 @@ class OntologyDataController extends AbstractController
         return array_merge(parent::getSubscribedServices(), [
             ManagerRegistry::class,
             OntologyDataApiManager::class,
+            BucketEntityDataStore::class,
         ]);
     }
 }

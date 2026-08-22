@@ -239,6 +239,37 @@ checked "Use Default" that DISABLES the widget (the button was unclickable until
 (Aaxis → Ontology → Bucket) since the 2026-08 config restructure — the bucket-test component's
 name-suffix selectors are unaffected (its fields render on that same page).
 
+## Bucket flow-events backend (`use_bucket_for_flow_events`)
+
+The events twin of the entity-data backend (toggle right after it on the Bucket page, default
+OFF; same no-migration rule — DB rows stop being shown while it's on). Layout:
+`{base_path}/flow-events/{yyyy}/{mm}/{dd}/{flow-id}-{run-uuid}/{YmdHis+micro}_{kind}_{rand}.json`
+— DATE-FIRST so every listing is bounded to a day window and bucket browsing lands on "what ran
+that day", one folder per RUN inside (a null flow id — bare consumer upserts — lands under `0-`).
+THE FILENAME CARRIES THE EVENT'S MICRO-TIMESTAMP AND KIND on purpose: the Events page's
+one-row-per-run aggregation (`BucketFlowEventStore::listRuns`, reading the last
+`flow_execution_history_days` days, 30 when unset) works from KEY LISTINGS ALONE — zero GETs;
+object bodies (`{flowId, flowUuid, flowName, event, datetime, payload}`) are fetched only when
+one run's popup opens (`runEvents`, scanning the run's started..finished day range since a
+midnight-crossing run spans several day folders). Pieces: `Manager/BucketFlowEventStore` (client
+gained `isConfigured()`/`isEnabledFor($toggle)`/`listPrefixes()`; `isEnabled()` stays the
+entity-data toggle), the write branch in `Async/OntologyFlowEventProcessor` (constructor gained
+the store — RESTART CONSUMERS), and `OntologyEventController`'s two arms: `listFromBucket()`
+(flow names resolved from the flows table by id — a deleted flow shows none; rows carry
+`bucket: true` + `startedAtRaw`/`finishedAtRaw`) and runAction's `?bucket=1&flowId=&startedAt=&
+finishedAt=` branch, which event-component.ts sends for bucket rows. The minutely
+ABANDONED-DEBUG SWEEP has a bucket arm too: `sweepStaleDebugSessions` (runner constructor gained
+the store) calls `BucketFlowEventStore::staleDebugRuns($cutoff)` — key-listing aggregation over
+today+yesterday only (older stale sessions were swept on earlier minutes) for runs with a
+flow-start, no finish kind, and a last-event stamp before the cutoff; the debug trigger lives in
+the flow-start's PAYLOAD, so just the few candidates cost one GET each to confirm
+trigger === "debug". Rows mirror the SQL sweep's shape, so the termination loop (emitRaw
+flow-exception "debug-timeout" + mark the cached walk blob terminated) is shared; the emitted
+exception lands back in the run's bucket folder via the consumers, closing the run so the next
+sweep skips it. NOTE for probes: in CLI the BufferedMessageProducer has buffering DISABLED —
+emits send straight to the DBAL queue (no kernel.terminate flush needed, and calling
+flushBuffer() throws).
+
 ## Flow concurrency (one instance at a time)
 
 A flow's running state is **derived from two timestamps, not stored as a flag**:
@@ -1397,6 +1428,65 @@ migrations (unlike CommonBundle's edit-the-installer-only rule). For each schema
 `Migrations/Schema/OntologyDataFunctions.php` ships PostgreSQL functions (validation, diff/merge,
 upsert) added as post-queries by the installer. The async path is
 `Async/Topic/OntologyDataUpsertTopic` + `Async/OntologyDataUpsertProcessor` (message-queue).
+
+## Bucket entity-data backend (`use_bucket_for_entity_data`)
+
+While the System-Configuration toggle **Use Bucket for Entity Data** is ON (and the Bucket page's
+connection is complete), EXTERNAL entities' records live on the S3 bucket instead of
+`aaxis_ontology_data`/`_history` — the two backends are INDEPENDENT stores: flipping the toggle
+does NOT migrate rows either way (agreed scope; old DB rows simply stop being shown/served).
+Internal entities are untouched (always the Oro tables). **Per-entity opt-out**: the entity's
+`force_db_storage` flag (v1_13 column, default false; the "Force DB storage" toggle in the entity
+form's FIRST row next to System) keeps THAT entity on the DB backend regardless of the global
+toggle — the escape hatch for hot entities where the bucket's LIST+GET-per-record full reads are
+too slow. Every routing decision goes through `isBucketBacked()`/`bucketBacked()` (external AND
+not force_db AND store enabled) — manager reads/writes, the async consumer, Data View (a
+force-db entity's DB rows are listed alongside other entities' bucket rows, keeping their numeric
+ids/versions endpoint), counts, playground. Purge clears bucket objects whenever the STORE is
+enabled even for force-db entities (stale objects from before the flag flipped must go too).
+
+Object layout (the entity segment is the entity ID — names are only unique PER SYSTEM and change
+on rename; the uid segment is rawurlencoded so a "/" inside it can't fork keys):
+- latest:  `{base_path}/entity-data/{entity-id}/{uid}.json`
+- history: `{base_path}/entity-data-history/{entity-id}/{uid}/{yyyymmddhhmiss}/{version}/{uuid}.json`
+
+⚠️ The LATEST key deviates from the originally-sketched `{uid}/{ts}/{version}/{uuid}.json` shape
+ON PURPOSE: a fixed key makes a read ONE GET (no list-and-pick-newest), an upsert an overwrite
+(no stale "latest" object to clean up), and `entity-data/{entity}/` list exactly the live record
+set (count = key count). The per-version metadata rides inside the ENVELOPE every object stores:
+`{entityId, entity (name, informational), uniqueId, version, uuid, updatedAt, payload}` — which is
+also how ARCHIVING knows its key: the upsert GETs the current latest anyway (merge + unchanged
+check), and that envelope supplies the date/version/uuid the history key is built from. History objects are FULL SNAPSHOTS of
+their version — unlike the DB path's reverse-diffs — so retrieval needs no reconstruction.
+
+Pieces:
+- `Manager/OntologyBucketClient` — SigV4 get/put/delete/list (list-objects-v2 WITH continuation
+  tokens) against the CONFIG bucket: endpoint URL parsed like the config test, keys decrypted via
+  oro_security.encoder.default, path-style addressing, errors never carry credentials.
+  `isEnabled()` = toggle AND endpoint+bucket+keys present.
+- `Manager/BucketEntityDataStore` — the domain ops: readLatest / listLatest (one LIST + one GET
+  per record — N+1 by design, fine for moderate volumes) / countLatest (keys only) / versions /
+  purgeEntity (live + history) / upsertBatch. Upsert mirrors the PG function EXACTLY: incoming
+  payloads DEEP-MERGE into the existing one (objects merge recursively, arrays/scalars replace —
+  `deepMerge()`), a write that changes nothing is SKIPPED (merged-equality via `jsonEquals`,
+  key-order-normalized), new records start at max(history)+1 and updates archive the previous
+  snapshot at GREATEST(live, max(history)+1) — version continuity across delete/recreate included.
+- Branch points, all guarded by "external entity + store enabled": `OntologyDataApiManager`
+  (`isBucketBacked()`) — read / query (PHP mirror of the SQL filters: text-form compare,
+  LIKE→regex, numeric </> when both sides numeric; same invalidQuery errors) / queryForFlow
+  (jsonb-ish ordering via `compareJsonValues`) / queryForFlowByAttribute / upsertRecordsSync
+  (same data-upsert EVENT + `{uuid, seen, changed}` receipt). The QUEUED path still queues —
+  `Async/OntologyDataUpsertProcessor::bucketUpsert()` branches at consume time (constructor
+  gained the store: RESTART THE CONSUMERS after deploying). `OntologyDataController::listAction`
+  serves bucket rows (synthetic string id `bucket:{entityId}:{uid}` + `bucket: true`; the
+  data-view component routes the Versions action to `aaxis_ontology_data_versions_by_key`
+  ?entityId&uniqueId, since bucket rows have no numeric id) sorted updatedAt DESC across all
+  external entities — one LIST per entity + one GET per record, the page's known cost.
+  `OntologyEntityController`: recordCount / dwl count / playground payloads / purge (bucket purge
+  PLUS the DB deletes, clearing pre-switch rows).
+- Verified end-to-end against the real OCI bucket (probe 2026-08-22): insert/merge-update/
+  unchanged-skip/read/order/filter/versions/purge all matching the DB path's behavior, keys
+  landing exactly in the layout above.
 
 ## Verify after changes
 

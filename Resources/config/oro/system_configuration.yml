@@ -90,6 +90,13 @@ system_configuration:
                 label: aaxis.ontology.config.bucket.use_bucket_for_entity_data.label
                 tooltip: aaxis.ontology.config.bucket.use_bucket_for_entity_data.tooltip
                 required: false
+        aaxis_ontology.use_bucket_for_flow_events:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.bucket.use_bucket_for_flow_events.label
+                tooltip: aaxis.ontology.config.bucket.use_bucket_for_flow_events.tooltip
+                required: false
         aaxis_ontology.bucket_endpoint_url:
             data_type: string
             type: Symfony\Component\Form\Extension\Core\Type\TextType
@@ -383,6 +390,7 @@ system_configuration:
                                     aaxis_ontology_bucket_section:
                                         children:
                                             - aaxis_ontology.use_bucket_for_entity_data
+                                            - aaxis_ontology.use_bucket_for_flow_events
                                             - aaxis_ontology.bucket_endpoint_url
                                             - aaxis_ontology.bucket_access_key
                                             - aaxis_ontology.bucket_secret_key

@@ -43,7 +43,22 @@ class OntologyDataApiManager
         private readonly OntologyFlowEventEmitter $flowEvents,
         private readonly OroEntityReader $oroReader,
         private readonly OroEntityWriter $oroWriter,
+        private readonly BucketEntityDataStore $bucketStore,
     ) {
+    }
+
+    /**
+     * Whether this entity's records live on the BUCKET: an external-system entity while
+     * "Use Bucket for Entity Data" is on (with a usable bucket connection). Internal entities
+     * always read/write the Oro tables; with the toggle off the aaxis_ontology_data tables serve
+     * as before. Existing DB rows are NOT migrated when the toggle flips — the backends are
+     * independent stores.
+     */
+    private function isBucketBacked(OntologyEntity $entity): bool
+    {
+        return !$this->isInternal($entity)
+            && !$entity->isForceDbStorage()
+            && $this->bucketStore->isEnabled();
     }
 
     /**
@@ -67,6 +82,15 @@ class OntologyDataApiManager
             }
 
             return $payload;
+        }
+
+        if ($this->isBucketBacked($entity)) {
+            $envelope = $this->bucketStore->readLatest($entity, $uniqueId);
+            if ($envelope === null) {
+                throw OntologyApiException::recordNotFound($uniqueId);
+            }
+
+            return $envelope['payload'];
         }
 
         /** @var OntologyData|null $record */
@@ -193,6 +217,23 @@ class OntologyDataApiManager
         }
 
         [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid);
+
+        if ($this->isBucketBacked($entity)) {
+            $changed = $this->bucketStore->upsertBatch(
+                $entity,
+                $uuid,
+                $uniqueIds,
+                $payloads,
+                new \DateTimeImmutable('now', new \DateTimeZone('UTC'))
+            );
+            $this->flowEvents->emit($flow, $uuid, 'data-upsert', [
+                'entity' => (string) $entity->getName(),
+                'uniqueIds' => $uniqueIds,
+                'changedIds' => $changed,
+            ]);
+
+            return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
+        }
 
         $connection = $this->connection();
         $startedAt = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
@@ -361,6 +402,10 @@ class OntologyDataApiManager
         $page = max(1, $page);
         $offset = ($page - 1) * $pageSize;
 
+        if ($this->isBucketBacked($entity)) {
+            return $this->queryBucket($entity, $filters, $orderBy, $pageSize, $offset);
+        }
+
         $where = ['entity_id = :entity_id'];
         $params = ['entity_id' => $entity->getId()];
         $types = ['entity_id' => ParameterType::INTEGER];
@@ -408,6 +453,24 @@ class OntologyDataApiManager
             return $this->oroReader->readAll($entity, $orderBy, $direction, $limit);
         }
 
+        if ($this->isBucketBacked($entity)) {
+            $payloads = array_map(
+                static fn (array $envelope): array => $envelope['payload'],
+                $this->bucketStore->listLatest($entity)
+            );
+            $orderBy = trim((string) $orderBy);
+            if ($orderBy !== '') {
+                $desc = strtoupper($direction) === 'DESC';
+                usort($payloads, static function (array $a, array $b) use ($orderBy, $desc): int {
+                    $cmp = self::compareJsonValues($a[$orderBy] ?? null, $b[$orderBy] ?? null);
+
+                    return $desc ? -$cmp : $cmp;
+                });
+            }
+
+            return $limit !== null && $limit > 0 ? \array_slice($payloads, 0, $limit) : $payloads;
+        }
+
         $sql = 'SELECT payload FROM aaxis_ontology_data WHERE entity_id = :entity_id';
         $params = ['entity_id' => $entity->getId()];
         $types = ['entity_id' => ParameterType::INTEGER];
@@ -444,6 +507,16 @@ class OntologyDataApiManager
 
         if ($this->isInternal($entity)) {
             return $this->oroReader->readByAttribute($entity, $attribute, $value);
+        }
+
+        if ($this->isBucketBacked($entity)) {
+            return array_values(array_filter(
+                array_map(
+                    static fn (array $envelope): array => $envelope['payload'],
+                    $this->bucketStore->listLatest($entity)
+                ),
+                static fn (array $payload): bool => self::jsonTextForm($payload[$attribute] ?? null) === $value
+            ));
         }
 
         $rows = $this->connection()->fetchAllAssociative(
@@ -529,6 +602,152 @@ class OntologyDataApiManager
      *
      * @throws OntologyApiException
      */
+    /**
+     * The bucket-backed arm of {@see query()}: same filter/orderBy semantics as the SQL path
+     * (values compared by their jsonb TEXT form, </> numerically when both sides are numeric),
+     * applied in PHP over the entity's live records, then paged.
+     *
+     * @param array<int, array{attribute?: mixed, compare?: mixed, value?: mixed}> $filters
+     *
+     * @return array<int, array<int|string, mixed>|null>
+     */
+    private function queryBucket(OntologyEntity $entity, array $filters, ?string $orderBy, int $pageSize, int $offset): array
+    {
+        // Validate filters/orderBy with the same errors the SQL path raises (unknown compare,
+        // non-scalar value, bad direction) — the caller must not notice the backend.
+        $normalized = [];
+        foreach (array_values($filters) as $i => $filter) {
+            $filter = \is_array($filter) ? $filter : [];
+            $attribute = isset($filter['attribute']) ? trim((string) $filter['attribute']) : '';
+            if ($attribute === '') {
+                throw OntologyApiException::invalidQuery('Each filter requires a non-empty "attribute".');
+            }
+            $compare = (string) ($filter['compare'] ?? 'EQ');
+            if (!isset(self::COMPARATORS[$compare])) {
+                throw OntologyApiException::invalidQuery(sprintf('Unsupported filter compare "%s".', $compare));
+            }
+            $value = $filter['value'] ?? null;
+            if ($value !== null && !\is_scalar($value)) {
+                throw OntologyApiException::invalidQuery('Filter "value" must be a scalar.');
+            }
+            $normalized[] = ['attribute' => $attribute, 'compare' => $compare, 'value' => (string) $value];
+        }
+
+        $orderAttr = null;
+        $orderDesc = false;
+        $orderBy = trim((string) $orderBy);
+        if ($orderBy !== '') {
+            $parts = preg_split('/\s+/', $orderBy) ?: [];
+            $orderAttr = trim((string) ($parts[0] ?? ''));
+            $direction = strtoupper(trim((string) ($parts[1] ?? 'ASC')));
+            if ($orderAttr === '') {
+                throw OntologyApiException::invalidQuery('orderBy requires an attribute name.');
+            }
+            if (!\in_array($direction, ['ASC', 'DESC'], true)) {
+                throw OntologyApiException::invalidQuery(sprintf('Unsupported orderBy direction "%s".', $direction));
+            }
+            $orderDesc = $direction === 'DESC';
+        }
+
+        $payloads = array_map(
+            static fn (array $envelope): array => $envelope['payload'],
+            $this->bucketStore->listLatest($entity)
+        );
+        $payloads = array_values(array_filter($payloads, static function (array $payload) use ($normalized): bool {
+            foreach ($normalized as $filter) {
+                if (!self::bucketFilterMatches($payload[$filter['attribute']] ?? null, $filter['compare'], $filter['value'])) {
+                    return false;
+                }
+            }
+
+            return true;
+        }));
+        if ($orderAttr !== null) {
+            usort($payloads, static function (array $a, array $b) use ($orderAttr, $orderDesc): int {
+                $left = self::jsonTextForm($a[$orderAttr] ?? null);
+                $right = self::jsonTextForm($b[$orderAttr] ?? null);
+                // Text ordering like `payload->>attr`; SQL NULLs sort last ASC / first DESC.
+                if ($left === null || $right === null) {
+                    $cmp = ($left === null ? 1 : 0) <=> ($right === null ? 1 : 0);
+                } else {
+                    $cmp = strcmp($left, $right) <=> 0;
+                }
+
+                return $orderDesc ? -$cmp : $cmp;
+            });
+        }
+
+        return \array_slice($payloads, $offset, $pageSize);
+    }
+
+    /** One filter against one payload value — the PHP mirror of {@see appendFilter}'s SQL. */
+    private static function bucketFilterMatches(mixed $raw, string $compare, string $value): bool
+    {
+        $text = self::jsonTextForm($raw);
+        if ($text === null) {
+            return false; // SQL comparisons against NULL never match
+        }
+
+        switch ($compare) {
+            case 'EQ':
+                return $text === $value;
+            case 'LIKE':
+                $regex = str_replace(['\%', '\_'], ['.*', '.'], preg_quote($value, '~'));
+
+                return preg_match('~^' . $regex . '$~s', $text) === 1;
+            case '<':
+            case '>':
+                if (is_numeric($value) && preg_match('/^-?[0-9]+(\.[0-9]+)?$/', $text) === 1) {
+                    $cmp = (float) $text <=> (float) $value;
+                } else {
+                    $cmp = strcmp($text, $value) <=> 0;
+                }
+
+                return $compare === '<' ? $cmp < 0 : $cmp > 0;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * The `payload ->> attr` text form of a decoded JSON value: null stays null (never matches),
+     * booleans render true/false, structures render as their JSON text, scalars as strings.
+     */
+    private static function jsonTextForm(mixed $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+        if (\is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+        if (\is_array($value)) {
+            return (string) json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        }
+
+        return (string) $value;
+    }
+
+    /**
+     * jsonb-flavoured ordering for {@see queryForFlow}: numbers compare numerically, strings
+     * lexically; mixed/other types fall back to their JSON text (an approximation of jsonb's
+     * type-ranked order, fine for the homogeneous attributes flows sort on).
+     */
+    private static function compareJsonValues(mixed $a, mixed $b): int
+    {
+        if (is_numeric($a) && is_numeric($b) && !\is_string($a) && !\is_string($b)) {
+            return $a <=> $b;
+        }
+        if (\is_string($a) && \is_string($b)) {
+            return strcmp($a, $b) <=> 0;
+        }
+        if (is_numeric($a) && is_numeric($b)) {
+            return (float) $a <=> (float) $b;
+        }
+
+        return strcmp((string) json_encode($a), (string) json_encode($b)) <=> 0;
+    }
+
     private function appendFilter(int $index, array $filter, array &$where, array &$params): void
     {
         $attribute = isset($filter['attribute']) ? trim((string) $filter['attribute']) : '';

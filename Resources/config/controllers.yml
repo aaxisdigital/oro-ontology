@@ -13,6 +13,7 @@ services:
             - [setContainer, ['@Psr\Container\ContainerInterface']]
         tags:
             - { name: container.service_subscriber }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore, key: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore }
             - { name: container.service_subscriber, id: oro_entity.entity_provider, key: Oro\Bundle\EntityBundle\Provider\EntityProvider }
             - { name: container.service_subscriber, id: oro_entity.entity_field_provider, key: Oro\Bundle\EntityBundle\Provider\EntityFieldProvider }
 
@@ -28,6 +29,7 @@ services:
         tags:
             - { name: container.service_subscriber }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager, key: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore, key: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore }
 
     Aaxis\Bundle\OntologyBundle\Controller\OntologyConfigController:
         calls:
@@ -42,6 +44,8 @@ services:
             - [setContainer, ['@Psr\Container\ContainerInterface']]
         tags:
             - { name: container.service_subscriber }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore, key: Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore }
+            - { name: container.service_subscriber, id: oro_config.global, key: Oro\Bundle\ConfigBundle\Config\ConfigManager }
 
     Aaxis\Bundle\OntologyBundle\Controller\OntologyFlowController:
         calls:

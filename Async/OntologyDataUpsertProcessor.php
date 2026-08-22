@@ -7,6 +7,7 @@ namespace Aaxis\Bundle\OntologyBundle\Async;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyDataUpsertTopic;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter;
 use Doctrine\DBAL\Connection;
@@ -32,6 +33,7 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
         private readonly ManagerRegistry $doctrine,
         private readonly LoggerInterface $logger,
         private readonly OntologyFlowEventEmitter $flowEvents,
+        private readonly BucketEntityDataStore $bucketStore,
     ) {
     }
 
@@ -71,8 +73,18 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
                 ? $this->doctrine->getRepository(OntologyFlow::class)->find($flowId)?->getName()
                 : null;
 
-            // Delegate validation + upsert to the database function.
-            $outcome = OntologyDataApiManager::parseUpsertResponse($this->callUpsertFunction($connection, $body));
+            // Delegate validation + upsert to the database function — or, while "Use Bucket for
+            // Entity Data" is on, write the batch to the bucket store instead (same semantics:
+            // deep-merge, unchanged skipped, history archived; see BucketEntityDataStore).
+            $entityRef = $entityId !== null
+                ? $this->doctrine->getRepository(OntologyEntity::class)->find($entityId)
+                : null;
+            if ($entityRef !== null && $entityRef->getSystem()?->isExternal()
+                && !$entityRef->isForceDbStorage() && $this->bucketStore->isEnabled()) {
+                $outcome = $this->bucketUpsert($body, $entityRef);
+            } else {
+                $outcome = OntologyDataApiManager::parseUpsertResponse($this->callUpsertFunction($connection, $body));
+            }
 
             if ($outcome['errors'] !== null) {
                 // A rejected batch surfaces as a flow-exception event (and the log).
@@ -120,6 +132,50 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
         }
 
         return (int) $value;
+    }
+
+    /**
+     * The bucket-backed arm: mirrors the PG function's message validation (the producer already
+     * validated the batch, so these guards only catch a broken/foreign message) and returns the
+     * same outcome shape parseUpsertResponse produces — errors abort the batch, changed lists the
+     * ids actually written.
+     *
+     * @param array<string, mixed> $body
+     *
+     * @return array{errors: array<int, string>|null, changed: array<int, string>}
+     */
+    private function bucketUpsert(array $body, OntologyEntity $entity): array
+    {
+        $uuid = (string) ($body['uuid'] ?? '');
+        $uniqueIds = \is_array($body['unique_id'] ?? null) ? array_values($body['unique_id']) : null;
+        $payloads = \is_array($body['payload'] ?? null) ? array_values($body['payload']) : null;
+
+        if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $uuid)) {
+            return ['errors' => ['invalid uuid'], 'changed' => []];
+        }
+        if ($uniqueIds === null || $payloads === null || \count($uniqueIds) !== \count($payloads)) {
+            return ['errors' => ['mismatch between unique_id and payload sizes'], 'changed' => []];
+        }
+        $ids = array_map(static fn ($id): string => trim((string) $id), $uniqueIds);
+        if (\in_array('', $ids, true)) {
+            return ['errors' => ['unique_id value cannot be empty/null'], 'changed' => []];
+        }
+        if (\count($ids) !== \count(array_unique($ids))) {
+            return ['errors' => ['cannot received duplicated unique_ids in a single operation'], 'changed' => []];
+        }
+        foreach ($payloads as $payload) {
+            if (!\is_array($payload)) {
+                return ['errors' => ['invalid payload format'], 'changed' => []];
+            }
+        }
+
+        $updatedAt = date_create_immutable((string) ($body['updated_at'] ?? ''), new \DateTimeZone('UTC'))
+            ?: new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+
+        return [
+            'errors' => null,
+            'changed' => $this->bucketStore->upsertBatch($entity, $uuid, $ids, $payloads, $updatedAt),
+        ];
     }
 
     /**

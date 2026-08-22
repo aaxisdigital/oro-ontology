@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_12';
+        return 'v1_13';
     }
 
     #[\Override]
@@ -68,6 +68,7 @@ class AaxisOntologyBundleInstaller implements Installation
         $table->addColumn('name', 'string', ['length' => 128]);
         $table->addColumn('unique_attribute', 'string', ['length' => 100, 'default' => '']);
         $table->addColumn('enabled', 'boolean', ['default' => true]);
+        $table->addColumn('force_db_storage', 'boolean', ['default' => false]);
         $table->setPrimaryKey(['id']);
         // Composite unique (system_id, name) also serves system_id-prefix lookups, so no separate
         // single-column index is needed.

@@ -46,6 +46,9 @@ aaxis:
                 use_bucket_for_entity_data:
                     label: 'Use Bucket for Entity Data'
                     tooltip: 'When enabled, entity data record content is stored in the configured bucket. Requires working connectivity to the bucket.'
+                use_bucket_for_flow_events:
+                    label: 'Use Bucket for Flow Events'
+                    tooltip: 'When enabled, flow execution events are stored in and shown from the configured bucket ({base path}/flow-events/{yyyy}/{mm}/{dd}/{flow id}-{run uuid}/...). Requires working connectivity to the bucket.'
                 endpoint_url:
                     label: 'Endpoint URL'
                     tooltip: 'S3-compatible endpoint URL, e.g. http://minio:9000 or https://<namespace>.compat.objectstorage.<region>.oraclecloud.com (as reachable from the application container; the port defaults from the scheme).'

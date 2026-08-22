@@ -10,6 +10,7 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologyDataHistory;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntityAttribute;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
+use Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlOutputFormatter;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard;
 use Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader;
@@ -236,6 +237,16 @@ class OntologyEntityController extends AbstractOntologyController
             return new JsonResponse(['success' => false, 'message' => 'Access denied.'], 403);
         }
 
+        // Bucket-backed entities: drop their objects too (records AND history). The DB deletes
+        // below still run — they clear any rows left from before the backend switch.
+        $bucketDeleted = 0;
+        if (($entity->getSystem()?->isExternal() ?? false)
+            && $this->container->get(BucketEntityDataStore::class)->isEnabled()) {
+            // Even for force-db entities: erase means erase — stale bucket objects written
+            // before the flag flipped must go too.
+            $bucketDeleted = $this->container->get(BucketEntityDataStore::class)->purgeEntity($entity);
+        }
+
         $em = $this->registry()->getManagerForClass(OntologyData::class);
         // DQL deletes: no hydration, since an entity can hold a very large number of records.
         $em->createQuery('DELETE FROM ' . OntologyDataHistory::class . ' h WHERE h.entity = :entity')
@@ -245,7 +256,7 @@ class OntologyEntityController extends AbstractOntologyController
             ->setParameter('entity', $entity)
             ->execute();
 
-        return new JsonResponse(['success' => true, 'deleted' => $deleted]);
+        return new JsonResponse(['success' => true, 'deleted' => $deleted + $bucketDeleted]);
     }
 
     /**
@@ -285,7 +296,22 @@ class OntologyEntityController extends AbstractOntologyController
     /** Number of records available to a playground run (single source of truth for both endpoints). */
     private function dwlPayloadTotal(OntologyEntity $entity): int
     {
+        if ($this->bucketBacked($entity)) {
+            return $this->container->get(BucketEntityDataStore::class)->countLatest($entity);
+        }
+
         return (int) $this->registry()->getRepository(OntologyData::class)->count(['entity' => $entity]);
+    }
+
+    /**
+     * Whether this EXTERNAL entity's records live on the config bucket: toggle on + configured,
+     * and the entity does not FORCE DB storage (the per-entity opt-out for hot entities).
+     */
+    private function bucketBacked(OntologyEntity $entity): bool
+    {
+        return ($entity->getSystem()?->isExternal() ?? false)
+            && !$entity->isForceDbStorage()
+            && $this->container->get(BucketEntityDataStore::class)->isEnabled();
     }
 
     /**
@@ -296,6 +322,15 @@ class OntologyEntityController extends AbstractOntologyController
      */
     private function loadEntityPayloads(OntologyEntity $entity, ?int $limit): array
     {
+        if ($this->bucketBacked($entity)) {
+            $payloads = array_map(
+                static fn (array $envelope): array => \is_array($envelope['payload']) ? $envelope['payload'] : [],
+                $this->container->get(BucketEntityDataStore::class)->listLatest($entity)
+            );
+
+            return $limit !== null ? \array_slice($payloads, 0, $limit) : $payloads;
+        }
+
         $query = $this->registry()->getManagerForClass(OntologyData::class)
             ->createQuery(
                 'SELECT d.payload FROM ' . OntologyData::class . ' d'
@@ -365,6 +400,7 @@ class OntologyEntityController extends AbstractOntologyController
         $entity->setSystem($system);
         $entity->setUniqueAttribute($uniqueAttribute);
         $entity->setEnabled((bool) ($payload['enabled'] ?? true));
+        $entity->setForceDbStorage((bool) ($payload['forceDbStorage'] ?? false));
 
         $this->syncAttributes($entity, $attributeRows);
 
@@ -440,6 +476,7 @@ class OntologyEntityController extends AbstractOntologyController
             'displayName' => $displayName,
             'uniqueAttribute' => $entity->getUniqueAttribute(),
             'enabled' => $entity->isEnabled(),
+            'forceDbStorage' => $entity->isForceDbStorage(),
             'systemId' => $system?->getId(),
             'systemName' => $system?->getName(),
             'attributeCount' => \count($attributes),
@@ -532,6 +569,11 @@ class OntologyEntityController extends AbstractOntologyController
         $system = $entity->getSystem();
         if ($system !== null && !$system->isExternal()) {
             return $this->oroEntityRecordCount((string) $entity->getName());
+        }
+
+        if ($this->bucketBacked($entity)) {
+            // One LIST per entity; the grouped-query shortcut below only covers the DB backend.
+            return $this->container->get(BucketEntityDataStore::class)->countLatest($entity);
         }
 
         if ($externalCounts !== null) {
@@ -644,6 +686,7 @@ class OntologyEntityController extends AbstractOntologyController
     public static function getSubscribedServices(): array
     {
         return array_merge(parent::getSubscribedServices(), [
+            \Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore::class,
             EntityProvider::class,
             EntityFieldProvider::class,
             DwlTransformer::class,

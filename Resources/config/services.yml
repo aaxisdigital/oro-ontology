@@ -117,6 +117,7 @@ services:
             - '@oro_config.global'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
             - '@cache.app'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore'
 
     # Resolves + runs the flow whose Endpoint trigger matches an incoming API request
     # (the /api/aaxis/ontology/flow/... catch-all in Api/OntologyFlowApiController).
@@ -143,6 +144,7 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OroEntityWriter'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore'
 
     # Reads internal-system entities from the OroCommerce entity itself (their data never lives in
     # aaxis_ontology_data): payload = configured attributes, or every scalar column when none.
@@ -170,6 +172,25 @@ services:
 
     # Signs S3-compatible object storage requests (AWS SigV4) for bucket connectors.
     Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner: ~
+
+    # SigV4 client for the SYSTEM-CONFIGURATION bucket (Aaxis Ontology -> Bucket) and the
+    # entity-data store on it (active while "Use Bucket for Entity Data" is on).
+    Aaxis\Bundle\OntologyBundle\Manager\OntologyBucketClient:
+        arguments:
+            - '@oro_config.global'
+            - '@oro_security.encoder.default'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\S3RequestSigner'
+            - '@http_client'
+
+    Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore:
+        public: true
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyBucketClient'
+
+    Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore:
+        public: true
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyBucketClient'
 
     # Executes the "SQL Query" flow step against database connectors (PostgreSQL, PDO).
     Aaxis\Bundle\OntologyBundle\Manager\DatabaseQueryRunner: ~
@@ -209,6 +230,7 @@ services:
             - '@doctrine'
             - '@logger'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore'
         tags:
             - { name: oro_message_queue.client.message_processor }
 
@@ -221,5 +243,6 @@ services:
         arguments:
             - '@doctrine'
             - '@logger'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore'
         tags:
             - { name: oro_message_queue.client.message_processor }
