@@ -288,15 +288,26 @@
 .aaxis-config-db-usage {
     border-collapse: collapse;
 
-    td {
+    // th shares the td metrics: the header row is a label, not a heading band.
+    td,
+    th {
         padding: 2px 0;
         font-size: 12.5px;
         border: 0;
     }
 
+    // No text-align here: `.aaxis-config-db-usage th` would outrank the single-class
+    // &__size rule below and pull the Size header away from its right-aligned column.
+    // Alignment belongs on the BEM classes, which beat the UA's th { text-align: center }.
+    th {
+        color: #6b7a89;
+        font-weight: 600;
+    }
+
     &__name {
         font-family: Menlo, Consolas, monospace;
         color: #2b3a4a;
+        text-align: left;
     }
 
     &__size {

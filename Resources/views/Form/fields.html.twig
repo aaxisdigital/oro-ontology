@@ -12,6 +12,16 @@
 
 {% block aaxis_ontology_db_usage_widget %}
     <table class="aaxis-config-db-usage">
+        <thead>
+            <tr>
+                <th class="aaxis-config-db-usage__name" scope="col">
+                    {{ 'aaxis.ontology.config.general.db_usage.col_table'|trans }}
+                </th>
+                <th class="aaxis-config-db-usage__size" scope="col">
+                    {{ 'aaxis.ontology.config.general.db_usage.col_size'|trans }}
+                </th>
+            </tr>
+        </thead>
         <tbody>
             {% for row in db_usage %}
                 <tr>

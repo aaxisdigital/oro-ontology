@@ -40,6 +40,8 @@ aaxis:
                     tooltip: 'How many days entity data record versions are kept.'
                 db_usage:
                     label: 'DB Usage'
+                    col_table: 'Table'
+                    col_size: 'Size on disk'
                     tooltip: 'Current on-disk size (table + indexes) of the ontology data and history tables — information only, to support the retention choices above.'
             bucket:
                 title: 'Bucket'
