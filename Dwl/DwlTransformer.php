@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Dwl;
 
+use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\Identifier;
+use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\Node;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Parser;
 use Aaxis\Bundle\OntologyBundle\Dwl\Runtime\Environment;
 use Aaxis\Bundle\OntologyBundle\Dwl\Runtime\Evaluator;
@@ -20,12 +22,23 @@ use Aaxis\Bundle\OntologyBundle\Dwl\Runtime\Value;
  */
 class DwlTransformer
 {
+    /**
+     * Parsed scripts keyed by hash: {ast, names (every Identifier in the AST)}. AST nodes are all
+     * public readonly — immutable — so reusing one across evaluations is safe. Flows re-run the
+     * SAME scripts constantly (every foreach iteration, every choice evaluation, every debug
+     * tick), and under php-fpm the cache even survives across requests. Bounded: see MAX_CACHE.
+     *
+     * @var array<string, array{ast: object, names: array<string, true>}>
+     */
+    private static array $scriptCache = [];
+    private const MAX_CACHE = 64;
+
     /** @return string|null a parse error message, or null when the script is valid */
     public function validate(string $script): ?string
     {
         self::loadAst();
         try {
-            Parser::parse($script);
+            self::parseCached($script);
         } catch (\Throwable $e) {
             return $e->getMessage();
         }
@@ -41,21 +54,94 @@ class DwlTransformer
     public function transform(string $script, array $bindings): mixed
     {
         self::loadAst();
+        ['ast' => $ast, 'names' => $referenced] = self::parseCached($script);
+
         $env = new Environment();
         StandardLibrary::register($env);
-        // The whole binding set is also reachable as ONE object — the only way to scripts for
-        // keys that are not valid DWL identifiers, e.g. hyphenated destinations via context["some-key"]. Defined first so
-        // an actual "context" binding (a step destination named so) still wins.
-        $env->define('context', $this->toValue($bindings));
+
+        // Convert ONLY the bindings the script actually references. A flow's context accumulates
+        // every destination produced so far — converting megabytes of unreferenced records into
+        // engine Values (and, before this, converting the WHOLE set TWICE: once for the `context`
+        // object, once per key) dominated every DWL call. `names` is a superset of what the
+        // evaluator can ever look up (every Identifier in the AST), so nothing resolvable is lost.
+        $values = [];
         foreach ($bindings as $name => $value) {
-            if (\is_string($name) && $name !== '') {
-                $env->define($name, $this->toValue($value));
+            $key = (string) $name;
+            if ($key !== '' && isset($referenced[$key])) {
+                $values[$key] = $this->toValue($value);
             }
+        }
+
+        // The whole binding set is also reachable as ONE object — the only way to scripts for
+        // keys that are not valid DWL identifiers, e.g. hyphenated destinations via
+        // context["some-key"] — built only when the script mentions `context`, reusing the Values
+        // already converted above. Defined first so an actual "context" binding (a step
+        // destination named so) still wins.
+        if (isset($referenced['context'])) {
+            $entries = [];
+            foreach ($bindings as $name => $value) {
+                $key = (string) $name;
+                $entries[] = [Value::string($key), $values[$key] ?? $this->toValue($value)];
+            }
+            $env->define('context', Value::object($entries));
+        }
+        foreach ($values as $name => $value) {
+            $env->define($name, $value);
         }
 
         $evaluator = new Evaluator($env);
 
-        return $this->toPlainPhp($evaluator->evaluate(Parser::parse($script))->toPhp());
+        return $this->toPlainPhp($evaluator->evaluate($ast)->toPhp());
+    }
+
+    /**
+     * Parses via the bounded per-process cache and collects the script's Identifier names.
+     *
+     * @return array{ast: object, names: array<string, true>}
+     */
+    private static function parseCached(string $script): array
+    {
+        $key = hash('sha256', $script);
+        if (!isset(self::$scriptCache[$key])) {
+            if (\count(self::$scriptCache) >= self::MAX_CACHE) {
+                self::$scriptCache = [];
+            }
+            $ast = Parser::parse($script);
+            $names = [];
+            self::collectIdentifiers($ast, $names);
+            self::$scriptCache[$key] = ['ast' => $ast, 'names' => $names];
+        }
+
+        return self::$scriptCache[$key];
+    }
+
+    /**
+     * Every Identifier name anywhere in the AST — a deliberate SUPERSET of the variables the
+     * evaluator may resolve from the environment (lambda parameters, do-block vars and object
+     * keys parsed as identifiers are included too; an extra name only means one binding is
+     * converted unnecessarily, which was the old behavior for ALL of them).
+     *
+     * @param array<string, true> $names
+     */
+    private static function collectIdentifiers(mixed $node, array &$names): void
+    {
+        if ($node instanceof Identifier) {
+            $names[$node->name] = true;
+        }
+        // Descend into EVERY object, not just Node: the AST file also holds plain helper classes
+        // (ObjectEntry, …) that do not extend Node but carry Node children.
+        if (\is_object($node)) {
+            foreach (get_object_vars($node) as $property) {
+                self::collectIdentifiers($property, $names);
+            }
+
+            return;
+        }
+        if (\is_array($node)) {
+            foreach ($node as $item) {
+                self::collectIdentifiers($item, $names);
+            }
+        }
     }
 
     /**

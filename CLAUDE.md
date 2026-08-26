@@ -1226,7 +1226,20 @@ the php↔Value bridge is local (`toValue()`/`->toPhp()`); and `Value::toPhp()` 
 as **stdClass** (upstream keeps `{}` vs `[]` apart) — invisible in the JSON debug dialog but fatal
 for `is_array()` consumers like the writer ("Record #1 must be a JSON object") → `transform()`
 flattens its result to plain assoc arrays via `toPlainPhp()`, matching what readers produce
-(`json_decode` assoc). SHAPE fixes belong at this facade; engine FEATURES are added to the engine
+(`json_decode` assoc). PERFORMANCE (2026-08-22, facade-only — nothing to mirror): `transform()`
+converts ONLY the bindings the script references — it collects every Identifier name from the
+parsed AST (`collectIdentifiers`, a deliberate superset; the walker descends into EVERY object,
+since AST helpers like ObjectEntry don't extend Node) and skips the rest, and builds the `context`
+object ONLY when the script mentions `context`, reusing already-converted Values. Before this it
+converted the ENTIRE context TWICE per call (once for `context`, once per key) — flow contexts
+accumulate every destination, so each DWL call cost ~0.5s on real data regardless of what the
+script used. Parsed ASTs are cached per script hash (bounded 64 entries; AST nodes are readonly so
+reuse is safe; validate() warms it, and under php-fpm the static cache survives across requests) —
+foreach iterations, choice evaluations and debug ticks re-run the same scripts constantly. The
+remaining per-call cost is converting what the script DOES reference, once. KNOWN ENGINE GAPS
+(pre-existing, surfaced while testing this): the range SELECTOR `list[0 to 2]` silently yields
+only the FIRST element (ranges as selectors are unimplemented) and `match/case` with guards fails
+to parse. SHAPE fixes belong at this facade; engine FEATURES are added to the engine
 files and always MIRRORED to the upstream repo (namespace swap only, `DataWeave\` ↔ this bundle;
 run upstream's phpunit after) so the copies never diverge — done so far for min/max-over-arrays,
 Value::compare, the COMPLETE `dw::core::Arrays` module (`import * from dw::core::Arrays` →
