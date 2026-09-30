@@ -34,6 +34,8 @@ use Symfony\Contracts\Translation\TranslatorInterface;
  */
 class OntologyEntityController extends AbstractOntologyController
 {
+    private const string ACCESS_DENIED = 'Access denied.';
+
     // expose: the Systems grid links here (?system=…) via routing.generate() in TypeScript.
     #[Route(path: '/entities', name: 'aaxis_ontology_entities', options: ['expose' => true])]
     #[Template('@AaxisOntology/Entity/index.html.twig')]
@@ -161,22 +163,16 @@ class OntologyEntityController extends AbstractOntologyController
     #[CsrfProtection]
     public function dwlAction(OntologyEntity $entity, Request $request): JsonResponse
     {
-        if (!$this->canReadRecordContent()) {
-            return new JsonResponse(['success' => false, 'error' => 'Access denied.'], 403);
-        }
-
         $body = json_decode($request->getContent(), true);
-        if (!\is_array($body)) {
-            return new JsonResponse(['success' => false, 'error' => 'Invalid request body.'], 400);
-        }
-        $script = (string) ($body['script'] ?? '');
-        if (trim($script) === '') {
-            return new JsonResponse(['success' => false, 'error' => 'The script is empty.'], 400);
-        }
-        $refusal = $this->container->get(DwlScriptGuard::class)->check($script);
-        if ($refusal !== null) {
-            // A refusal is a script-level outcome, so it renders in the Result pane like any error.
-            return new JsonResponse(['success' => false, 'error' => $refusal]);
+        $script = \is_array($body) ? (string) ($body['script'] ?? '') : '';
+        $rejection = match (true) {
+            !$this->canReadRecordContent() => new JsonResponse(['success' => false, 'error' => self::ACCESS_DENIED], 403),
+            !\is_array($body) => new JsonResponse(['success' => false, 'error' => 'Invalid request body.'], 400),
+            trim($script) === '' => new JsonResponse(['success' => false, 'error' => 'The script is empty.'], 400),
+            default => $this->guardRefusal($script),
+        };
+        if ($rejection !== null) {
+            return $rejection;
         }
 
         $rawLimit = $body['limit'] ?? null;
@@ -212,6 +208,18 @@ class OntologyEntityController extends AbstractOntologyController
     }
 
     /**
+     * The guard's refusal of a script as the endpoint's normal `{success: false, error}` 200 — a
+     * refusal is a script-level outcome, so it renders in the Result pane like any error — or null
+     * when the script may run.
+     */
+    private function guardRefusal(string $script): ?JsonResponse
+    {
+        $refusal = $this->container->get(DwlScriptGuard::class)->check($script);
+
+        return $refusal !== null ? new JsonResponse(['success' => false, 'error' => $refusal]) : null;
+    }
+
+    /**
      * Deletes every stored record of the entity (the "erase records" action on the Entities grid)
      * while keeping the entity and its attributes. Irreversible: there is no soft delete and the
      * version history goes with it.
@@ -234,7 +242,7 @@ class OntologyEntityController extends AbstractOntologyController
     public function purgeRecordsAction(OntologyEntity $entity): JsonResponse
     {
         if (!$this->isGranted('DELETE', 'entity:' . OntologyData::class)) {
-            return new JsonResponse(['success' => false, 'message' => 'Access denied.'], 403);
+            return new JsonResponse(['success' => false, 'message' => self::ACCESS_DENIED], 403);
         }
 
         // Bucket-backed entities: drop their objects too (records AND history). The DB deletes
@@ -278,7 +286,7 @@ class OntologyEntityController extends AbstractOntologyController
     public function dwlCountAction(OntologyEntity $entity): JsonResponse
     {
         if (!$this->canReadRecordContent()) {
-            return new JsonResponse(['success' => false, 'error' => 'Access denied.'], 403);
+            return new JsonResponse(['success' => false, 'error' => self::ACCESS_DENIED], 403);
         }
 
         return new JsonResponse(['success' => true, 'total' => $this->dwlPayloadTotal($entity)]);
@@ -353,48 +361,13 @@ class OntologyEntityController extends AbstractOntologyController
     private function saveFromJson(OntologyEntity $entity, Request $request): JsonResponse
     {
         $payload = json_decode($request->getContent(), true);
-        if (!\is_array($payload)) {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+        $checked = \is_array($payload)
+            ? $this->checkEntityPayload($entity, $payload)
+            : new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+        if ($checked instanceof JsonResponse) {
+            return $checked;
         }
-
-        $name = trim((string) ($payload['name'] ?? ''));
-        if ($name === '') {
-            return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.name_required')], 422);
-        }
-
-        $systemId = (int) ($payload['systemId'] ?? 0);
-        $system = $systemId > 0 ? $this->registry()->getRepository(OntologySystem::class)->find($systemId) : null;
-        if ($system === null) {
-            return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.system_required')], 422);
-        }
-
-        $uniqueAttribute = trim((string) ($payload['uniqueAttribute'] ?? ''));
-        if ($uniqueAttribute === '') {
-            return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.unique_attribute_required')], 422);
-        }
-
-        // The unique id is read with a flat top-level lookup ($record[$uniqueAttribute]) when
-        // upserting, so a dotted/nested path (or an array path) can never resolve. Reject it here
-        // rather than letting every upsert fail with "missing unique attribute".
-        if (str_contains($uniqueAttribute, '.')) {
-            return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.unique_attribute_no_dots')], 422);
-        }
-
-        $existing = $this->registry()->getRepository(OntologyEntity::class)->findOneBy(['system' => $system, 'name' => $name]);
-        if ($existing !== null && $existing->getId() !== $entity->getId()) {
-            return new JsonResponse(['success' => false, 'message' => $this->trans('aaxis.ontology.entity_manager.name_unique')], 422);
-        }
-
-        $attributeRows = \is_array($payload['attributes'] ?? null) ? $payload['attributes'] : [];
-
-        // Internal systems mirror the real OroCommerce model: the entity must be a known OroCommerce
-        // entity (name = its class) and every attribute must be one of that entity's fields.
-        if (!$system->isExternal()) {
-            $invalid = $this->validateInternalEntity($name, $attributeRows);
-            if ($invalid !== null) {
-                return new JsonResponse(['success' => false, 'message' => $invalid], 422);
-            }
-        }
+        [$system, $name, $uniqueAttribute, $attributeRows] = $checked;
 
         $entity->setName($name);
         $entity->setSystem($system);
@@ -409,6 +382,49 @@ class OntologyEntityController extends AbstractOntologyController
         $em->flush();
 
         return new JsonResponse(['success' => true, 'entity' => $this->serialize($entity)]);
+    }
+
+    /**
+     * Validates a save request: the resolved system, name, unique attribute and attribute rows, or
+     * the 422 to answer with.
+     *
+     * @param array<string, mixed> $payload
+     *
+     * @return array{0: OntologySystem, 1: string, 2: string, 3: array<int, array<string, mixed>>}|JsonResponse
+     */
+    private function checkEntityPayload(OntologyEntity $entity, array $payload): array|JsonResponse
+    {
+        $name = trim((string) ($payload['name'] ?? ''));
+        $systemId = (int) ($payload['systemId'] ?? 0);
+        $system = $systemId > 0 ? $this->registry()->getRepository(OntologySystem::class)->find($systemId) : null;
+        $uniqueAttribute = trim((string) ($payload['uniqueAttribute'] ?? ''));
+        $attributeRows = \is_array($payload['attributes'] ?? null) ? $payload['attributes'] : [];
+
+        $message = match (true) {
+            $name === '' => $this->trans('aaxis.ontology.entity_manager.name_required'),
+            $system === null => $this->trans('aaxis.ontology.entity_manager.system_required'),
+            $uniqueAttribute === '' => $this->trans('aaxis.ontology.entity_manager.unique_attribute_required'),
+            // The unique id is read with a flat top-level lookup ($record[$uniqueAttribute]) when
+            // upserting, so a dotted/nested path (or an array path) can never resolve. Reject it
+            // here rather than letting every upsert fail with "missing unique attribute".
+            str_contains($uniqueAttribute, '.') => $this->trans('aaxis.ontology.entity_manager.unique_attribute_no_dots'),
+            $this->nameTaken($entity, $system, $name) => $this->trans('aaxis.ontology.entity_manager.name_unique'),
+            // Internal systems mirror the real OroCommerce model: the entity must be a known
+            // OroCommerce entity (name = its class) and every attribute one of its fields.
+            default => $system->isExternal() ? null : $this->validateInternalEntity($name, $attributeRows),
+        };
+
+        return $message !== null
+            ? new JsonResponse(['success' => false, 'message' => $message], 422)
+            : [$system, $name, $uniqueAttribute, $attributeRows];
+    }
+
+    /** Whether ANOTHER entity of the system already carries the name (names are unique per system). */
+    private function nameTaken(OntologyEntity $entity, OntologySystem $system, string $name): bool
+    {
+        $existing = $this->registry()->getRepository(OntologyEntity::class)->findOneBy(['system' => $system, 'name' => $name]);
+
+        return $existing !== null && $existing->getId() !== $entity->getId();
     }
 
     /**
@@ -576,11 +592,9 @@ class OntologyEntityController extends AbstractOntologyController
             return $this->container->get(BucketEntityDataStore::class)->countLatest($entity);
         }
 
-        if ($externalCounts !== null) {
-            return (int) ($externalCounts[(int) $entity->getId()] ?? 0);
-        }
-
-        return (int) $this->registry()->getRepository(OntologyData::class)->count(['entity' => $entity]);
+        return $externalCounts !== null
+            ? (int) ($externalCounts[(int) $entity->getId()] ?? 0)
+            : (int) $this->registry()->getRepository(OntologyData::class)->count(['entity' => $entity]);
     }
 
     /**

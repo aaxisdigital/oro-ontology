@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Manager;
 
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Exception\EndpointResponseFailure;
 use Doctrine\Persistence\ManagerRegistry;
 
 /**
@@ -113,7 +114,7 @@ class EndpointFlowRunner
      *
      * @return array{statusCode: int, body: mixed}|null
      *
-     * @throws \RuntimeException when the expression fails or produces an unusable shape
+     * @throws EndpointResponseFailure when the expression fails or produces an unusable shape
      */
     public function respond(array $config, array $context): ?array
     {
@@ -124,10 +125,10 @@ class EndpointFlowRunner
         try {
             $result = $this->dwl->transform($expression, $context);
         } catch (\Throwable $e) {
-            throw new \RuntimeException('the response binding failed: ' . $e->getMessage(), 0, $e);
+            throw new EndpointResponseFailure('the response binding failed: ' . $e->getMessage(), 0, $e);
         }
         if (!\is_array($result) || array_is_list($result)) {
-            throw new \RuntimeException(sprintf(
+            throw new EndpointResponseFailure(sprintf(
                 'the response binding must produce an object like {statusCode: 200, body: payload}, got %s',
                 get_debug_type($result)
             ));
@@ -137,7 +138,7 @@ class EndpointFlowRunner
             $status = (int) $status;
         }
         if (!\is_int($status) || $status < 100 || $status > 599) {
-            throw new \RuntimeException(sprintf(
+            throw new EndpointResponseFailure(sprintf(
                 'the response statusCode must be an HTTP status between 100 and 599, got %s',
                 \is_scalar($status) ? var_export($status, true) : get_debug_type($status)
             ));
@@ -168,7 +169,7 @@ class EndpointFlowRunner
         $params = [];
         $literals = 0;
         foreach ($pattern as $i => $segment) {
-            if (preg_match('/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/', $segment, $m) === 1) {
+            if (preg_match('/^\{([a-zA-Z_]\w*)\}$/', $segment, $m) === 1) {
                 $params[$m[1]] = $request[$i];
                 continue;
             }

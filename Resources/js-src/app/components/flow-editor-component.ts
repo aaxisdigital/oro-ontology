@@ -109,6 +109,17 @@ function renderJsonTree(value: any): HTMLElement {
     return root;
 }
 
+/** The aaxis-json-* color class of a JSON primitive. */
+function jsonPrimitiveClass(value: any): string {
+    if (value === null) {
+        return 'aaxis-json-null';
+    }
+    if (typeof value === 'string') {
+        return 'aaxis-json-str';
+    }
+    return typeof value === 'number' ? 'aaxis-json-num' : 'aaxis-json-bool';
+}
+
 function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElement {
     const node = document.createElement('div');
     node.className = 'aaxis-json-tree__node';
@@ -137,9 +148,7 @@ function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElem
         line.appendChild(spacer());
         appendKey();
         const v = document.createElement('span');
-        v.className = value === null ? 'aaxis-json-null'
-            : typeof value === 'string' ? 'aaxis-json-str'
-                : typeof value === 'number' ? 'aaxis-json-num' : 'aaxis-json-bool';
+        v.className = jsonPrimitiveClass(value);
         v.textContent = JSON.stringify(value);
         line.appendChild(v);
         line.appendChild(document.createTextNode(comma));
@@ -213,6 +222,119 @@ function renderVariablesList(context: Record<string, any>): HTMLElement {
     return root;
 }
 
+/** A context-menu entry of a hover submenu. */
+interface MenuChild {
+    label: string;
+    icon: string;
+    action: () => void;
+    disabled?: boolean;
+    active?: boolean;
+}
+
+/** Adds one context-menu item (see showMenuAt). */
+type MenuAddItem = (label: string, icon: string, action: () => void, opts?: {disabled?: boolean; active?: boolean}) => void;
+
+/** Adds one hover submenu with its children (see showMenuAt). */
+type MenuAddSubmenu = (label: string, icon: string, children: MenuChild[]) => void;
+
+/** Whether a stored step definition invokes the subflow with this id (Call Subflow / Foreach). */
+function invokesSubflow(st: any, subflowId: number): boolean {
+    return Boolean(st) && (st.type === 'sub_flow' || st.type === 'foreach') && Number(st.config?.subflow || 0) === subflowId;
+}
+
+/** One type-specific block of the step settings popup (error() = '' when complete). */
+interface SettingsSection {
+    error: () => string;
+    merge: (config: Record<string, any>) => Record<string, any>;
+    /** Settles once the section's catalog data (systems, connectors, …) has loaded. */
+    ready?: Promise<any>;
+}
+
+/** A canvas point (also a polyline corner of a routed wire). */
+interface Point {
+    x: number;
+    y: number;
+}
+
+// --- Wire routing helpers (A* over the dot grid, crossing jumps) ---------------------------
+
+/** Removes the cheapest [f, idx] entry from the heap (the first one on ties) and returns its idx. */
+function popCheapest(heap: number[][]): number {
+    let best = 0;
+    for (let i = 1; i < heap.length; i++) {
+        if (heap[i][0] < heap[best][0]) {
+            best = i;
+        }
+    }
+    return heap.splice(best, 1)[0][1];
+}
+
+/** The grid cells from the search start to `goal`, following the parent links back. */
+function tracePath(parent: Int32Array, goal: number, cols: number): {c: number; r: number}[] {
+    const cells: {c: number; r: number}[] = [];
+    for (let cur = goal; cur !== -1; cur = parent[cur]) {
+        cells.push({c: cur % cols, r: Math.floor(cur / cols)});
+    }
+    return cells.reverse();
+}
+
+/** The in-bounds 4-neighbours of a cell index — east, west, south, north. */
+function gridNeighbours(idx: number, cols: number, rows: number): number[] {
+    const c = idx % cols;
+    const r = Math.floor(idx / cols);
+    const neighbours: number[] = [];
+    for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nc = c + dc;
+        const nr = r + dr;
+        if (nc >= 0 && nr >= 0 && nc < cols && nr < rows) {
+            neighbours.push(nr * cols + nc);
+        }
+    }
+    return neighbours;
+}
+
+/** The A* penalty for changing direction (`pdir` -1 = the start cell, which has none). */
+function turnCost(pdir: number, step: number): number {
+    return pdir !== -1 && step !== pdir ? 3 : 0;
+}
+
+/** The xs where the horizontal segment p→q properly crosses a vertical run of the other routes. */
+function horizontalCrossings(p: Point, q: Point, others: Point[][]): number[] {
+    if (p.y !== q.y || p.x === q.x) {
+        return []; // hops live on horizontal segments only
+    }
+    const x1 = Math.min(p.x, q.x);
+    const x2 = Math.max(p.x, q.x);
+    const xs: number[] = [];
+    for (const other of others) {
+        for (let t = 0; t < other.length - 1; t++) {
+            const v1 = other[t];
+            const v2 = other[t + 1];
+            const vertical = v1.x === v2.x && v1.y !== v2.y;
+            if (vertical && v1.x > x1 && v1.x < x2 && p.y > Math.min(v1.y, v2.y) && p.y < Math.max(v1.y, v2.y)) {
+                xs.push(v1.x);
+            }
+        }
+    }
+    return xs;
+}
+
+/**
+ * The jump commands a horizontal run p→q draws over the crossings at `xs` (radius r), in the run's
+ * direction; jumps that would collide with the segment's own corners are skipped.
+ */
+function hopArcs(p: Point, q: Point, xs: number[], r: number): string {
+    const dir = q.x > p.x ? 1 : -1;
+    let d = '';
+    for (const hx of xs.slice().sort((a, b) => (a - b) * dir)) {
+        if (Math.abs(hx - p.x) >= 2 * r && Math.abs(hx - q.x) >= 2 * r) {
+            // Semicircle over the crossed line (bulge upward on screen).
+            d += ` L ${hx - r * dir} ${p.y} A ${r} ${r} 0 0 ${dir > 0 ? 1 : 0} ${hx + r * dir} ${p.y}`;
+        }
+    }
+    return d;
+}
+
 /** A directed connection: output port `fromPort` of step `from` → the input of step `to`. */
 interface FlowLink {
     from: string;
@@ -234,7 +356,7 @@ interface FlowRecord {
 interface EditorTab {
     flow: FlowRecord | null;
     /** The canvas state captured when the tab was last active; null = never activated/stashed. */
-    design: any | null;
+    design: any;
     /** The dirty-tracking baseline captured on stash; null = fresh (baseline set on activation). */
     savedState: string | null;
     invalidNames: string[];
@@ -277,6 +399,43 @@ const DEBUG_ICONS: Record<string, string> = {
         + '<rect x="3.5" y="3.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>'
 };
 
+/** A VSCode-style square debugger button: the glyph centered, the label only in title/aria-label. */
+function debugIconButton(labelKey: string, icon: string, disabled: boolean): any {
+    const label = __('aaxis.ontology.flow_editor.' + labelKey);
+    return $('<button/>', {
+        type: 'button',
+        'class': 'aaxis-flow-editor__debug-btn' + (icon === 'stop' ? ' aaxis-flow-editor__debug-btn--stop' : ''),
+        title: label,
+        'aria-label': label,
+        disabled
+    }).append($(DEBUG_ICONS[icon]));
+}
+
+/** The decreasing auto-dismiss bar under the buttons of a cleanly finished debug session. */
+function debugAutoCloseBar(autoClose: {deadline: number; duration: number}): any {
+    const remaining = Math.max(0, autoClose.deadline - Date.now());
+    return $('<div/>', {'class': 'aaxis-flow-editor__debug-autoclose'}).append(
+        $('<div/>', {'class': 'aaxis-flow-editor__debug-autoclose-bar', 'data-role': 'debug-autoclose-bar'})
+            .css('width', `${(remaining / autoClose.duration) * 100}%`)
+    );
+}
+
+/** Which debugger button a request was started from (it carries the spinner meanwhile). */
+function debugBusyAction(runAll: boolean, stepInto: boolean, stepOut: boolean): 'runAll' | 'out' | 'into' | 'next' {
+    if (runAll) {
+        return 'runAll';
+    }
+    if (stepOut) {
+        return 'out';
+    }
+    return stepInto ? 'into' : 'next';
+}
+
+/** The stepping button showing the spinner for a busy action (a subflow visit shows it on Next). */
+function spinnerButtonOf(action: string | null): 'runAll' | 'into' | 'out' | 'next' {
+    return action === 'runAll' || action === 'into' || action === 'out' ? action : 'next';
+}
+
 /** Seeded into a freshly-dropped Endpoint trigger: the Response binding's example shape. */
 const ENDPOINT_RESPONSE_EXAMPLE = '{\n    statusCode: 200,\n    body: payload\n}';
 
@@ -304,6 +463,21 @@ const SIDE_VECTOR: Record<AnchorSide, {dx: number; dy: number}> = {
     south: {dx: 0, dy: 1},
     west: {dx: -1, dy: 0},
     east: {dx: 1, dy: 0}
+};
+
+/** Inline placement of a tile's "×" port handle on each side (beats the CSS default spot). */
+const PORT_STYLE: Record<AnchorSide, {left: string; right: string; top: string; bottom: string; transform: string}> = {
+    north: {left: '50%', right: 'auto', top: '-9px', bottom: 'auto', transform: 'translateX(-50%)'},
+    south: {left: '50%', right: 'auto', top: 'auto', bottom: '-9px', transform: 'translateX(-50%)'},
+    west: {left: '-9px', right: 'auto', top: '50%', bottom: 'auto', transform: 'translateY(-50%)'},
+    east: {left: 'auto', right: '-9px', top: '50%', bottom: 'auto', transform: 'translateY(-50%)'}
+};
+
+/** The arrow-head marker of each wire branch ('' = a plain, non-choice wire). */
+const BRANCH_MARKER: Record<'' | 'matched' | 'not-matched', string> = {
+    '': 'url(#aaxis-flow-arrow)',
+    matched: 'url(#aaxis-flow-arrow-green)',
+    'not-matched': 'url(#aaxis-flow-arrow-red)'
 };
 
 interface FlowEditorOptions {
@@ -613,9 +787,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // space) dismisses it immediately — the user is back to work, no need to wait it out.
         // The click keeps its normal effect (select a tile, open a menu, …).
         this.$el.on('click.aaxisFlowEditor', (e: any) => {
-            if (this.debugSession && this.debugSession.autoClose
-                && !$(e.target).closest('[data-role="debugger"]').length
-            ) {
+            if (this.debugSession?.autoClose && !$(e.target).closest('[data-role="debugger"]').length) {
                 this.closeDebugSession();
             }
         });
@@ -713,10 +885,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (!group) {
                 return;
             }
-            const from = String(group.getAttribute('data-from'));
-            const fromPort = Number(group.getAttribute('data-from-port')) || 0;
-            const to = String(group.getAttribute('data-to'));
-            const link = this.links.find(l => l.from === from && l.fromPort === fromPort && l.to === to);
+            const link = this.wireGroupLink(group);
             if (link) {
                 e.stopPropagation();
                 this.startRelinkDrag(e.originalEvent as PointerEvent, link);
@@ -771,10 +940,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         this.$el.on('contextmenu.aaxisFlowEditor', '[data-role="wire-group"]', (e: any) => {
             e.preventDefault();
-            const g = e.currentTarget as SVGGElement;
-            const link = this.links.find(l => l.from === g.getAttribute('data-from')
-                && l.fromPort === Number(g.getAttribute('data-from-port'))
-                && l.to === g.getAttribute('data-to'));
+            const link = this.wireGroupLink(e.currentTarget as SVGGElement);
             if (link) {
                 this.openLinkContextMenu(e.originalEvent as PointerEvent, link);
             }
@@ -785,6 +951,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 this.openStepSettings(step);
             }
         });
+    }
+
+    /** The link a rendered wire group stands for (its data-from / data-from-port / data-to). */
+    private wireGroupLink(group: SVGElement): FlowLink | undefined {
+        const {from, fromPort, to} = group.dataset;
+        const port = Number(fromPort) || 0;
+        return this.links.find(l => l.from === from && l.fromPort === port && l.to === to);
     }
 
     /**
@@ -846,7 +1019,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 const marker = document.createElementNS(SVG_NS, 'marker');
                 marker.setAttribute('id', id);
                 if (branch !== '') {
-                    marker.setAttribute('data-branch', branch);
+                    marker.dataset.branch = branch;
                 }
                 marker.setAttribute('viewBox', '0 0 10 10');
                 marker.setAttribute('refX', '9');
@@ -877,11 +1050,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private brandTempWire(path: SVGPathElement, from: PlacedStep, fromPort: number): void {
         const branch = this.linkBranch({from: from.id, fromPort, to: ''});
         if (branch === '') {
-            path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
+            path.setAttribute('marker-end', BRANCH_MARKER['']);
             return;
         }
-        path.setAttribute('data-branch', branch);
-        path.setAttribute('marker-end', branch === 'matched' ? 'url(#aaxis-flow-arrow-green)' : 'url(#aaxis-flow-arrow-red)');
+        path.dataset.branch = branch;
+        path.setAttribute('marker-end', BRANCH_MARKER[branch]);
     }
 
     // --- Link geometry / rendering ------------------------------------------------
@@ -894,7 +1067,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     /** The side an output port leaves from (choice's red port defaults to south). */
     private outSideOf(step: PlacedStep, port: number): AnchorSide {
-        return (step.outSides && step.outSides[port]) || (port === 1 ? 'south' : 'east');
+        return step.outSides?.[port] || (port === 1 ? 'south' : 'east');
     }
 
     /** Midpoint of one side of the tile, in canvas coordinates. */
@@ -924,12 +1097,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private positionPortsEl(el: HTMLElement, type: string, outSides: AnchorSide[]): void {
         el.querySelectorAll('[data-role="port"]').forEach(node => {
             const port = node as HTMLElement;
-            const side = outSides[Number(port.getAttribute('data-port')) || 0] || 'east';
-            port.style.left = side === 'west' ? '-9px' : (side === 'east' ? 'auto' : '50%');
-            port.style.right = side === 'east' ? '-9px' : 'auto';
-            port.style.top = side === 'north' ? '-9px' : (side === 'south' ? 'auto' : '50%');
-            port.style.bottom = side === 'south' ? '-9px' : 'auto';
-            port.style.transform = side === 'north' || side === 'south' ? 'translateX(-50%)' : 'translateY(-50%)';
+            const side = outSides[Number(port.dataset.port) || 0] || 'east';
+            Object.assign(port.style, PORT_STYLE[side]);
         });
     }
 
@@ -1018,24 +1187,23 @@ class OntologyFlowEditorComponent extends BaseComponent {
         routes.forEach((route, i) => {
             const d = this.pathWithHops(route.points, hops[i]);
             const group = document.createElementNS(SVG_NS, 'g');
-            group.setAttribute('data-role', 'wire-group');
-            group.setAttribute('data-from', route.link.from);
-            group.setAttribute('data-from-port', String(route.link.fromPort));
-            group.setAttribute('data-to', route.link.to);
+            group.dataset.role = 'wire-group';
+            group.dataset.from = route.link.from;
+            group.dataset.fromPort = String(route.link.fromPort);
+            group.dataset.to = route.link.to;
             // Choice branches paint green (matched) / red (not matched) — attribute-driven CSS.
             const branch = this.linkBranch(route.link);
             if (branch !== '') {
-                group.setAttribute('data-branch', branch);
+                group.dataset.branch = branch;
             }
             // Visible arrow + an invisible wide twin that makes the thin line right-clickable
             // (the svg layer itself keeps pointer-events: none).
             const path = document.createElementNS(SVG_NS, 'path');
-            path.setAttribute('data-role', 'wire');
+            path.dataset.role = 'wire';
             path.setAttribute('d', d);
-            path.setAttribute('marker-end', branch === '' ? 'url(#aaxis-flow-arrow)'
-                : (branch === 'matched' ? 'url(#aaxis-flow-arrow-green)' : 'url(#aaxis-flow-arrow-red)'));
+            path.setAttribute('marker-end', BRANCH_MARKER[branch]);
             const hit = document.createElementNS(SVG_NS, 'path');
-            hit.setAttribute('data-role', 'wire-hit');
+            hit.dataset.role = 'wire-hit';
             hit.setAttribute('d', d);
             group.appendChild(path);
             group.appendChild(hit);
@@ -1044,7 +1212,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             const end = route.points[route.points.length - 1];
             if (end) {
                 const grip = document.createElementNS(SVG_NS, 'circle');
-                grip.setAttribute('data-role', 'wire-end');
+                grip.dataset.role = 'wire-end';
                 grip.setAttribute('cx', String(end.x));
                 grip.setAttribute('cy', String(end.y));
                 grip.setAttribute('r', '9');
@@ -1074,13 +1242,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const originY = Math.max(2, tip.y + v.dy * 3 * this.spacing);
         const d = `M ${originX} ${originY} L ${tip.x} ${tip.y}`;
         const group = document.createElementNS(SVG_NS, 'g');
-        group.setAttribute('data-role', 'start-group');
+        group.dataset.role = 'start-group';
         const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('data-role', 'wire');
+        path.dataset.role = 'wire';
         path.setAttribute('d', d);
         path.setAttribute('marker-end', 'url(#aaxis-flow-arrow)');
         const hit = document.createElementNS(SVG_NS, 'path');
-        hit.setAttribute('data-role', 'wire-hit');
+        hit.dataset.role = 'wire-hit';
         hit.setAttribute('d', d);
         group.appendChild(path);
         group.appendChild(hit);
@@ -1179,44 +1347,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         const g = new Float64Array(cols * rows).fill(Infinity);
         const parent = new Int32Array(cols * rows).fill(-1);
-        const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
         const h = (idx: number): number => Math.abs((idx % cols) - ec) + Math.abs(Math.floor(idx / cols) - er);
 
-        // Tiny binary heap of [f, idx] pairs.
+        // Tiny heap of [f, idx] pairs.
         const heap: number[][] = [[h(start), start]];
         g[start] = 0;
         let expansions = 0;
         while (heap.length && expansions < 20000) {
-            let best = 0;
-            for (let i = 1; i < heap.length; i++) {
-                if (heap[i][0] < heap[best][0]) {
-                    best = i;
-                }
-            }
-            const [, idx] = heap.splice(best, 1)[0];
+            const idx = popCheapest(heap);
             if (idx === goal) {
-                const cells: {c: number; r: number}[] = [];
-                for (let cur = goal; cur !== -1; cur = parent[cur]) {
-                    cells.push({c: cur % cols, r: Math.floor(cur / cols)});
-                }
-                return cells.reverse();
+                return tracePath(parent, goal, cols);
             }
             expansions++;
-            const c = idx % cols;
-            const r = Math.floor(idx / cols);
             const pdir = parent[idx] === -1 ? -1 : idx - parent[idx];
-            for (const [dc, dr] of dirs) {
-                const nc = c + dc;
-                const nr = r + dr;
-                if (nc < 0 || nr < 0 || nc >= cols || nr >= rows) {
-                    continue;
-                }
-                const nidx = nr * cols + nc;
-                if (!isFree(nidx)) {
-                    continue;
-                }
-                const turn = pdir !== -1 && (nidx - idx) !== pdir ? 3 : 0;
-                const ng = g[idx] + 1 + turn;
+            for (const nidx of gridNeighbours(idx, cols, rows).filter(isFree)) {
+                const ng = g[idx] + 1 + turnCost(pdir, nidx - idx);
                 if (ng < g[nidx]) {
                     g[nidx] = ng;
                     parent[nidx] = idx;
@@ -1250,61 +1395,29 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * horizontal one jumps over it with a small arc. Returns, per route, a map of
      * segment-index → crossing xs.
      */
-    private computeHops(routes: {x: number; y: number}[][]): Record<number, number[]>[] {
-        const hops: Record<number, number[]>[] = routes.map(() => ({}));
-        for (let i = 0; i < routes.length; i++) {
-            const pts = routes[i];
+    private computeHops(routes: Point[][]): Record<number, number[]>[] {
+        return routes.map((pts, i) => {
+            const others = routes.filter((_route, j) => j !== i);
+            const hops: Record<number, number[]> = {};
             for (let s = 0; s < pts.length - 1; s++) {
-                const p = pts[s];
-                const q = pts[s + 1];
-                if (p.y !== q.y || p.x === q.x) {
-                    continue; // hops live on horizontal segments only
-                }
-                const x1 = Math.min(p.x, q.x);
-                const x2 = Math.max(p.x, q.x);
-                for (let j = 0; j < routes.length; j++) {
-                    if (j === i) {
-                        continue;
-                    }
-                    const other = routes[j];
-                    for (let t = 0; t < other.length - 1; t++) {
-                        const v1 = other[t];
-                        const v2 = other[t + 1];
-                        if (v1.x !== v2.x || v1.y === v2.y) {
-                            continue;
-                        }
-                        const yLo = Math.min(v1.y, v2.y);
-                        const yHi = Math.max(v1.y, v2.y);
-                        if (v1.x > x1 && v1.x < x2 && p.y > yLo && p.y < yHi) {
-                            (hops[i][s] = hops[i][s] || []).push(v1.x);
-                        }
-                    }
+                const xs = horizontalCrossings(pts[s], pts[s + 1], others);
+                if (xs.length) {
+                    hops[s] = xs;
                 }
             }
-        }
-        return hops;
+            return hops;
+        });
     }
 
     /** Builds the SVG path of a polyline, replacing crossings with small semicircular jumps. */
-    private pathWithHops(points: {x: number; y: number}[], hops: Record<number, number[]>): string {
+    private pathWithHops(points: Point[], hops: Record<number, number[]>): string {
         const r = Math.min(6, Math.max(4, Math.round(this.spacing / 2)));
         let d = `M ${points[0].x} ${points[0].y}`;
         for (let s = 0; s < points.length - 1; s++) {
             const p = points[s];
             const q = points[s + 1];
-            const xs = (hops[s] || []).slice();
-            if (p.y === q.y && xs.length) {
-                const dir = q.x > p.x ? 1 : -1;
-                xs.sort((a, b) => (a - b) * dir);
-                for (const hx of xs) {
-                    // Skip jumps that would collide with the segment's own corners.
-                    if (Math.abs(hx - p.x) < 2 * r || Math.abs(hx - q.x) < 2 * r) {
-                        continue;
-                    }
-                    d += ` L ${hx - r * dir} ${p.y}`;
-                    // Semicircle over the crossed line (bulge upward on screen).
-                    d += ` A ${r} ${r} 0 0 ${dir > 0 ? 1 : 0} ${hx + r * dir} ${p.y}`;
-                }
+            if (p.y === q.y) {
+                d += hopArcs(p, q, hops[s] || [], r);
             }
             d += ` L ${q.x} ${q.y}`;
         }
@@ -1507,11 +1620,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private tabTitle(tab: EditorTab, active: boolean): string {
         if (active) {
             const trigger = this.findTrigger();
-            return (trigger && trigger.name) || (this.flow && this.flow.name) || __('aaxis.ontology.flow_editor.name_unset');
+            return trigger?.name || this.flow?.name || __('aaxis.ontology.flow_editor.name_unset');
         }
-        const steps = (tab.design && tab.design.steps) || (tab.flow && tab.flow.design && tab.flow.design.steps) || [];
-        const trigger = (steps as any[]).find(st => st && this.stepMeta[st.type] && this.stepMeta[st.type].category === 'trigger');
-        return (trigger && trigger.name) || (tab.flow && tab.flow.name) || __('aaxis.ontology.flow_editor.name_unset');
+        const steps = tab.design?.steps || tab.flow?.design?.steps || [];
+        const trigger = (steps as any[]).find(st => this.isTriggerDef(st));
+        return trigger?.name || tab.flow?.name || __('aaxis.ontology.flow_editor.name_unset');
+    }
+
+    /** Whether a stored step definition (design.steps entry, possibly malformed) is a trigger. */
+    private isTriggerDef(st: any): boolean {
+        return this.stepMeta[st?.type]?.category === 'trigger';
     }
 
     /** Whether a STASHED tab holds unsaved changes (the active tab asks the live snapshot). */
@@ -1530,7 +1648,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      */
     private syncTabsUrl(): void {
         const active = this.tabs[this.activeTab];
-        const activeId = active && active.flow ? (active.flow as any).id : null;
+        const activeId = active?.flow ? (active.flow as any).id : null;
         const base = activeId
             ? routing.generate('aaxis_ontology_flow_editor', {id: activeId})
             : routing.generate('aaxis_ontology_flow_editor');
@@ -1795,7 +1913,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 const matches = (kind: 'flow' | 'subflow'): FlowRecord[] => {
                     const query = String($filter.val() || '').trim().toLowerCase();
                     return rows.filter(f => f.type === kind
-                        && (query === '' || (f.name || '').toLowerCase().indexOf(query) >= 0));
+                        && (query === '' || (f.name || '').toLowerCase().includes(query)));
                 };
                 const render = (): void => {
                     $tabs.empty();
@@ -1830,13 +1948,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                         }
                         $row.on('click', () => {
                             dialog.close();
-                            const already = this.tabs.findIndex(t => t.flow !== null && t.flow.id === flow.id);
-                            if (already >= 0) {
-                                this.switchTab(already);
-                                return;
-                            }
-                            this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
-                            this.switchTab(this.tabs.length - 1);
+                            this.openFlowInTab(flow);
                         });
                         $list.append($row);
                     });
@@ -1851,6 +1963,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
             });
     }
 
+    /** Focuses the tab already showing `flow`, or opens it in a new one. */
+    private openFlowInTab(flow: FlowRecord): void {
+        const already = this.tabs.findIndex(t => t.flow !== null && t.flow.id === flow.id);
+        if (already >= 0) {
+            this.switchTab(already);
+            return;
+        }
+        this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
+        this.switchTab(this.tabs.length - 1);
+    }
+
     /** The full canvas state persisted alongside the logical steps. */
     private currentDesign(): any {
         // NOTE: the toolbox is deliberately NOT part of the design — its position/visibility are
@@ -1862,7 +1985,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 id: s.id, type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null,
                 // Anchor sides travel only when the user changed them (defaults stay implicit).
                 ...(s.inSide ? {inSide: s.inSide} : {}),
-                ...(s.outSides && s.outSides.some(v => Boolean(v)) ? {outSides: s.outSides} : {})
+                ...(s.outSides?.some(Boolean) ? {outSides: s.outSides} : {})
             })),
             links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
             start: this.startId
@@ -1896,7 +2019,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * never "corrupted".
      */
     private sanitizeAnchors(step: any): {inSide?: AnchorSide; outSides?: AnchorSide[]} | undefined {
-        const isSide = (v: any): v is AnchorSide => ANCHOR_SIDES.indexOf(v) >= 0;
+        const isSide = (v: any): v is AnchorSide => ANCHOR_SIDES.includes(v);
         const inSide = isSide(step.inSide) ? step.inSide : undefined;
         let outSides: AnchorSide[] | undefined;
         if (Array.isArray(step.outSides) && step.outSides.length <= portCount(step.type)
@@ -1906,7 +2029,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         // Resolve every anchor (stored or default) and require distinct sides.
         const resolved: string[] = [];
-        const isTrigger = this.stepMeta[step.type] && this.stepMeta[step.type].category === 'trigger';
+        const isTrigger = this.stepMeta[step.type]?.category === 'trigger';
         if (!isTrigger) {
             resolved.push(inSide || 'west');
         }
@@ -1965,7 +2088,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         // Optional sub-flow entry marker: must reference an existing non-trigger step with no
         // incoming link, and can only exist while the design holds no trigger at all.
-        const start = design.start === undefined || design.start === null ? null : design.start;
+        const start = design.start ?? null;
         if (start !== null && (typeof start !== 'string' || !byId[start]
             || usedInputs.has(start)
             || design.steps.some((s: any) => this.stepMeta[s.type].category === 'trigger'))
@@ -2027,8 +2150,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const meta = this.stepMeta[type];
         const el = document.createElement('div');
         el.className = 'aaxis-flow-editor__step';
-        el.setAttribute('data-role', 'step');
-        el.setAttribute('data-step-type', type);
+        el.dataset.role = 'step';
+        el.dataset.stepType = type;
         el.title = `${name} (${meta.label})`;
         el.style.width = `${this.tileSize}px`;
         el.style.height = `${this.tileSize}px`;
@@ -2048,11 +2171,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const ports = portCount(type);
         for (let p = 0; p < ports; p++) {
             const port = document.createElement('span');
-            port.className = 'aaxis-flow-editor__port'
-                + (ports === 2 ? (p === 0 ? ' aaxis-flow-editor__port--a' : ' aaxis-flow-editor__port--b') : '');
-            port.setAttribute('data-role', 'port');
-            port.setAttribute('data-port', String(p));
+            port.className = 'aaxis-flow-editor__port';
+            port.dataset.role = 'port';
+            port.dataset.port = String(p);
             if (ports === 2) {
+                port.classList.add(p === 0 ? 'aaxis-flow-editor__port--a' : 'aaxis-flow-editor__port--b');
                 port.setAttribute('title', __(p === 0
                     ? 'aaxis.ontology.flow_editor.choice_port_matched'
                     : 'aaxis.ontology.flow_editor.choice_port_not_matched'));
@@ -2149,71 +2272,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         // Type-specific configuration blocks; each returns error() + merge() for the submit, and
         // optionally a `ready` promise while its catalog data (systems/connectors…) still loads.
-        const sections: {error: () => string; merge: (config: Record<string, any>) => Record<string, any>; ready?: Promise<any>}[] = [];
-        if (step.type === 'entity_read' || step.type === 'entity_write') {
-            $top.prop('hidden', false);
-            sections.push(this.entityIoSection(
-                step.type === 'entity_read' ? 'reader' : 'writer',
-                $top, $body, $panel[0], step.config || {}, $input, reposition
-            ));
-        } else if (step.type === 'invoke') {
-            $top.prop('hidden', false);
-            sections.push(this.httpRequestSection($top, $body, $panel[0], step.config || {}, $input, reposition));
-        } else if (step.type === 'sql_query') {
-            $top.prop('hidden', false);
-            sections.push(this.sqlQuerySection($top, $body, $panel[0], step.config || {}, $input));
-        } else if (step.type === 'sub_flow') {
-            $top.prop('hidden', false);
-            sections.push(this.subFlowSection($top, step.config || {}, $input));
-        } else if (step.type === 'foreach') {
-            $top.prop('hidden', false);
-            sections.push(this.foreachSection($top, step.config || {}, $input));
-        } else if (step.type.indexOf('file_') === 0) {
-            $top.prop('hidden', false);
-            sections.push(this.fileOpSection(step.type, $top, $body, $panel[0], step.config || {}, $input));
-        } else if (step.type === 'dwl_transform') {
-            $top.prop('hidden', false);
-            sections.push(this.dwlSection($top, $body, $panel[0], step.config || {}, $input));
-        } else if (step.type === 'choice') {
-            $top.prop('hidden', false);
-            sections.push(this.choiceSection($top, $body, $panel[0], step.config || {}, $input));
-        } else if (step.type === 'logger') {
-            $top.prop('hidden', false);
-            sections.push(this.loggerSection($top, $body, $panel[0], step.config || {}, $input));
-        } else if (step.type === 'event') {
-            $top.prop('hidden', false);
-            sections.push(this.eventSection($top, $body, $panel[0], step.config || {}, $input));
-        } else if (step.type === 'ms_teams') {
-            $top.prop('hidden', false);
-            sections.push(this.msTeamsSection($top, $body, step.config || {}, $input));
-        } else if (step.type === 'invoke_php') {
-            $top.prop('hidden', false);
-            sections.push(this.invokePhpSection($top, $body, $panel[0], step.config || {}, $input));
-        } else if (step.type === 'cron') {
-            // Schedule owns the first row too (Enabled | Name | Mode).
-            $top.prop('hidden', false);
-            sections.push(this.scheduleSection($top, $body, step.config || {}, $input));
-        } else if (step.type === 'endpoint') {
-            $top.prop('hidden', false);
-            sections.push(this.endpointSection($top, $body, step.config || {}, $input));
-        } else if (this.stepMeta[step.type].category === 'trigger') {
-            // Every trigger leads its first row with the Enabled switch — the one place the flow
-            // is turned on/off (the server derives flows.enabled from it) — then the name.
-            const enabled = this.enabledSwitch(step.config || {});
-            $top.prop('hidden', false);
-            $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
-                enabled.$col,
-                this.settingsCol('step_name_label', $input, 2)
-            ));
-            sections.push({error: () => '', merge: enabled.merge});
-            if (step.type === 'entity_change') {
-                sections.push(this.systemEntitySection($body, step.config || {}));
-            }
-        } else {
+        // Name-only types have none: their name input goes into the body instead of the first row.
+        const typed = this.stepSettingsSections(step, $top, $body, $panel[0], $input, reposition);
+        const sections = typed ?? [];
+        if (typed === null) {
             $body.append(
                 $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __('aaxis.ontology.flow_editor.step_name_label')}),
                 $input
             );
+        } else {
+            $top.prop('hidden', false);
         }
         $columns.append($body, $side);
         $panel.append($top, $columns, $error);
@@ -2265,34 +2333,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (loading) {
                 return;
             }
-            $error.text('');
-            const name = String($input.val() || '').trim();
-            if (name === '') {
-                $error.text(__('aaxis.ontology.flow_editor.step_name_required'));
-                return;
+            const error = this.applyStepSettings(step, String($input.val() || ''), sections);
+            $error.text(error);
+            if (error === '') {
+                close();
             }
-            if (this.nameTaken(name, step)) {
-                $error.text(__('aaxis.ontology.flow_editor.step_name_exists'));
-                return;
-            }
-            // Section problems (missing/incomplete fields) do NOT block the confirm anymore:
-            // the config is stored as-is, the TILE turns red and the flow cannot run until fixed
-            // (the server re-checks the same rules on every run attempt). Only structural name
-            // problems above still block.
-            let sectionError = '';
-            for (const section of sections) {
-                const message = section.error();
-                if (message !== '') {
-                    sectionError = message;
-                    break;
-                }
-            }
-            const config = sections.reduce((acc, section) => section.merge(acc), {} as Record<string, any>);
-            step.config = Object.keys(config).length ? config : null;
-            this.renameStep(step, name);
-            this.markStepInvalid(step, sectionError !== '');
-            this.syncDirty();
-            close();
         };
 
         $cancel.on('click', close);
@@ -2308,6 +2353,92 @@ class OntologyFlowEditorComponent extends BaseComponent {
             e.preventDefault();
             e.stopPropagation();
         });
+    }
+
+    /**
+     * A settings popup's Confirm: validates the name — the only problems that block — and stores
+     * the sections' merged config. Returns the error to show, '' once applied.
+     */
+    private applyStepSettings(step: PlacedStep, rawName: string, sections: SettingsSection[]): string {
+        const name = rawName.trim();
+        if (name === '') {
+            return __('aaxis.ontology.flow_editor.step_name_required');
+        }
+        if (this.nameTaken(name, step)) {
+            return __('aaxis.ontology.flow_editor.step_name_exists');
+        }
+        // Section problems (missing/incomplete fields) do NOT block the confirm anymore: the
+        // config is stored as-is, the TILE turns red and the flow cannot run until fixed (the
+        // server re-checks the same rules on every run attempt).
+        const incomplete = sections.some(section => section.error() !== '');
+        const config = sections.reduce((acc, section) => section.merge(acc), {} as Record<string, any>);
+        step.config = Object.keys(config).length ? config : null;
+        this.renameStep(step, name);
+        this.markStepInvalid(step, incomplete);
+        this.syncDirty();
+        return '';
+    }
+
+    /**
+     * The type-specific blocks of a step's settings popup: they fill `$top` (the full-width first
+     * rows, the name input included) and `$body`. Null for the name-only types.
+     */
+    private stepSettingsSections(step: PlacedStep, $top: any, $body: any, panel: HTMLElement, $input: any, reposition: () => void): SettingsSection[] | null {
+        const initial = step.config || {};
+        switch (step.type) {
+            case 'entity_read':
+            case 'entity_write':
+                return [this.entityIoSection(step.type === 'entity_read' ? 'reader' : 'writer', $top, $body, panel, initial, $input, reposition)];
+            case 'invoke':
+                return [this.httpRequestSection($top, $body, panel, initial, $input, reposition)];
+            case 'sql_query':
+                return [this.sqlQuerySection($top, $body, panel, initial, $input)];
+            case 'sub_flow':
+                return [this.subFlowSection($top, initial, $input)];
+            case 'foreach':
+                return [this.foreachSection($top, initial, $input)];
+            case 'dwl_transform':
+                return [this.dwlSection($top, $body, panel, initial, $input)];
+            case 'choice':
+                return [this.choiceSection($top, $body, panel, initial, $input)];
+            case 'logger':
+                return [this.loggerSection($top, $body, panel, initial, $input)];
+            case 'event':
+                return [this.eventSection($top, $body, panel, initial, $input)];
+            case 'ms_teams':
+                return [this.msTeamsSection($top, $body, initial, $input)];
+            case 'invoke_php':
+                return [this.invokePhpSection($top, $body, panel, initial, $input)];
+            case 'cron':
+                // Schedule owns the first row too (Enabled | Name | Mode).
+                return [this.scheduleSection($top, $body, initial, $input)];
+            case 'endpoint':
+                return [this.endpointSection($top, $body, initial, $input)];
+            default:
+                return this.fallbackSettingsSections(step, $top, $body, panel, initial, $input);
+        }
+    }
+
+    /** Settings of the types without a dedicated case: file operations, the other triggers, name-only steps (null). */
+    private fallbackSettingsSections(step: PlacedStep, $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $input: any): SettingsSection[] | null {
+        if (step.type.startsWith('file_')) {
+            return [this.fileOpSection(step.type, $top, $body, panel, initial, $input)];
+        }
+        if (this.stepMeta[step.type].category !== 'trigger') {
+            return null;
+        }
+        // Every trigger leads its first row with the Enabled switch — the one place the flow is
+        // turned on/off (the server derives flows.enabled from it) — then the name.
+        const enabled = this.enabledSwitch(initial);
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            enabled.$col,
+            this.settingsCol('step_name_label', $input, 2)
+        ));
+        const sections: SettingsSection[] = [{error: () => '', merge: enabled.merge}];
+        if (step.type === 'entity_change') {
+            sections.push(this.systemEntitySection($body, initial));
+        }
+        return sections;
     }
 
     // --- Step settings: per-type configuration sections ---------------------------------
@@ -2388,7 +2519,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 idByName = {};
                 const names: string[] = [];
                 (data.records || [])
-                    .filter(f => f.type === 'subflow' && (!this.flow || f.id !== this.flow.id))
+                    .filter(f => f.type === 'subflow' && f.id !== this.flow?.id)
                     .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
                     .forEach(f => {
                         const name = f.name || String(f.id);
@@ -2403,7 +2534,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
             });
 
-        const RESERVED = ['index', 'flowuuid', 'flow-uuid', 'choiceresults'];
+        const RESERVED = new Set(['index', 'flowuuid', 'flow-uuid', 'choiceresults']);
         return {
             error: () => {
                 if (combo.value() === '' || idByName[combo.value()] === undefined) {
@@ -2416,7 +2547,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (item === '') {
                     return __('aaxis.ontology.flow_editor.foreach_item_required');
                 }
-                if (RESERVED.includes(item.toLowerCase())) {
+                if (RESERVED.has(item.toLowerCase())) {
                     return __('aaxis.ontology.flow_editor.foreach_item_reserved', {name: item});
                 }
                 return '';
@@ -2450,7 +2581,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const renderList = (): void => {
             const query = String($filter.val() || '').trim().toLowerCase();
             $list.empty();
-            const matches = options.filter(o => query === '' || o.toLowerCase().indexOf(query) >= 0);
+            const matches = options.filter(o => query === '' || o.toLowerCase().includes(query));
             if (!matches.length) {
                 $list.append($('<div/>', {'class': 'aaxis-flow-editor__combo-empty', text: __('aaxis.ontology.flow_editor.combo_no_match')}));
             }
@@ -2763,16 +2894,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
             html: __('aaxis.ontology.flow_editor.endpoint_hint')
         }));
 
-        const RESERVED = ['body', 'headers', 'queryparams', 'oauthapplication', 'flowuuid', 'flow-uuid', 'choiceresults', 'payload'];
+        const RESERVED = new Set(['body', 'headers', 'queryparams', 'oauthapplication', 'flowuuid', 'flow-uuid', 'choiceresults', 'payload']);
         const pathError = (): string => {
             const path = trimChar(String($path.val() || '').trim(), '/');
             if (path === '') {
                 return __('aaxis.ontology.flow_editor.endpoint_path_required');
             }
             for (const segment of path.split('/')) {
-                const param = segment.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
+                const param = /^\{([a-zA-Z_]\w*)\}$/.exec(segment);
                 if (param) {
-                    if (RESERVED.includes(param[1].toLowerCase())) {
+                    if (RESERVED.has(param[1].toLowerCase())) {
                         return __('aaxis.ontology.flow_editor.endpoint_path_reserved', {name: param[1]});
                     }
                     continue;
@@ -2949,7 +3080,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 // What a reader can address: internal entities list their readable Oro fields here
                 // (all scalar columns when no attributes are configured); falls back to the
                 // configured attributes for older catalog payloads.
-                if (match.readerAttributes && match.readerAttributes.length) {
+                if (match.readerAttributes?.length) {
                     return match.readerAttributes.map(name => ({name: name}));
                 }
                 return match.attributes || [];
@@ -3427,7 +3558,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const renderList = (): void => {
             const query = String($filter.val() || '').trim().toLowerCase();
             $list.empty();
-            const matches = options.filter(o => query === '' || o.name.toLowerCase().indexOf(query) >= 0);
+            const matches = options.filter(o => query === '' || o.name.toLowerCase().includes(query));
             if (!matches.length) {
                 $list.append($('<div/>', {'class': 'aaxis-flow-editor__combo-empty', text: __('aaxis.ontology.flow_editor.subflow_none')}));
             }
@@ -3453,7 +3584,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if ($filter.is(':focus')) {
                 const typed = String($filter.val() || '');
                 const current = options.find(o => String(o.id) === selectedId);
-                if (!current || current.name !== typed) {
+                if (current?.name !== typed) {
                     selectedId = '';
                 }
                 renderList();
@@ -3472,7 +3603,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const ready = this.flowCatalog()
             .then((data: {records?: Array<{id: number; name: string | null; type: string}>}) => {
                 options = (data.records || [])
-                    .filter(f => f.type === 'subflow' && (!this.flow || f.id !== this.flow.id))
+                    .filter(f => f.type === 'subflow' && f.id !== this.flow?.id)
                     .map(f => ({id: f.id, name: f.name || String(f.id)}))
                     .sort((a, b) => a.name.localeCompare(b.name));
                 const current = options.find(o => String(o.id) === selectedId);
@@ -3517,7 +3648,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 const current = String(initial.connector || '');
                 $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
                 (data.records || [])
-                    .filter(c => ['file_system', 'sftp', 'bucket'].indexOf(c.type) >= 0)
+                    .filter(c => ['file_system', 'sftp', 'bucket'].includes(c.type))
                     .forEach(c => {
                         $connector.append($('<option/>', {
                             value: String(c.id),
@@ -3568,10 +3699,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (path.value().trim() === '') {
                     return __('aaxis.ontology.flow_editor.reader_path_required');
                 }
-                if (content && content.value().trim() === '') {
+                if (content?.value().trim() === '') {
                     return __('aaxis.ontology.flow_editor.writer_content_required');
                 }
-                if (newName && newName.value().trim() === '') {
+                if (newName?.value().trim() === '') {
                     return __('aaxis.ontology.flow_editor.file_new_name_required');
                 }
                 return this.destinationError($destination);
@@ -3609,7 +3740,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (value === '') {
             return __('aaxis.ontology.flow_editor.destination_required');
         }
-        if (['flowuuid', 'flow-uuid', 'choiceresults'].indexOf(value.toLowerCase()) >= 0) {
+        if (['flowuuid', 'flow-uuid', 'choiceresults'].includes(value.toLowerCase())) {
             return __('aaxis.ontology.flow_editor.destination_reserved');
         }
         return '';
@@ -3943,48 +4074,65 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const target = this.stepMeta[type].category === 'trigger'
             ? null
             : this.steps.find(s => px >= s.x && px <= s.x + this.tileSize && py >= s.y && py <= s.y + this.tileSize) || null;
-        const freePort = target === null
-            ? -1
-            : [...new Array(portCount(target.type)).keys()]
-                .find(p => !this.links.some(l => l.from === target.id && l.fromPort === p)) ?? -1;
-
-        let added: PlacedStep;
-        if (target !== null && freePort >= 0) {
-            const side = this.outSideOf(target, freePort);
-            const v = SIDE_VECTOR[side];
-            const stepGap = 2 * this.tileSize; // one tile + one tile-wide gap, same as Align
-            const occupied = new Set(this.steps.map(s => `${s.x},${s.y}`));
-            let pos = this.place(target.x + v.dx * stepGap, target.y + v.dy * stepGap);
-            let dx = v.dx;
-            let dy = v.dy;
-            let guard = 0;
-            while (occupied.has(`${pos.x},${pos.y}`) && guard++ < 128) {
-                const next = this.place(pos.x + dx * stepGap, pos.y + dy * stepGap);
-                if (next.x === pos.x && next.y === pos.y) {
-                    // Clamped into a canvas wall: scan east from here on (same rule as Align).
-                    dx = 1;
-                    dy = 0;
-                    pos = this.place(pos.x + stepGap, pos.y);
-                } else {
-                    pos = next;
-                }
-            }
-            // Face the parent: the input lands on the side the line arrives from — unless that
-            // side is the fresh tile's own default flow-out (east; choice also south).
-            const desiredIn = OPPOSITE_SIDE[side];
-            const defaultOuts: AnchorSide[] = type === 'choice' ? ['east', 'south'] : ['east'];
-            const anchors = desiredIn !== 'west' && !defaultOuts.includes(desiredIn) ? {inSide: desiredIn} : undefined;
-            added = this.addStep(type, pos.x, pos.y, undefined, undefined, undefined, anchors);
-            this.links.push({from: target.id, fromPort: freePort, to: added.id});
-            this.redrawLinks();
-        } else {
-            added = this.addStep(type, x, y);
-        }
+        const freePort = target === null ? -1 : this.firstFreePort(target);
+        const added = target !== null && freePort >= 0
+            ? this.addChainedStep(type, target, freePort)
+            : this.addStep(type, x, y);
 
         if (REQUIRES_CONFIG.has(type)) {
             this.markStepInvalid(added, true);
         }
         this.syncDirty();
+    }
+
+    /** The first output port of `step` that drives no link yet (-1 = all taken). */
+    private firstFreePort(step: PlacedStep): number {
+        return [...new Array(portCount(step.type)).keys()]
+            .find(p => !this.links.some(l => l.from === step.id && l.fromPort === p)) ?? -1;
+    }
+
+    /**
+     * Adds a `type` step as `parent`'s next one on `port`: one Align-gap along that port's
+     * flow-out side (the next free spot), facing its parent, and linked right away.
+     */
+    private addChainedStep(type: string, parent: PlacedStep, port: number): PlacedStep {
+        const side = this.outSideOf(parent, port);
+        const v = SIDE_VECTOR[side];
+        const stepGap = 2 * this.tileSize; // one tile + one tile-wide gap, same as Align
+        const occupied = new Set(this.steps.map(s => `${s.x},${s.y}`));
+        const pos = this.freeSpot(parent.x + v.dx * stepGap, parent.y + v.dy * stepGap, v, occupied);
+        // Face the parent: the input lands on the side the line arrives from — unless that side
+        // is the fresh tile's own default flow-out (east; choice also south).
+        const desiredIn = OPPOSITE_SIDE[side];
+        const defaultOuts: AnchorSide[] = type === 'choice' ? ['east', 'south'] : ['east'];
+        const anchors = desiredIn !== 'west' && !defaultOuts.includes(desiredIn) ? {inSide: desiredIn} : undefined;
+        const added = this.addStep(type, pos.x, pos.y, undefined, undefined, undefined, anchors);
+        this.links.push({from: parent.id, fromPort: port, to: added.id});
+        this.redrawLinks();
+        return added;
+    }
+
+    /**
+     * The first snapped spot from (x, y) that is not `occupied`, advancing one Align-gap at a time
+     * along `direction`. A spot clamped into a canvas wall (west/north at the edge) switches
+     * PERMANENTLY to east scanning — flipping back would ping-pong against the wall forever.
+     */
+    private freeSpot(x: number, y: number, direction: {dx: number; dy: number}, occupied: Set<string>): {x: number; y: number} {
+        const stepGap = 2 * this.tileSize;
+        let {dx, dy} = direction;
+        let pos = this.place(x, y);
+        let guard = 0;
+        while (occupied.has(`${pos.x},${pos.y}`) && guard++ < 128) {
+            const next = this.place(pos.x + dx * stepGap, pos.y + dy * stepGap);
+            if (next.x === pos.x && next.y === pos.y) {
+                dx = 1;
+                dy = 0;
+                pos = this.place(pos.x + stepGap, pos.y);
+            } else {
+                pos = next;
+            }
+        }
+        return pos;
     }
 
     /** Any unsaved work in ANY open tab (the active one asks the live canvas) — except while
@@ -4020,7 +4168,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     private startLinkDrag(e: PointerEvent, from: PlacedStep, fromPort: number): void {
         const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('data-role', 'wire-temp');
+        path.dataset.role = 'wire-temp';
         this.brandTempWire(path, from, fromPort);
         this.wires.appendChild(path);
         this.linkDrag = {pointerId: e.pointerId, from, fromPort, path, target: null, editing: null};
@@ -4044,7 +4192,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.redrawLinks();
 
         const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('data-role', 'wire-temp');
+        path.dataset.role = 'wire-temp';
         this.brandTempWire(path, from, link.fromPort);
         this.wires.appendChild(path);
         this.linkDrag = {
@@ -4090,43 +4238,48 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
 
         const over = this.stepAt(e.clientX, e.clientY);
-
         if (editing !== null) {
-            // Dropped back on the element the line STARTS from → delete it (the line is already out
-            // of `links`; leaving it out is the deletion).
-            if (over && over.id === editing.from) {
-                this.redrawLinks();
-                this.syncDirty();
-                return;
-            }
-            // Dropped where it already pointed → the line stays, but the RELEASE POINT may move
-            // the target's flow-in anchor: dropping the arrow head on another side of the same
-            // tile is the drag way of choosing where lines arrive.
-            if (over && over.id === editing.to) {
-                this.links.push(editing);
-                this.dropAnchor(over, 'in', e);
-                this.redrawLinks();
-                return;
-            }
-            // Background, or an element that can't take the line → no change.
-            const error = over ? this.linkTargetError(from, over) : null;
-            if (!over || error === null || error !== '') {
-                if (error) {
-                    messenger.notificationFlashMessage('warning', error);
-                }
-                this.links.push(editing);
-                this.redrawLinks();
-                return;
-            }
-            this.links.push({from: editing.from, fromPort: editing.fromPort, to: over.id});
+            this.dropRelink(editing, from, over, e);
+        } else if (over) {
+            this.dropNewLink(from, fromPort, over, e);
+        }
+    }
+
+    /** Releases a re-routed link's arrow head (the link is out of `links` while dragged). */
+    private dropRelink(editing: FlowLink, from: PlacedStep, over: PlacedStep | null, e: PointerEvent): void {
+        // Dropped back on the element the line STARTS from → delete it (the line is already out
+        // of `links`; leaving it out is the deletion).
+        if (over?.id === editing.from) {
             this.redrawLinks();
             this.syncDirty();
             return;
         }
-
-        if (!over) {
+        // Dropped where it already pointed → the line stays, but the RELEASE POINT may move the
+        // target's flow-in anchor: dropping the arrow head on another side of the same tile is
+        // the drag way of choosing where lines arrive.
+        if (over?.id === editing.to) {
+            this.links.push(editing);
+            this.dropAnchor(over, 'in', e);
+            this.redrawLinks();
             return;
         }
+        // Background, or an element that can't take the line → no change.
+        const error = over ? this.linkTargetError(from, over) : null;
+        if (!over || error !== '') {
+            if (error) {
+                messenger.notificationFlashMessage('warning', error);
+            }
+            this.links.push(editing);
+            this.redrawLinks();
+            return;
+        }
+        this.links.push({from: editing.from, fromPort: editing.fromPort, to: over.id});
+        this.redrawLinks();
+        this.syncDirty();
+    }
+
+    /** Releases a wire dragged out of `from`'s output port over the step `over`. */
+    private dropNewLink(from: PlacedStep, fromPort: number, over: PlacedStep, e: PointerEvent): void {
         // Released on its OWN tile: not a link — the gesture moves this port's flow-out anchor
         // (flow-true/flow-false on a choice) to the side nearest the release point.
         if (over === from) {
@@ -4134,11 +4287,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return;
         }
         const error = this.linkTargetError(from, over);
-        if (error === null) {
-            return;
-        }
         if (error !== '') {
-            messenger.notificationFlashMessage('warning', error);
+            if (error) {
+                messenger.notificationFlashMessage('warning', error);
+            }
             return;
         }
 
@@ -4293,7 +4445,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /** Shared context-menu shell: `populate` adds the items, the shell handles placement/closing. */
-    private showMenuAt(e: PointerEvent, populate: (addItem: (label: string, icon: string, action: () => void, opts?: {disabled?: boolean; active?: boolean}) => void, addSubmenu?: (label: string, icon: string, children: Array<{label: string; icon: string; action: () => void; disabled?: boolean; active?: boolean}>) => void) => void): void {
+    private showMenuAt(e: PointerEvent, populate: (addItem: MenuAddItem, addSubmenu: MenuAddSubmenu) => void): void {
         this.closeContextMenu();
         const menu = document.createElement('div');
         menu.className = 'aaxis-flow-editor__menu';
@@ -4320,7 +4472,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         };
         // A nested submenu revealed on HOVER (pure CSS): the parent row carries a ▸ marker and the
         // child list opens flush to its right edge.
-        const addSubmenu = (label: string, icon: string, children: Array<{label: string; icon: string; action: () => void; disabled?: boolean; active?: boolean}>): void => {
+        const addSubmenu = (label: string, icon: string, children: MenuChild[]): void => {
             const wrap = document.createElement('div');
             wrap.className = 'aaxis-flow-editor__menu-sub';
             const parent = document.createElement('button');
@@ -4361,78 +4513,105 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         this.showMenuAt(e, (addItem, addSubmenu) => {
             addItem(__('aaxis.ontology.flow_editor.menu_remove'), 'fa-trash-o', () => this.removeSelection());
-            if (ordered.length > 1) {
-                addItem(__('aaxis.ontology.flow_editor.menu_align'), 'fa-arrows-h', () => this.alignSelection());
-                if (this.canConnectSelection(ordered)) {
-                    addItem(__('aaxis.ontology.flow_editor.menu_connect'), 'fa-link', () => this.connectSelection());
-                }
-            } else if (this.startId === step.id) {
-                addItem(__('aaxis.ontology.flow_editor.menu_remove_start'), 'fa-play', () => this.setStart(null));
-            } else if (!this.findTrigger() && !this.links.some(l => l.to === step.id)) {
-                // Sub-flow entry point: only offered while no trigger exists and nothing arrives here.
-                addItem(__('aaxis.ontology.flow_editor.menu_start_here'), 'fa-play', () => this.setStart(step.id));
+            this.addSelectionMenuItems(step, ordered, addItem);
+            if (ordered.length !== 1) {
+                return;
             }
-            if (ordered.length === 1 && (step.type === 'sub_flow' || step.type === 'foreach')) {
-                // Navigate to the configured subflow — shown only when it is set AND still a
-                // valid subflow in the catalog (sync copy; hidden until the catalog loaded).
-                const targetId = Number((step.config || {}).subflow || 0);
-                const record = targetId > 0 && this.catalogFlowRecords
-                    ? this.catalogFlowRecords.find(f => f.id === targetId && f.type === 'subflow')
-                    : undefined;
-                if (record) {
-                    addItem(__('aaxis.ontology.flow_editor.menu_navigate_subflow'), 'fa-external-link', () => {
-                        void this.ensureFlowTab(targetId).then(index => {
-                            if (index !== null) {
-                                this.switchTab(index);
-                            }
-                        });
-                    });
-                }
+            this.addNavigateSubflowItem(step, addItem);
+            if (step.type === 'subflow') {
+                this.addCalledBySubmenu(addSubmenu);
             }
-            if (ordered.length === 1 && step.type === 'subflow' && addSubmenu) {
-                // "Called by": every flow whose sub_flow/foreach steps point at THIS subflow —
-                // one child per caller, navigating like "Navigate to subflow" does. Computed from
-                // the sync catalog copy (fetched at editor load); an unsaved subflow has no id
-                // and therefore no callers.
-                const selfId = this.flow ? Number((this.flow as any).id || 0) : 0;
-                const callers = selfId > 0 && this.catalogFlowRecords
-                    ? this.catalogFlowRecords
-                        .filter(f => f.id !== selfId && (((f as any).steps || []) as any[]).some(st =>
-                            st && (st.type === 'sub_flow' || st.type === 'foreach')
-                            && Number(((st.config || {}) as any).subflow || 0) === selfId))
-                        .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-                    : [];
-                addSubmenu(__('aaxis.ontology.flow_editor.menu_called_by'), 'fa-sitemap', callers.length
-                    ? callers.map(f => ({
-                        label: f.name || String(f.id),
-                        icon: 'fa-external-link',
-                        action: () => {
-                            void this.ensureFlowTab(f.id).then(index => {
-                                if (index !== null) {
-                                    this.switchTab(index);
-                                }
-                            });
-                        }
-                    }))
-                    : [{
-                        label: __('aaxis.ontology.flow_editor.menu_called_by_none'),
-                        icon: 'fa-ban',
-                        action: () => undefined,
-                        disabled: true
-                    }]);
+            this.addAnchorSubmenus(step, addSubmenu);
+        });
+    }
+
+    /** Align / Connect for a multi-selection; otherwise the sub-flow "Start here" marker toggles. */
+    private addSelectionMenuItems(step: PlacedStep, ordered: PlacedStep[], addItem: MenuAddItem): void {
+        if (ordered.length > 1) {
+            addItem(__('aaxis.ontology.flow_editor.menu_align'), 'fa-arrows-h', () => this.alignSelection());
+            if (this.canConnectSelection(ordered)) {
+                addItem(__('aaxis.ontology.flow_editor.menu_connect'), 'fa-link', () => this.connectSelection());
             }
-            if (ordered.length === 1 && addSubmenu) {
-                // Anchor sides: where flow lines arrive (flow-in) and leave (flow-out; a choice
-                // names its two outputs flow-true/flow-false). Hover reveals the side picker.
-                if (this.stepMeta[step.type].category !== 'trigger') {
-                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_in'), 'fa-sign-in', this.anchorSideChildren(step, 'in'));
-                }
-                if (step.type === 'choice') {
-                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_true'), 'fa-sign-out', this.anchorSideChildren(step, 0));
-                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_false'), 'fa-sign-out', this.anchorSideChildren(step, 1));
-                } else {
-                    addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_out'), 'fa-sign-out', this.anchorSideChildren(step, 0));
-                }
+        } else if (this.startId === step.id) {
+            addItem(__('aaxis.ontology.flow_editor.menu_remove_start'), 'fa-play', () => this.setStart(null));
+        } else if (!this.findTrigger() && !this.links.some(l => l.to === step.id)) {
+            // Sub-flow entry point: only offered while no trigger exists and nothing arrives here.
+            addItem(__('aaxis.ontology.flow_editor.menu_start_here'), 'fa-play', () => this.setStart(step.id));
+        }
+    }
+
+    /**
+     * "Navigate to subflow" on a Call Subflow / Foreach tile — shown only when its target is set
+     * AND still a valid subflow in the catalog (sync copy; hidden until the catalog loaded).
+     */
+    private addNavigateSubflowItem(step: PlacedStep, addItem: MenuAddItem): void {
+        if (step.type !== 'sub_flow' && step.type !== 'foreach') {
+            return;
+        }
+        const targetId = Number(step.config?.subflow || 0);
+        const record = targetId > 0
+            ? this.catalogFlowRecords?.find(f => f.id === targetId && f.type === 'subflow')
+            : undefined;
+        if (record) {
+            addItem(__('aaxis.ontology.flow_editor.menu_navigate_subflow'), 'fa-external-link', () => this.focusFlowTab(targetId));
+        }
+    }
+
+    /**
+     * "Called by" on a subflow trigger: one child per flow whose sub_flow/foreach steps point at
+     * THIS subflow, navigating like "Navigate to subflow" does.
+     */
+    private addCalledBySubmenu(addSubmenu: MenuAddSubmenu): void {
+        const callers = this.subflowCallers();
+        addSubmenu(__('aaxis.ontology.flow_editor.menu_called_by'), 'fa-sitemap', callers.length
+            ? callers.map(f => ({
+                label: f.name || String(f.id),
+                icon: 'fa-external-link',
+                action: () => this.focusFlowTab(f.id)
+            }))
+            : [{
+                label: __('aaxis.ontology.flow_editor.menu_called_by_none'),
+                icon: 'fa-ban',
+                action: () => undefined,
+                disabled: true
+            }]);
+    }
+
+    /**
+     * The catalog flows calling the flow being edited, name-sorted. Computed from the sync catalog
+     * copy (fetched at editor load); an unsaved subflow has no id and therefore no callers.
+     */
+    private subflowCallers(): FlowRecord[] {
+        const selfId = this.flow ? Number((this.flow as any).id || 0) : 0;
+        if (selfId <= 0 || !this.catalogFlowRecords) {
+            return [];
+        }
+        return this.catalogFlowRecords
+            .filter(f => f.id !== selfId && (((f as any).steps || []) as any[]).some(st => invokesSubflow(st, selfId)))
+            .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    }
+
+    /**
+     * Anchor sides: where flow lines arrive (flow-in; triggers accept none) and leave (flow-out; a
+     * choice names its two outputs flow-true/flow-false). Hover reveals the side picker.
+     */
+    private addAnchorSubmenus(step: PlacedStep, addSubmenu: MenuAddSubmenu): void {
+        if (this.stepMeta[step.type].category !== 'trigger') {
+            addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_in'), 'fa-sign-in', this.anchorSideChildren(step, 'in'));
+        }
+        if (step.type === 'choice') {
+            addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_true'), 'fa-sign-out', this.anchorSideChildren(step, 0));
+            addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_false'), 'fa-sign-out', this.anchorSideChildren(step, 1));
+        } else {
+            addSubmenu(__('aaxis.ontology.flow_editor.menu_flow_out'), 'fa-sign-out', this.anchorSideChildren(step, 0));
+        }
+    }
+
+    /** Opens (or focuses) the tab of a catalog flow — plain navigation. */
+    private focusFlowTab(flowId: number): void {
+        void this.ensureFlowTab(flowId).then(index => {
+            if (index !== null) {
+                this.switchTab(index);
             }
         });
     }
@@ -4442,7 +4621,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * the CURRENT one checked, sides used by the tile's OTHER anchors disabled — every anchor of
      * a tile keeps its own side.
      */
-    private anchorSideChildren(step: PlacedStep, kind: 'in' | number): Array<{label: string; icon: string; action: () => void; disabled?: boolean; active?: boolean}> {
+    private anchorSideChildren(step: PlacedStep, kind: 'in' | number): MenuChild[] {
         const current = kind === 'in' ? this.inSideOf(step) : this.outSideOf(step, kind);
         const used = this.usedAnchorSides(step, kind);
         const icons: Record<AnchorSide, string> = {north: 'fa-arrow-up', south: 'fa-arrow-down', west: 'fa-arrow-left', east: 'fa-arrow-right'};
@@ -4507,21 +4686,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const occupied = new Set<string>();
         /** Claims the first FREE snapped spot from (x, y) advancing along (dx, dy). */
         const claim = (step: PlacedStep, x: number, y: number, dx: number, dy: number): void => {
-            let pos = this.place(x, y);
-            let guard = 0;
-            while (occupied.has(`${pos.x},${pos.y}`) && guard++ < 128) {
-                const next = this.place(pos.x + dx * stepGap, pos.y + dy * stepGap);
-                if (next.x === pos.x && next.y === pos.y) {
-                    // Clamped into a wall (west/north at the canvas edge): switch PERMANENTLY to
-                    // east scanning — flipping back would ping-pong against the wall forever and
-                    // exhaust the guard on an occupied cell.
-                    dx = 1;
-                    dy = 0;
-                    pos = this.place(pos.x + stepGap, pos.y);
-                } else {
-                    pos = next;
-                }
-            }
+            const pos = this.freeSpot(x, y, {dx, dy}, occupied);
             occupied.add(`${pos.x},${pos.y}`);
             step.x = pos.x;
             step.y = pos.y;
@@ -4671,8 +4836,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         const $form = $('<div/>', {'class': 'aaxis-flow-editor__settings-body'});
         const pair = this.systemEntitySection($form, {
-            system: (trigger.config && trigger.config.system) || '',
-            entity: (trigger.config && trigger.config.entity) || ''
+            system: trigger.config?.system || '',
+            entity: trigger.config?.entity || ''
         }, true);
         const $payload = $('<textarea/>', {
             'class': 'form-control aaxis-flow-editor__settings-textarea',
@@ -4720,7 +4885,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     /** The flow's effective enabled state: the trigger step's `enabled` config flag (see server). */
     private flowEnabled(): boolean {
         const trigger = this.findTrigger();
-        return Boolean(trigger && trigger.config && trigger.config.enabled === true);
+        return trigger?.config?.enabled === true;
     }
 
     private syncDebugButtons(): void {
@@ -4732,7 +4897,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $buttons.prop('disabled', !enabled || invalid || this.debugSession !== null);
         $buttons.attr('title', invalid ? __('aaxis.ontology.flow_editor.invalid_steps_blocked') : null);
         // History compares against ARCHIVED revisions — meaningless until the flow is saved.
-        this.$el.find('[data-role="flow-history"]').prop('disabled', !(this.flow && this.flow.id));
+        this.$el.find('[data-role="flow-history"]').prop('disabled', !this.flow?.id);
     }
 
     // --- View source / Flow history --------------------------------------------------------
@@ -4742,7 +4907,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const trigger = this.findTrigger();
         return {
             id: this.flow ? this.flow.id : null,
-            name: (trigger && trigger.name) || (this.flow ? this.flow.name : null),
+            name: trigger?.name || (this.flow ? this.flow.name : null),
             type: this.flow ? this.flow.type : null,
             enabled: this.flowEnabled(),
             steps: this.steps.map(s => ({type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null})),
@@ -4759,7 +4924,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 $copy.text(__('aaxis.ontology.flow_editor.copied'));
                 window.setTimeout(() => $copy.text(__('aaxis.ontology.flow_editor.copy')), 1200);
             };
-            if (navigator.clipboard && navigator.clipboard.writeText) {
+            if (navigator.clipboard?.writeText) {
                 navigator.clipboard.writeText(text).then(done).catch(() => {});
             } else {
                 const $ta = $('<textarea/>').val(text).appendTo(document.body);
@@ -4797,7 +4962,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * prunes to what differs, exactly like the Data View's version dialog.
      */
     private openFlowHistory(): void {
-        if (!this.flow || !this.flow.id) {
+        if (!this.flow?.id) {
             return;
         }
         const dialog = new Dialog({
@@ -4876,7 +5041,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     /** Applies the server-computed list of invalid step NAMES (page load and every save). */
     private applyInvalidStepNames(names: string[]): void {
-        const set = new Set((names || []).map(n => String(n)));
+        const set = new Set((names || []).map(String));
         this.steps.forEach(s => this.markStepInvalid(s, set.has(s.name)));
     }
 
@@ -4981,15 +5146,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return;
         }
 
-        if (session.error !== null) {
-            ui.$status.text(` — ${__('aaxis.ontology.flow_editor.debug_failed')}: ${session.error}`).addClass('is-error');
-        } else if (session.busy) {
-            ui.$status.text(` — ${__('aaxis.ontology.flow_editor.debug_running')}`).removeClass('is-error');
-        } else if (session.done) {
-            ui.$status.text(` — ${__('aaxis.ontology.flow_editor.debug_finished')}`).removeClass('is-error');
-        } else {
-            ui.$status.text(session.statusLabel === '' ? '' : ` — ${session.statusLabel}`).removeClass('is-error');
-        }
+        ui.$status.text(this.debugStatusText(session)).toggleClass('is-error', session.error !== null);
 
         ui.$vars.empty();
         if (session.context === null) {
@@ -4999,70 +5156,76 @@ class OntologyFlowEditorComponent extends BaseComponent {
             ui.$vars.append(renderVariablesList(session.context));
         }
 
-        const canEvaluate = session.context !== null && !session.busy;
-        ui.$evalRun.prop('disabled', !canEvaluate);
+        ui.$evalRun.prop('disabled', !this.canEvaluateDebug());
+        this.renderDebugActions(session, ui.$actions);
+    }
 
-        ui.$actions.empty();
-        // VSCode-style debugger controls: uniform SQUARES, centered SVG glyph, label only in the
-        // tooltip (title + aria-label). stop = discard/close (red), continue = run all,
-        // arc-over-dot = next step (step over), arrow-into-dot = step into, arrow-out = step out.
-        const iconButton = (labelKey: string, icon: string, disabled: boolean): any => {
-            const label = __('aaxis.ontology.flow_editor.' + labelKey);
-            return $('<button/>', {
-                type: 'button',
-                'class': 'aaxis-flow-editor__debug-btn' + (icon === 'stop' ? ' aaxis-flow-editor__debug-btn--stop' : ''),
-                title: label,
-                'aria-label': label,
-                disabled
-            }).append($(DEBUG_ICONS[icon]));
-        };
+    /** The status after the sidebar's mode title: failure, running, finished or the current step. */
+    private debugStatusText(session: NonNullable<typeof this.debugSession>): string {
+        if (session.error !== null) {
+            return ` — ${__('aaxis.ontology.flow_editor.debug_failed')}: ${session.error}`;
+        }
+        if (session.busy) {
+            return ` — ${__('aaxis.ontology.flow_editor.debug_running')}`;
+        }
+        if (session.done) {
+            return ` — ${__('aaxis.ontology.flow_editor.debug_finished')}`;
+        }
+        return session.statusLabel === '' ? '' : ` — ${session.statusLabel}`;
+    }
+
+    /** The sidebar's DWL evaluator runs against a settled context only. */
+    private canEvaluateDebug(): boolean {
+        const session = this.debugSession;
+        if (session === null) {
+            return false;
+        }
+        return session.context !== null && !session.busy;
+    }
+
+    /**
+     * The sidebar's action buttons. Run Now only has the stop button; Debug shows ALL FIVE in
+     * FIXED positions (VSCode order: continue, step over, step into, step out, stop) —
+     * availability is enable/disable only, never show/hide, so a button can never shift under
+     * the cursor between clicks. A finished session counting down to its auto-dismiss adds the
+     * countdown bar and disables every button.
+     */
+    private renderDebugActions(session: NonNullable<typeof this.debugSession>, $actions: any): void {
+        $actions.empty();
         const finished = session.done || session.error !== null;
         const autoClosing = session.autoClose !== null;
-        const autoCloseBar = (): any => {
-            const remaining = session.autoClose ? Math.max(0, session.autoClose.deadline - Date.now()) : 0;
-            const width = session.autoClose ? (remaining / session.autoClose.duration) * 100 : 0;
-            return $('<div/>', {'class': 'aaxis-flow-editor__debug-autoclose'}).append(
-                $('<div/>', {'class': 'aaxis-flow-editor__debug-autoclose-bar', 'data-role': 'debug-autoclose-bar'})
-                    .css('width', `${width}%`)
-            );
-        };
-        if (session.mode !== 'step') {
-            const $stop = iconButton(finished ? 'close' : 'cancel', 'stop', autoClosing);
-            $stop.on('click', () => this.closeDebugSession());
-            ui.$actions.append($stop);
-            if (autoClosing) {
-                ui.$actions.append(autoCloseBar());
-            }
-            return;
+        if (session.mode === 'step') {
+            $actions.append(...this.debugStepButtons(session, !session.busy && !finished && !autoClosing));
         }
-        // ALL FIVE buttons stay visible in FIXED positions (VSCode order: continue, step over,
-        // step into, step out, stop) — availability is enable/disable only, never show/hide,
-        // so a button can never shift under the cursor between clicks.
-        const stepping = !session.busy && !finished && !autoClosing;
+        const $stop = debugIconButton(finished ? 'close' : 'cancel', 'stop', autoClosing);
+        $stop.on('click', () => this.closeDebugSession());
+        $actions.append($stop);
+        if (session.autoClose !== null) {
+            $actions.append(debugAutoCloseBar(session.autoClose));
+        }
+    }
+
+    /** Run all / Next step (step over) / Step into / Step out, in that order. */
+    private debugStepButtons(session: NonNullable<typeof this.debugSession>, stepping: boolean): any[] {
         // Step into applies only when the NEXT step invokes a subflow (Next step then steps
         // OVER it: the invoker runs atomically); Step out only inside a subflow frame.
         const nextIsInvoker = session.next !== null && (session.next.type === 'sub_flow' || session.next.type === 'foreach');
-        const $runAll = iconButton('debug_run_all', 'continue', !stepping);
-        const $next = iconButton('debug_next_step', 'over', !stepping);
-        const $into = iconButton('debug_step_into', 'into', !stepping || !nextIsInvoker);
-        const $out = iconButton('debug_step_out', 'out', !stepping || session.depth === 0);
-        const $stop = iconButton(finished ? 'close' : 'cancel', 'stop', autoClosing);
+        const buttons = {
+            runAll: debugIconButton('debug_run_all', 'continue', !stepping),
+            next: debugIconButton('debug_next_step', 'over', !stepping),
+            into: debugIconButton('debug_step_into', 'into', !stepping || !nextIsInvoker),
+            out: debugIconButton('debug_step_out', 'out', !stepping || session.depth === 0)
+        };
         // The button that started the in-flight request swaps its glyph for a spinner.
         if (session.busy) {
-            const $target = session.busyAction === 'runAll'
-                ? $runAll
-                : (session.busyAction === 'into' ? $into : (session.busyAction === 'out' ? $out : $next));
-            $target.empty().append($('<span/>', {'class': 'fa fa-spinner fa-spin', 'aria-hidden': 'true'}));
+            buttons[spinnerButtonOf(session.busyAction)].empty()
+                .append($('<span/>', {'class': 'fa fa-spinner fa-spin', 'aria-hidden': 'true'}));
         }
-        $runAll.on('click', () => this.debugAdvance(true, false));
-        $next.on('click', () => this.debugAdvance(false, false));
-        $into.on('click', () => this.debugAdvance(false, true));
-        $out.on('click', () => this.debugAdvance(false, false, true));
-        $stop.on('click', () => this.closeDebugSession());
-        ui.$actions.append($runAll, $next, $into, $out, $stop);
-        if (autoClosing) {
-            ui.$actions.append(autoCloseBar());
-        }
+        buttons.runAll.on('click', () => this.debugAdvance(true, false));
+        buttons.next.on('click', () => this.debugAdvance(false, false));
+        buttons.into.on('click', () => this.debugAdvance(false, true));
+        buttons.out.on('click', () => this.debugAdvance(false, false, true));
+        return [buttons.runAll, buttons.next, buttons.into, buttons.out];
     }
 
     /**
@@ -5079,12 +5242,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return;
         }
         session.busy = true;
-        session.busyAction = runAll ? 'runAll' : (stepOut ? 'out' : (stepInto ? 'into' : 'next'));
+        session.busyAction = debugBusyAction(runAll, stepInto, stepOut);
         session.error = null;
         this.updateDebugger();
 
         apiFetch(routing.generate('aaxis_ontology_flow_debug_step'), 'POST', {
-            flowId: this.flow && this.flow.id ? this.flow.id : null,
+            flowId: this.flow?.id || null,
             steps: session.steps,
             links: session.links,
             input: session.input,
@@ -5097,17 +5260,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (this.debugSession !== session) {
                 return; // the session was cancelled while the request ran
             }
-            if (!res.ok || !res.data || !res.data.success) {
+            if (!res.ok || !res.data?.success) {
                 // A failed step paints the canvas too: everything that ran stays amber, the
                 // failing tile turns red (the sidebar shows the error text).
-                this.markExecutedDebugSteps((res.data && res.data.executedIds) || []);
-                if (res.data && res.data.failedStepId) {
+                this.markExecutedDebugSteps(res.data?.executedIds || []);
+                if (res.data?.failedStepId) {
                     this.markFailedDebugStep(String(res.data.failedStepId));
                 }
-                if (res.data && (res.data.subflowTrails || []).length) {
+                if (res.data?.subflowTrails?.length) {
                     this.visitSubflowTrails(res.data.subflowTrails, session);
                 }
-                throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
+                throw new Error(res.data?.message || __('aaxis.ontology.flow_editor.debug_error'));
             }
             session.context = res.data.context ?? {};
             session.contextKey = res.data.contextKey || null;
@@ -5115,8 +5278,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
             session.total = Number(res.data.total);
             session.done = Boolean(res.data.done);
             session.next = res.data.next || null;
-            session.depth = Number((res.data.frame && res.data.frame.depth) || 0);
-            const frameName = res.data.frame && res.data.frame.flowName && res.data.frame.depth > 0
+            session.depth = Number(res.data.frame?.depth || 0);
+            const frameName = res.data.frame?.flowName && res.data.frame.depth > 0
                 ? `${res.data.frame.flowName}: `
                 : '';
             const iteration = res.data.iteration !== null && res.data.iteration !== undefined
@@ -5209,7 +5372,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
             }
             paint();
-            if (data.subflowTrails && data.subflowTrails.length) {
+            if (data.subflowTrails?.length) {
                 if (data.transition === null) {
                     // A stepped-OVER invoker: show where the subflow(s) went, then come home.
                     this.visitSubflowTrails(data.subflowTrails, session);
@@ -5319,7 +5482,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         apiFetch(routing.generate('aaxis_ontology_flow_debug'), 'POST', {
             // Writers stamp their upserts with this flow (null = never saved -> Manual fallback).
-            flowId: this.flow && this.flow.id ? this.flow.id : null,
+            flowId: this.flow?.id || null,
             steps: session.steps,
             links: session.links,
             input: session.input
@@ -5327,12 +5490,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (this.debugSession !== session) {
                 return;
             }
-            if (!res.ok || !res.data || !res.data.success) {
-                this.markExecutedDebugSteps((res.data && res.data.executedIds) || []);
-                if (res.data && res.data.failedStepId) {
+            if (!res.ok || !res.data?.success) {
+                this.markExecutedDebugSteps(res.data?.executedIds || []);
+                if (res.data?.failedStepId) {
                     this.markFailedDebugStep(String(res.data.failedStepId));
                 }
-                throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error'));
+                throw new Error(res.data?.message || __('aaxis.ontology.flow_editor.debug_error'));
             }
             session.context = res.data.output ?? {};
             session.contextKey = res.data.contextKey || null;
@@ -5373,10 +5536,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }).then(res => {
             const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.debug_eval_label'), width: '640px'});
             const $content = dialog.open();
-            if (!res.ok || !res.data || !res.data.success) {
+            if (!res.ok || !res.data?.success) {
                 $content.append($('<p/>', {
                     'class': 'aaxis-debug-eval-error',
-                    text: (res.data && res.data.message) || __('aaxis.ontology.flow_editor.debug_error')
+                    text: res.data?.message || __('aaxis.ontology.flow_editor.debug_error')
                 }));
                 return;
             }
@@ -5385,7 +5548,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.debug_error'));
         }).finally(() => {
             if (this.debugUi === ui) {
-                ui.$evalRun.prop('disabled', !(this.debugSession && this.debugSession.context !== null && !this.debugSession.busy));
+                ui.$evalRun.prop('disabled', !this.canEvaluateDebug());
             }
         });
     }
@@ -5417,7 +5580,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     private closeDebugSession(): void {
-        if (this.debugSession && this.debugSession.autoClose) {
+        if (this.debugSession?.autoClose) {
             window.clearInterval(this.debugSession.autoClose.timer);
         }
         this.clearDebugMarks();
@@ -5459,8 +5622,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
             const tab = dirty[i];
             const design = tab.design as any;
-            const trigger = (design.steps || []).find((st: any) => st && this.stepMeta[st.type] && this.stepMeta[st.type].category === 'trigger');
-            if (!trigger) {
+            if (!(design.steps || []).some((st: any) => this.isTriggerDef(st))) {
                 messenger.notificationFlashMessage('error', `${this.tabTitle(tab, false)}: ${__('aaxis.ontology.flow_editor.trigger_required')}`);
                 return saveOne(i + 1);
             }
@@ -5471,12 +5633,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 steps: (design.steps || []).map((st: any) => ({type: st.type, name: st.name, x: st.x, y: st.y, config: st.config || null})),
                 design
             }).then(res => {
-                if (!res.ok || !res.data || !res.data.success) {
-                    throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.save_error'));
+                if (!res.ok || !res.data?.success) {
+                    throw new Error(res.data?.message || __('aaxis.ontology.flow_editor.save_error'));
                 }
                 tab.flow = res.data.flow as FlowRecord;
                 tab.savedState = JSON.stringify({design: tab.design});
-                tab.invalidNames = (res.data.flow && res.data.flow.invalidSteps) || [];
+                tab.invalidNames = res.data.flow?.invalidSteps || [];
                 saved++;
             }).catch((err: Error) => {
                 messenger.notificationFlashMessage('error', `${this.tabTitle(tab, false)}: ${err.message || __('aaxis.ontology.flow_editor.save_error')}`);
@@ -5523,16 +5685,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
             steps: this.steps.map(s => ({type: s.type, name: s.name, x: s.x, y: s.y, config: s.config || null})),
             design: this.currentDesign()
         }).then(res => {
-            if (!res.ok || !res.data || !res.data.success) {
-                throw new Error((res.data && res.data.message) || __('aaxis.ontology.flow_editor.save_error'));
+            if (!res.ok || !res.data?.success) {
+                throw new Error(res.data?.message || __('aaxis.ontology.flow_editor.save_error'));
             }
             const created = this.flow === null;
             this.flow = res.data.flow as FlowRecord;
             if (this.tabs[this.activeTab]) {
                 this.tabs[this.activeTab].flow = this.flow; // the tab now points at the saved flow
             }
-            this.applyInvalidStepNames((res.data.flow && res.data.flow.invalidSteps) || []);
-            if (created && this.flow && this.flow.id) {
+            this.applyInvalidStepNames(res.data.flow?.invalidSteps || []);
+            if (created && this.flow?.id) {
                 // Refreshing after the first save must reopen THIS flow (and the other tabs).
                 this.syncTabsUrl();
             }
@@ -5587,7 +5749,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             .then(r => r.json())
             .then((data: any) => {
                 // A synchronous copy for consumers that cannot await (context menus).
-                this.catalogFlowRecords = (data && data.records) || [];
+                this.catalogFlowRecords = data?.records || [];
                 return data;
             })
             .catch((err: any) => {

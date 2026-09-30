@@ -62,16 +62,11 @@ class OntologyDataApiController extends AbstractController
     )]
     public function upsertAction(Request $request, string $systemName, string $entityName): JsonResponse
     {
-        if (($disabled = $this->guard('aaxis_ontology.api_upsert_enabled', true)) !== null) {
-            return $disabled;
-        }
-
         $body = json_decode($request->getContent(), true);
-        if (!\is_array($body)) {
-            return new JsonResponse(
-                ['error' => 'The request body must be a JSON object or array of objects.', 'code' => 'invalid_payload'],
-                Response::HTTP_BAD_REQUEST
-            );
+        $rejection = $this->guard('aaxis_ontology.api_upsert_enabled', true)
+            ?? (\is_array($body) ? null : $this->badRequest('The request body must be a JSON object or array of objects.', 'invalid_payload'));
+        if ($rejection !== null) {
+            return $rejection;
         }
 
         // A JSON object is a single record; a JSON array is a batch of records. The unique id of each
@@ -98,16 +93,11 @@ class OntologyDataApiController extends AbstractController
     )]
     public function queryAction(Request $request, string $systemName, string $entityName): JsonResponse
     {
-        if (($disabled = $this->guard('aaxis_ontology.api_query_enabled', false)) !== null) {
-            return $disabled;
-        }
-
         $body = $request->getContent() === '' ? [] : json_decode($request->getContent(), true);
-        if (!\is_array($body)) {
-            return new JsonResponse(
-                ['error' => 'The request body must be a JSON object.', 'code' => 'invalid_query'],
-                Response::HTTP_BAD_REQUEST
-            );
+        $rejection = $this->guard('aaxis_ontology.api_query_enabled', false)
+            ?? (\is_array($body) ? null : $this->badRequest('The request body must be a JSON object.', 'invalid_query'));
+        if ($rejection !== null) {
+            return $rejection;
         }
 
         $filters = \is_array($body['filter'] ?? null) ? $body['filter'] : [];
@@ -144,6 +134,11 @@ class OntologyDataApiController extends AbstractController
         }
 
         return null;
+    }
+
+    private function badRequest(string $message, string $code): JsonResponse
+    {
+        return new JsonResponse(['error' => $message, 'code' => $code], Response::HTTP_BAD_REQUEST);
     }
 
     private function error(OntologyApiException $e): JsonResponse

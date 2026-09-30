@@ -86,13 +86,15 @@ class OntologyEntityComponent extends BaseComponent {
         if (options.canDelete) {
             // Erasing records keeps the entity — sits between edit and delete, and is disabled when
             // there is nothing to erase.
-            actions.push({
-                key: 'purge', label: __('aaxis.ontology.entity_manager.purge_title'), icon: 'fa-eraser',
-                variant: 'danger',
-                disabled: (row: EntityRecord) => !row.recordCount,
-                disabledTitle: __('aaxis.ontology.entity_manager.purge_empty')
-            });
-            actions.push({key: 'delete', label: __('aaxis.common.grid.delete'), icon: 'fa-trash-o', variant: 'danger'});
+            actions.push(
+                {
+                    key: 'purge', label: __('aaxis.ontology.entity_manager.purge_title'), icon: 'fa-eraser',
+                    variant: 'danger',
+                    disabled: (row: EntityRecord) => !row.recordCount,
+                    disabledTitle: __('aaxis.ontology.entity_manager.purge_empty')
+                },
+                {key: 'delete', label: __('aaxis.common.grid.delete'), icon: 'fa-trash-o', variant: 'danger'}
+            );
         }
 
         this.grid = new DataGrid({
@@ -226,10 +228,10 @@ class OntologyEntityComponent extends BaseComponent {
         this.setBusy(true);
         apiFetch(routing.generate('aaxis_ontology_entity_purge_records', {id: entity.id}), 'DELETE')
             .then(res => {
-                if (!res.ok || !res.data || res.data.success !== true) {
+                if (!res.ok || res.data?.success !== true) {
                     messenger.notificationFlashMessage(
                         'error',
-                        (res.data && res.data.message) || __('aaxis.ontology.entity_manager.purge_error')
+                        res.data?.message || __('aaxis.ontology.entity_manager.purge_error')
                     );
                     return;
                 }
@@ -490,8 +492,8 @@ class OntologyEntityComponent extends BaseComponent {
                 required: !!a.required
             }))
         }).then(res => {
-            if (!res.ok || !res.data || !res.data.success) {
-                throw new Error((res.data && res.data.message) || __('aaxis.ontology.entity_manager.save_error'));
+            if (!res.ok || !res.data?.success) {
+                throw new Error(res.data?.message || __('aaxis.ontology.entity_manager.save_error'));
             }
             messenger.notificationFlashMessage('success', __('aaxis.ontology.entity_manager.saved'));
             this.load();
@@ -542,8 +544,8 @@ class OntologyEntityComponent extends BaseComponent {
         this.setBusy(true);
         apiFetch(routing.generate('aaxis_ontology_entity_delete', {id: entity.id}), 'DELETE')
             .then(res => {
-                if (!res.ok || !res.data || !res.data.successful) {
-                    messenger.notificationFlashMessage('error', (res.data && res.data.message) || __('aaxis.ontology.entity_manager.delete_error'));
+                if (!res.ok || !res.data?.successful) {
+                    messenger.notificationFlashMessage('error', res.data?.message || __('aaxis.ontology.entity_manager.delete_error'));
                     return;
                 }
                 messenger.notificationFlashMessage('success', __('aaxis.ontology.entity_manager.deleted'));

@@ -100,19 +100,9 @@ class OntologySystemController extends AbstractOntologyController
         }
 
         $name = trim((string) ($payload['name'] ?? ''));
-        if ($name === '') {
-            return new JsonResponse([
-                'success' => false,
-                'message' => $this->trans('aaxis.ontology.system_manager.name_required'),
-            ], 422);
-        }
-
-        $existing = $this->registry()->getRepository(OntologySystem::class)->findOneBy(['name' => $name]);
-        if ($existing !== null && $existing->getId() !== $entity->getId()) {
-            return new JsonResponse([
-                'success' => false,
-                'message' => $this->trans('aaxis.ontology.system_manager.name_unique'),
-            ], 422);
+        $rejection = $this->nameRejection($entity, $name);
+        if ($rejection !== null) {
+            return $rejection;
         }
 
         $entity->setName($name);
@@ -123,6 +113,26 @@ class OntologySystemController extends AbstractOntologyController
         $em->flush();
 
         return new JsonResponse(['success' => true, 'system' => $this->serialize($entity)]);
+    }
+
+    /** The 422 for a blank or already-taken name (system names are unique), null when it is fine. */
+    private function nameRejection(OntologySystem $entity, string $name): ?JsonResponse
+    {
+        if ($name === '') {
+            return new JsonResponse([
+                'success' => false,
+                'message' => $this->trans('aaxis.ontology.system_manager.name_required'),
+            ], 422);
+        }
+
+        $existing = $this->registry()->getRepository(OntologySystem::class)->findOneBy(['name' => $name]);
+
+        return $existing !== null && $existing->getId() !== $entity->getId()
+            ? new JsonResponse([
+                'success' => false,
+                'message' => $this->trans('aaxis.ontology.system_manager.name_unique'),
+            ], 422)
+            : null;
     }
 
     /**

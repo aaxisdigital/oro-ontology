@@ -36,11 +36,11 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
  */
 class BucketEntityDataStore
 {
-    private const LATEST_ROOT = 'entity-data';
-    private const HISTORY_ROOT = 'entity-data-history';
+    private readonly EntityDataKeys $keys;
 
     public function __construct(private readonly OntologyBucketClient $client)
     {
+        $this->keys = new EntityDataKeys($client);
     }
 
     /** Whether the bucket backend is active (toggle on + connection configured). */
@@ -56,7 +56,7 @@ class BucketEntityDataStore
      */
     public function readLatest(OntologyEntity $entity, string $uniqueId): ?array
     {
-        $raw = $this->client->get($this->latestKey($entity, $uniqueId));
+        $raw = $this->client->get($this->keys->latestKey($entity, $uniqueId));
 
         return $raw === null ? null : $this->decodeEnvelope($raw);
     }
@@ -70,7 +70,7 @@ class BucketEntityDataStore
     public function listLatest(OntologyEntity $entity): array
     {
         $records = [];
-        foreach ($this->client->listKeys($this->latestPrefix($entity)) as $key) {
+        foreach ($this->client->listKeys($this->keys->latestPrefix($entity)) as $key) {
             $raw = $this->client->get($key);
             if ($raw === null) {
                 continue; // deleted between LIST and GET
@@ -84,10 +84,23 @@ class BucketEntityDataStore
         return $records;
     }
 
+    /**
+     * The payloads of every live record (see {@see listLatest()} for the cost).
+     *
+     * @return list<array<int|string, mixed>>
+     */
+    public function listPayloads(OntologyEntity $entity): array
+    {
+        return array_map(
+            static fn (array $envelope): array => $envelope['payload'],
+            $this->listLatest($entity)
+        );
+    }
+
     /** Number of live records of the entity (counts keys — no GETs). */
     public function countLatest(OntologyEntity $entity): int
     {
-        return \count($this->client->listKeys($this->latestPrefix($entity)));
+        return \count($this->client->listKeys($this->keys->latestPrefix($entity)));
     }
 
     /**
@@ -124,7 +137,7 @@ class BucketEntityDataStore
             // itself stores — already in hand, since the merge above needed the GET anyway.
             $archiveVersion = max((int) $existing['version'], $maxHistory + 1);
             $this->client->put(
-                $this->historyKey($entity, $uid, $existing['updatedAt'], $archiveVersion, $existing['uuid']),
+                $this->keys->historyKey($entity, $uid, $existing['updatedAt'], $archiveVersion, $existing['uuid']),
                 $this->encodeEnvelope($entity, $uid, $archiveVersion, $existing['uuid'], $existing['updatedAt'], $existing['payload'])
             );
             $this->writeLatest($entity, $uid, $archiveVersion + 1, $uuid, $updatedAt, $merged);
@@ -155,7 +168,7 @@ class BucketEntityDataStore
         }
 
         $history = [];
-        foreach ($this->client->listKeys($this->historyPrefix($entity, $uniqueId)) as $key) {
+        foreach ($this->client->listKeys($this->keys->historyPrefix($entity, $uniqueId)) as $key) {
             $raw = $this->client->get($key);
             $envelope = $raw === null ? null : $this->decodeEnvelope($raw);
             if ($envelope !== null) {
@@ -179,59 +192,15 @@ class BucketEntityDataStore
     /** Deletes every object of the entity — live records AND history. Returns the live count. */
     public function purgeEntity(OntologyEntity $entity): int
     {
-        $latestKeys = $this->client->listKeys($this->latestPrefix($entity));
+        $latestKeys = $this->client->listKeys($this->keys->latestPrefix($entity));
         foreach ($latestKeys as $key) {
             $this->client->delete($key);
         }
-        foreach ($this->client->listKeys($this->historyRootPrefix($entity)) as $key) {
+        foreach ($this->client->listKeys($this->keys->historyRootPrefix($entity)) as $key) {
             $this->client->delete($key);
         }
 
         return \count($latestKeys);
-    }
-
-    // --- Keys -------------------------------------------------------------------------------
-
-    private function latestPrefix(OntologyEntity $entity): string
-    {
-        return $this->prefixed(self::LATEST_ROOT . '/' . (int) $entity->getId() . '/');
-    }
-
-    private function latestKey(OntologyEntity $entity, string $uniqueId): string
-    {
-        return $this->latestPrefix($entity) . rawurlencode($uniqueId) . '.json';
-    }
-
-    private function historyRootPrefix(OntologyEntity $entity): string
-    {
-        return $this->prefixed(self::HISTORY_ROOT . '/' . (int) $entity->getId() . '/');
-    }
-
-    private function historyPrefix(OntologyEntity $entity, string $uniqueId): string
-    {
-        return $this->historyRootPrefix($entity) . rawurlencode($uniqueId) . '/';
-    }
-
-    private function historyKey(OntologyEntity $entity, string $uniqueId, string $updatedAtAtom, int $version, string $uuid): string
-    {
-        $stamp = $this->timestampSegment($updatedAtAtom);
-
-        return $this->historyPrefix($entity, $uniqueId) . $stamp . '/' . $version . '/' . rawurlencode($uuid) . '.json';
-    }
-
-    private function prefixed(string $key): string
-    {
-        $base = $this->client->basePath();
-
-        return $base === '' ? $key : $base . '/' . $key;
-    }
-
-    /** yyyymmddhhmiss (UTC) from the version's updatedAt; a zero stamp when unparseable. */
-    private function timestampSegment(string $updatedAtAtom): string
-    {
-        $parsed = date_create($updatedAtAtom, new \DateTimeZone('UTC'));
-
-        return $parsed === false ? '00000000000000' : $parsed->setTimezone(new \DateTimeZone('UTC'))->format('YmdHis');
     }
 
     // --- Envelopes ---------------------------------------------------------------------------
@@ -239,7 +208,7 @@ class BucketEntityDataStore
     private function writeLatest(OntologyEntity $entity, string $uid, int $version, string $uuid, \DateTimeImmutable $updatedAt, array $payload): void
     {
         $this->client->put(
-            $this->latestKey($entity, $uid),
+            $this->keys->latestKey($entity, $uid),
             $this->encodeEnvelope($entity, $uid, $version, $uuid, $updatedAt->format(\DateTimeInterface::ATOM), $payload)
         );
     }
@@ -279,7 +248,7 @@ class BucketEntityDataStore
     private function maxHistoryVersion(OntologyEntity $entity, string $uniqueId): int
     {
         $max = 0;
-        $prefix = $this->historyPrefix($entity, $uniqueId);
+        $prefix = $this->keys->historyPrefix($entity, $uniqueId);
         foreach ($this->client->listKeys($prefix) as $key) {
             // …/{uid}/{yyyymmddhhmiss}/{version}/{uuid}.json — version is the second-to-last segment.
             $segments = explode('/', $key);

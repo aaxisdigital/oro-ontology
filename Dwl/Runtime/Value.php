@@ -45,7 +45,7 @@ class Value
         }
         if ($this->keyIndex === null) {
             $this->keyIndex = [];
-            foreach ($this->data as $i => [$k, $v]) {
+            foreach ($this->data as $i => [$k]) {
                 $ks = $k->type === ValueType::String ? $k->data : (string)$k->data;
                 // Last-write-wins for duplicate keys, but store first occurrence
                 if (!isset($this->keyIndex[$ks])) {
@@ -87,19 +87,19 @@ class Value
      */
     public static function compare(Value $a, Value $b): int
     {
-        if ($a->type === ValueType::String && $b->type === ValueType::String) {
-            return strcmp((string) $a->data, (string) $b->data);
-        }
-        if ($a->type === ValueType::Boolean && $b->type === ValueType::Boolean) {
-            return ((bool) $a->data) <=> ((bool) $b->data);
-        }
-        if (($a->type === ValueType::Date || $a->type === ValueType::DateTime)
-            && ($b->type === ValueType::Date || $b->type === ValueType::DateTime)
-        ) {
-            return $a->data <=> $b->data;
-        }
+        return match (true) {
+            $a->type === ValueType::String && $b->type === ValueType::String
+                => strcmp((string) $a->data, (string) $b->data),
+            $a->type === ValueType::Boolean && $b->type === ValueType::Boolean
+                => ((bool) $a->data) <=> ((bool) $b->data),
+            self::isTemporal($a) && self::isTemporal($b) => $a->data <=> $b->data,
+            default => (float) ($a->data ?? 0) <=> (float) ($b->data ?? 0),
+        };
+    }
 
-        return (float) ($a->data ?? 0) <=> (float) ($b->data ?? 0);
+    private static function isTemporal(Value $value): bool
+    {
+        return $value->type === ValueType::Date || $value->type === ValueType::DateTime;
     }
 
     public static function array(array $elements): self

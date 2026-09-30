@@ -66,25 +66,24 @@ class DwlScriptGuard
     private function walk(mixed $node, array &$seen): bool
     {
         if (\is_array($node)) {
-            foreach ($node as $item) {
-                if ($this->walk($item, $seen)) {
-                    return true;
-                }
-            }
-
-            return false;
+            return $this->walkAll($node, $seen);
         }
         if (!\is_object($node) || isset($seen[spl_object_id($node)])) {
             return false;
         }
         $seen[spl_object_id($node)] = true;
 
-        if ($this->isDenied($node)) {
-            return true;
-        }
+        return $this->isDenied($node) || $this->walkAll(get_object_vars($node), $seen);
+    }
 
-        foreach (get_object_vars($node) as $value) {
-            if ($this->walk($value, $seen)) {
+    /**
+     * @param array<mixed>     $items
+     * @param array<int, true> $seen
+     */
+    private function walkAll(array $items, array &$seen): bool
+    {
+        foreach ($items as $item) {
+            if ($this->walk($item, $seen)) {
                 return true;
             }
         }

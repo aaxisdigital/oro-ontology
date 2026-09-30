@@ -1516,3 +1516,16 @@ docker compose exec php php bin/console debug:router | grep aaxis_ontology
 ```
 
 `cache:clear` is intentionally omitted — the user runs it themselves when needed (dev mode).
+
+## Tests
+
+- **PHP** — `Tests/Unit`, PHPUnit **9.6** (the version the Oro 7.0 platform pins; write `@dataProvider` docblocks, no `withConsecutive`).
+  From an Oro application that has this bundle installed:
+  `php vendor/phpunit/phpunit/phpunit -c vendor/aaxisdigital/oro-ontology/phpunit.xml.dist` (add `--coverage-text` with pcov/xdebug loaded).
+  `Tests/bootstrap.php` finds the app's autoloader (override with `AAXIS_AUTOLOAD`) and pins this bundle's namespace to the working copy, so it never tests a stale `vendor/` copy.
+  CommonBundle is taken from the sibling `oro-common` checkout (`AAXIS_COMMON_DIR` overrides).
+  `Tests/Unit/DependencyInjection/ServiceWiringTest` loads the real `services.yml` and fails if a service names a missing class or passes the wrong number of constructor arguments — keep it green when refactoring constructors.
+- **TypeScript** — `Tests/js/**/*.test.ts` (kept outside `Resources/js-src`, so `tsc` never emits them), Vitest + jsdom: `npm install && npm test` (`npm run test:coverage`).
+  `vitest.config.ts` aliases Oro's AMD modules (`orotranslation/js/translator`, `routing`, `oroui/js/messenger`, `oroui/js/modal`, …) to the stand-ins in `Tests/js/stubs/`; jQuery is the real one. Extend a stub additively when a test needs more of it.
+- **Sonar coverage scope**: everything counts except `Migrations/**`, `*Bundle.php`, `Resources/js-src/types/**` (they need a live DB/container or are pure declarations). Do not add `@codeCoverageIgnore`/`v8 ignore` to reach a number.
+- Several Sonar findings are **triaged on purpose** (FALSE-POSITIVE/WONTFIX with a written rationale in the SonarQube UI): the `/* @theme: admin.oro; */` directive at the top of each SCSS file is Oro's theme marker, not commented-out code — do not remove it.

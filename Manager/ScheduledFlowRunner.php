@@ -37,6 +37,9 @@ class ScheduledFlowRunner
      */
     public const int RUN_STALE_AFTER_SECONDS = 6 * 3600;
 
+    /** The datetime columns' (UTC wall-clock) shape. */
+    private const string DB_DATETIME = 'Y-m-d H:i:s';
+
     public function __construct(
         private readonly ManagerRegistry $doctrine,
         private readonly FlowDebugExecutor $executor,
@@ -75,23 +78,11 @@ class ScheduledFlowRunner
     {
         $name = (string) $flow->getName();
         $parsed = $this->parseDesign($flow->getDesign(), 'cron');
-        if ($parsed === null) {
-            return ['flow' => $name, 'status' => 'skipped', 'detail' => 'no runnable design with a schedule trigger'];
+        $notRunning = $this->notRunnableStatus($flow, $parsed, $now);
+        if ($notRunning !== null) {
+            return ['flow' => $name] + $notRunning;
         }
-        [$steps, $links, $trigger] = $parsed;
-
-        $config = $trigger['config'];
-        if (!\is_array($config)) {
-            return ['flow' => $name, 'status' => 'skipped', 'detail' => 'the schedule trigger is not configured'];
-        }
-        if (!$this->isDue($flow, $config, $now)) {
-            return ['flow' => $name, 'status' => 'not-due'];
-        }
-        // One instance at a time: a run that takes longer than its interval must not be doubled up
-        // by the next tick.
-        if ($this->isStillRunning($flow, $now)) {
-            return ['flow' => $name, 'status' => 'running', 'detail' => 'a previous run is still in progress'];
-        }
+        [$steps, $links] = $parsed;
 
         try {
             $this->executor->execute($steps, $links, [], $flow, null, null, ['trigger' => 'schedule']);
@@ -102,6 +93,28 @@ class ScheduledFlowRunner
 
             return ['flow' => $name, 'status' => 'failed', 'detail' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Why this tick does not run the flow — null when it should run.
+     *
+     * @param array{0: array<int, array<string, mixed>>, 1: array<int, array<string, mixed>>, 2: array<string, mixed>}|null $parsed
+     *
+     * @return array{status: string, detail?: string}|null
+     */
+    private function notRunnableStatus(OntologyFlow $flow, ?array $parsed, \DateTimeImmutable $now): ?array
+    {
+        $config = $parsed[2]['config'] ?? null;
+
+        return match (true) {
+            $parsed === null => ['status' => 'skipped', 'detail' => 'no runnable design with a schedule trigger'],
+            !\is_array($config) => ['status' => 'skipped', 'detail' => 'the schedule trigger is not configured'],
+            !$this->isDue($flow, $config, $now) => ['status' => 'not-due'],
+            // One instance at a time: a run that takes longer than its interval must not be
+            // doubled up by the next tick.
+            $this->isStillRunning($flow, $now) => ['status' => 'running', 'detail' => 'a previous run is still in progress'],
+            default => null,
+        };
     }
 
     /**
@@ -134,7 +147,7 @@ class ScheduledFlowRunner
                      HAVING bool_or(event = 'flow-start' AND payload->>'trigger' = 'debug')
                         AND NOT bool_or(event IN ('flow-finish', 'flow-exception'))
                         AND max(datetime) < :cutoff",
-                    ['cutoff' => $now->modify(sprintf('-%d minutes', $minutes))->format('Y-m-d H:i:s')]
+                    ['cutoff' => $now->modify(sprintf('-%d minutes', $minutes))->format(self::DB_DATETIME)]
                 );
             }
         } catch (\Throwable $e) {
@@ -179,7 +192,7 @@ class ScheduledFlowRunner
             return false;
         }
         // The datetime columns hold UTC wall-clock — re-read as UTC so the age is timezone-proof.
-        $startedUtc = new \DateTimeImmutable($started->format('Y-m-d H:i:s'), new \DateTimeZone('UTC'));
+        $startedUtc = new \DateTimeImmutable($started->format(self::DB_DATETIME), new \DateTimeZone('UTC'));
 
         return ($now->getTimestamp() - $startedUtc->getTimestamp()) < self::RUN_STALE_AFTER_SECONDS;
     }
@@ -189,23 +202,42 @@ class ScheduledFlowRunner
      */
     private function isDue(OntologyFlow $flow, array $config, \DateTimeImmutable $now): bool
     {
-        if (($config['mode'] ?? 'cron') === 'interval') {
-            $value = (int) ($config['value'] ?? 0);
-            $unit = (string) ($config['unit'] ?? '');
-            if ($value < 1 || !\in_array($unit, ['minute', 'hour', 'day', 'week', 'month', 'year'], true)) {
-                return false;
-            }
-            // The datetime columns hold UTC wall-clock: re-read the hydrated value as UTC so the
-            // comparison is timezone-proof regardless of the PHP default timezone.
-            $baseline = $flow->getLastExecuted() ?? $flow->getLastModified();
-            if ($baseline === null) {
-                return true;
-            }
-            $baselineUtc = new \DateTimeImmutable($baseline->format('Y-m-d H:i:s'), new \DateTimeZone('UTC'));
+        return ($config['mode'] ?? 'cron') === 'interval'
+            ? $this->isIntervalDue($flow, $config, $now)
+            : $this->isCronDue($flow, $config, $now);
+    }
 
-            return $baselineUtc->modify(sprintf('+%d %s', $value, $unit)) <= $now;
+    /**
+     * Interval mode: `value unit` has elapsed since the last run (or since last_modified for a
+     * flow that never ran).
+     *
+     * @param array<string, mixed> $config
+     */
+    private function isIntervalDue(OntologyFlow $flow, array $config, \DateTimeImmutable $now): bool
+    {
+        $value = (int) ($config['value'] ?? 0);
+        $unit = (string) ($config['unit'] ?? '');
+        if ($value < 1 || !\in_array($unit, ['minute', 'hour', 'day', 'week', 'month', 'year'], true)) {
+            return false;
         }
+        // The datetime columns hold UTC wall-clock: re-read the hydrated value as UTC so the
+        // comparison is timezone-proof regardless of the PHP default timezone.
+        $baseline = $flow->getLastExecuted() ?? $flow->getLastModified();
+        if ($baseline === null) {
+            return true;
+        }
+        $baselineUtc = new \DateTimeImmutable($baseline->format(self::DB_DATETIME), new \DateTimeZone('UTC'));
 
+        return $baselineUtc->modify(sprintf('+%d %s', $value, $unit)) <= $now;
+    }
+
+    /**
+     * Cron mode (or the legacy expression-only config): the current minute matches the expression.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function isCronDue(OntologyFlow $flow, array $config, \DateTimeImmutable $now): bool
+    {
         $expression = trim((string) ($config['expression'] ?? ''));
         if ($expression === '' || !CronExpression::isValidExpression($expression)) {
             return false;

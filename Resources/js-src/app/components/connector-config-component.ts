@@ -138,7 +138,7 @@ class ConnectorConfigComponent extends BaseComponent {
         try {
             const parsed = JSON.parse(raw);
             return !!parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0;
-        } catch (e) {
+        } catch {
             return true;
         }
     }
@@ -242,7 +242,7 @@ class ConnectorConfigComponent extends BaseComponent {
         try {
             const parsed = JSON.parse(String(this.$config.val() || ''));
             return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-        } catch (e) {
+        } catch {
             return {}; // not valid JSON (e.g. empty) — treat as no configuration
         }
     }
@@ -728,7 +728,7 @@ class ConnectorConfigComponent extends BaseComponent {
         }).then(res => {
             const data = res.data || {};
             if (typeof data.success !== 'boolean') {
-                throw new Error(__('aaxis.ontology.connector_config.test_error'));
+                throw new TypeError(__('aaxis.ontology.connector_config.test_error'));
             }
             return {
                 success: data.success,

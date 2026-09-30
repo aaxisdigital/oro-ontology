@@ -25,34 +25,59 @@ trait FlowDesignParserTrait
         if (!\is_array($design) || !\is_array($design['steps'] ?? null)) {
             return null;
         }
-        $steps = [];
+        $steps = $this->parseDesignSteps($design['steps']);
         $trigger = null;
-        foreach ($design['steps'] as $step) {
-            if (!\is_array($step) || !\is_string($step['id'] ?? null) || !\is_string($step['type'] ?? null)) {
-                return null;
-            }
-            $config = $step['config'] ?? null;
-            $normalized = [
-                'id' => $step['id'],
-                'type' => $step['type'],
-                'name' => \is_string($step['name'] ?? null) ? $step['name'] : $step['id'],
-                'config' => \is_array($config) ? $config : null,
-            ];
-            $steps[] = $normalized;
-            if ($trigger === null && $step['type'] === $triggerType) {
-                $trigger = $normalized;
+        foreach ($steps ?? [] as $step) {
+            if ($step['type'] === $triggerType) {
+                $trigger = $step;
+                break;
             }
         }
         if ($trigger === null) {
             return null;
         }
+
+        return [$steps, $this->parseDesignLinks($design['links'] ?? null), $trigger];
+    }
+
+    /**
+     * @param array<mixed> $rawSteps
+     *
+     * @return array<int, array<string, mixed>>|null null when any step is malformed
+     */
+    private function parseDesignSteps(array $rawSteps): ?array
+    {
+        $steps = [];
+        foreach ($rawSteps as $step) {
+            if (!\is_array($step) || !\is_string($step['id'] ?? null) || !\is_string($step['type'] ?? null)) {
+                return null;
+            }
+            $config = $step['config'] ?? null;
+            $steps[] = [
+                'id' => $step['id'],
+                'type' => $step['type'],
+                'name' => \is_string($step['name'] ?? null) ? $step['name'] : $step['id'],
+                'config' => \is_array($config) ? $config : null,
+            ];
+        }
+
+        return $steps;
+    }
+
+    /**
+     * The well-formed links ({from, to} strings, fromPort defaulting to 0); the rest is dropped.
+     *
+     * @return array<int, array{from: string, fromPort: int, to: string}>
+     */
+    private function parseDesignLinks(mixed $rawLinks): array
+    {
         $links = [];
-        foreach (\is_array($design['links'] ?? null) ? $design['links'] : [] as $link) {
+        foreach (\is_array($rawLinks) ? $rawLinks : [] as $link) {
             if (\is_array($link) && \is_string($link['from'] ?? null) && \is_string($link['to'] ?? null)) {
                 $links[] = ['from' => $link['from'], 'fromPort' => (int) ($link['fromPort'] ?? 0), 'to' => $link['to']];
             }
         }
 
-        return [$steps, $links, $trigger];
+        return $links;
     }
 }

@@ -51,47 +51,75 @@ class OntologyFlowApiController extends AbstractController
     {
         $runner = $this->container->get(EndpointFlowRunner::class);
         $match = $runner->match($request->getMethod(), $path);
-        if ($match === null) {
-            return new JsonResponse(
+        $rejection = $match === null
+            ? new JsonResponse(
                 ['error' => 'No enabled flow endpoint matches this method and path.', 'code' => 'endpoint_not_found'],
                 Response::HTTP_NOT_FOUND
-            );
+            )
+            : $this->denial($match['config']);
+        if ($rejection !== null) {
+            return $rejection;
         }
 
-        // System Configuration kill switches, split by trigger kind — checked BEFORE auth so a
-        // switched-off endpoint does not even reveal it exists.
-        $isPublic = ($match['config']['public'] ?? false) === true;
+        [$extraInput, $runInfo] = $this->callerContext();
+
+        try {
+            $context = $runner->run($match, $this->requestBody($request), $this->requestHeaders($request), $request->query->all(), $extraInput, $runInfo);
+            // The trigger's optional Response binding shapes the HTTP answer from the final
+            // context: {statusCode, body}. Without one, the default {success, flowUuid, context}.
+            $bound = $runner->respond($match['config'], $context);
+        } catch (\RuntimeException $e) {
+            return $this->flowFailed($e);
+        }
+
+        $shownContext = $context === [] ? new \stdClass() : $context;
+
+        return $bound !== null
+            ? new JsonResponse($bound['body'], $bound['statusCode'])
+            : new JsonResponse(['success' => true, 'flowUuid' => $context['flowUuid'] ?? null, 'context' => $shownContext]);
+    }
+
+    /**
+     * Why the matched endpoint refuses this caller, or null when it may run: the System
+     * Configuration kill switch of its kind (checked BEFORE auth so a switched-off endpoint does
+     * not even reveal it exists), then — for a non-public trigger — authentication and the
+     * flow-API capability. Authentication happened at the firewall (bearer token); authorization
+     * is decided here per trigger, the guard twin of OntologyDataApiController.
+     *
+     * @param array<string, mixed> $triggerConfig
+     */
+    private function denial(array $triggerConfig): ?JsonResponse
+    {
+        $isPublic = ($triggerConfig['public'] ?? false) === true;
         $switch = $isPublic ? 'aaxis_ontology.flow_api_public_enabled' : 'aaxis_ontology.flow_api_secure_enabled';
-        if (!$this->container->get(ConfigManager::class)->get($switch)) {
-            return new JsonResponse(['error' => 'Not found.', 'code' => 'endpoint_disabled'], Response::HTTP_NOT_FOUND);
-        }
 
-        // Non-public triggers demand an authenticated caller HOLDING the flow-API capability —
-        // the guard twin of OntologyDataApiController: authentication happened at the firewall
-        // (bearer token), authorization is decided here per trigger.
-        if (!$isPublic) {
-            if ($this->getUser() === null) {
-                return new JsonResponse(
-                    ['error' => 'Authentication required.', 'code' => 'unauthenticated'],
-                    Response::HTTP_UNAUTHORIZED
-                );
-            }
-            if (!$this->isGranted(self::ACL_FLOW) && !$this->isGranted(self::ACL_ALL)) {
-                return new JsonResponse(
-                    ['error' => 'Access denied.', 'code' => 'forbidden'],
-                    Response::HTTP_FORBIDDEN
-                );
-            }
-        }
-        // ANY authenticated call — public endpoints included — exposes the OAuthApplication
-        // variable: the OAuth application's name, carried by the OAuth2 token as its "client"
-        // attribute (null when the caller authenticated another way). Anonymous calls get none.
+        return match (true) {
+            !$this->container->get(ConfigManager::class)->get($switch)
+                => new JsonResponse(['error' => 'Not found.', 'code' => 'endpoint_disabled'], Response::HTTP_NOT_FOUND),
+            $isPublic => null,
+            $this->getUser() === null
+                => new JsonResponse(['error' => 'Authentication required.', 'code' => 'unauthenticated'], Response::HTTP_UNAUTHORIZED),
+            !$this->isGranted(self::ACL_FLOW) && !$this->isGranted(self::ACL_ALL)
+                => new JsonResponse(['error' => 'Access denied.', 'code' => 'forbidden'], Response::HTTP_FORBIDDEN),
+            default => null,
+        };
+    }
+
+    /**
+     * ANY authenticated call — public endpoints included — exposes the OAuthApplication variable:
+     * the OAuth application's name, carried by the OAuth2 token as its "client" attribute (null
+     * when the caller authenticated another way). Anonymous calls get none. The flow-start event
+     * names who called (endpoint runs with credentials).
+     *
+     * @return array{0: array<string, mixed>, 1: array<string, mixed>} the extra trigger input and the run info
+     */
+    private function callerContext(): array
+    {
         $extraInput = [];
         $runInfo = ['trigger' => 'endpoint'];
         $user = $this->getUser();
         if ($user !== null) {
             $extraInput['OAuthApplication'] = $this->oauthApplication();
-            // The flow-start event names who called (endpoint runs with credentials).
             $first = method_exists($user, 'getFirstName') ? (string) $user->getFirstName() : '';
             $last = method_exists($user, 'getLastName') ? (string) $user->getLastName() : '';
             $name = trim($first . ' ' . $last);
@@ -104,13 +132,26 @@ class OntologyFlowApiController extends AbstractController
             ];
         }
 
-        // Body: JSON when it parses, raw text otherwise, null when empty.
+        return [$extraInput, $runInfo];
+    }
+
+    /** JSON when it parses, raw text otherwise, null when empty. */
+    private function requestBody(Request $request): mixed
+    {
         $raw = $request->getContent();
-        $body = null;
-        if ($raw !== '') {
-            $decoded = json_decode($raw, true);
-            $body = json_last_error() === JSON_ERROR_NONE ? $decoded : $raw;
+        if ($raw === '') {
+            return null;
         }
+        $decoded = json_decode($raw, true);
+
+        return json_last_error() === JSON_ERROR_NONE ? $decoded : $raw;
+    }
+
+    /**
+     * @return array<string, string> lowercased names, first values, credentials removed
+     */
+    private function requestHeaders(Request $request): array
+    {
         $headers = [];
         foreach ($request->headers->all() as $name => $values) {
             if (!\in_array(strtolower((string) $name), self::HIDDEN_HEADERS, true)) {
@@ -118,32 +159,17 @@ class OntologyFlowApiController extends AbstractController
             }
         }
 
-        try {
-            $context = $runner->run($match, $body, $headers, $request->query->all(), $extraInput, $runInfo);
-            // The trigger's optional Response binding shapes the HTTP answer from the final
-            // context: {statusCode, body}. Without one, the default {success, flowUuid, context}.
-            $bound = $runner->respond($match['config'], $context);
-        } catch (FlowStepFailure $e) {
-            return new JsonResponse(
-                ['error' => $e->getMessage(), 'code' => 'flow_failed', 'failedStepId' => $e->stepId],
-                Response::HTTP_UNPROCESSABLE_ENTITY
-            );
-        } catch (\RuntimeException $e) {
-            return new JsonResponse(
-                ['error' => $e->getMessage(), 'code' => 'flow_failed'],
-                Response::HTTP_UNPROCESSABLE_ENTITY
-            );
+        return $headers;
+    }
+
+    private function flowFailed(\RuntimeException $e): JsonResponse
+    {
+        $body = ['error' => $e->getMessage(), 'code' => 'flow_failed'];
+        if ($e instanceof FlowStepFailure) {
+            $body['failedStepId'] = $e->stepId;
         }
 
-        if ($bound !== null) {
-            return new JsonResponse($bound['body'], $bound['statusCode']);
-        }
-
-        return new JsonResponse([
-            'success' => true,
-            'flowUuid' => $context['flowUuid'] ?? null,
-            'context' => $context === [] ? new \stdClass() : $context,
-        ]);
+        return new JsonResponse($body, Response::HTTP_UNPROCESSABLE_ENTITY);
     }
 
     /** The name of the OAuth application behind the current token, when there is one. */

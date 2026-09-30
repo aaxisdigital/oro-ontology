@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aaxis\Bundle\OntologyBundle\Manager;
 
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
+use Aaxis\Bundle\OntologyBundle\Exception\DatabaseQueryFailure;
 
 /**
  * Executes the "SQL Query" flow step against a DATABASE connector (PostgreSQL only, like
@@ -31,16 +32,16 @@ class DatabaseQueryRunner
      *
      * @return mixed rows / {affected} — or the list of per-run results for a LIST binding
      *
-     * @throws \RuntimeException with a user-readable message (the executor prefixes the step name)
+     * @throws DatabaseQueryFailure (a \RuntimeException) with a user-readable message (the executor prefixes the step name)
      */
     public function run(OntologyConnector $connector, string $sql, mixed $bindings = null): mixed
     {
         if ($connector->getType() !== OntologyConnector::TYPE_DATABASE) {
-            throw new \RuntimeException(sprintf('connector "%s" is not a database connector', (string) $connector->getName()));
+            throw new DatabaseQueryFailure(sprintf('connector "%s" is not a database connector', (string) $connector->getName()));
         }
         $sql = trim($sql);
         if ($sql === '') {
-            throw new \RuntimeException('the SQL expression resolved to an empty text');
+            throw new DatabaseQueryFailure('the SQL expression resolved to an empty text');
         }
 
         // Normalize the binding shapes up front so a bad one fails before touching the database.
@@ -49,61 +50,87 @@ class DatabaseQueryRunner
 
         $pdo = $this->connect($connector->getConfig() ?? []);
         $placeholders = $this->placeholders($sql);
-
-        try {
-            $statement = $pdo->prepare($sql);
-        } catch (\PDOException $e) {
-            throw new \RuntimeException('the SQL could not be prepared: ' . $e->getMessage(), 0, $e);
-        }
+        $statement = $this->prepare($pdo, $sql);
 
         $results = [];
         foreach ($runs['sets'] as $index => $set) {
-            foreach ($placeholders as $name) {
-                if (!\array_key_exists($name, $set)) {
-                    throw new \RuntimeException(sprintf(
-                        'the SQL uses :%s but the bindings%s carry no such key',
-                        $name,
-                        $isList ? sprintf(' of run #%d', $index + 1) : ''
-                    ));
-                }
-                $value = $set[$name];
-                if (!\is_scalar($value) && $value !== null) {
-                    throw new \RuntimeException(sprintf(
-                        'binding "%s"%s must be a scalar or null, got %s',
-                        $name,
-                        $isList ? sprintf(' of run #%d', $index + 1) : '',
-                        get_debug_type($value)
-                    ));
-                }
-                $statement->bindValue(
-                    ':' . $name,
-                    $value,
-                    match (true) {
-                        $value === null => \PDO::PARAM_NULL,
-                        \is_bool($value) => \PDO::PARAM_BOOL,
-                        \is_int($value) => \PDO::PARAM_INT,
-                        default => \PDO::PARAM_STR,
-                    }
-                );
-            }
-
-            try {
-                $statement->execute();
-            } catch (\PDOException $e) {
-                throw new \RuntimeException(sprintf(
-                    'the query failed%s: %s',
-                    $isList ? sprintf(' on run #%d', $index + 1) : '',
-                    $e->getMessage()
-                ), 0, $e);
-            }
-
-            // A resultset (SELECT / RETURNING) yields rows; a plain DML yields the affected count.
-            $results[] = $statement->columnCount() > 0
-                ? $statement->fetchAll(\PDO::FETCH_ASSOC)
-                : ['affected' => $statement->rowCount()];
+            $runNumber = $isList ? $index + 1 : null;
+            $this->bindRun($statement, $placeholders, $set, $runNumber);
+            $results[] = $this->execute($statement, $runNumber);
         }
 
         return $isList ? $results : $results[0];
+    }
+
+    private function prepare(\PDO $pdo, string $sql): \PDOStatement
+    {
+        try {
+            return $pdo->prepare($sql);
+        } catch (\PDOException $e) {
+            throw new DatabaseQueryFailure('the SQL could not be prepared: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Binds one run's parameter set to the statement. $runNumber is the 1-based position in a LIST
+     * binding (named in the error messages), null for a single run.
+     *
+     * @param array<int, string>   $placeholders
+     * @param array<string, mixed> $set
+     */
+    private function bindRun(\PDOStatement $statement, array $placeholders, array $set, ?int $runNumber): void
+    {
+        foreach ($placeholders as $name) {
+            if (!\array_key_exists($name, $set)) {
+                throw new DatabaseQueryFailure(sprintf(
+                    'the SQL uses :%s but the bindings%s carry no such key',
+                    $name,
+                    $runNumber !== null ? sprintf(' of run #%d', $runNumber) : ''
+                ));
+            }
+            $value = $set[$name];
+            if (!\is_scalar($value) && $value !== null) {
+                throw new DatabaseQueryFailure(sprintf(
+                    'binding "%s"%s must be a scalar or null, got %s',
+                    $name,
+                    $runNumber !== null ? sprintf(' of run #%d', $runNumber) : '',
+                    get_debug_type($value)
+                ));
+            }
+            $statement->bindValue(':' . $name, $value, $this->parameterType($value));
+        }
+    }
+
+    private function parameterType(mixed $value): int
+    {
+        return match (true) {
+            $value === null => \PDO::PARAM_NULL,
+            \is_bool($value) => \PDO::PARAM_BOOL,
+            \is_int($value) => \PDO::PARAM_INT,
+            default => \PDO::PARAM_STR,
+        };
+    }
+
+    /**
+     * A resultset (SELECT / RETURNING) yields rows; a plain DML yields the affected count.
+     *
+     * @return array<int, mixed>
+     */
+    private function execute(\PDOStatement $statement, ?int $runNumber): array
+    {
+        try {
+            $statement->execute();
+        } catch (\PDOException $e) {
+            throw new DatabaseQueryFailure(sprintf(
+                'the query failed%s: %s',
+                $runNumber !== null ? sprintf(' on run #%d', $runNumber) : '',
+                $e->getMessage()
+            ), 0, $e);
+        }
+
+        return $statement->columnCount() > 0
+            ? $statement->fetchAll(\PDO::FETCH_ASSOC)
+            : ['affected' => $statement->rowCount()];
     }
 
     /**
@@ -115,7 +142,7 @@ class DatabaseQueryRunner
             return ['list' => false, 'sets' => [[]]];
         }
         if (!\is_array($bindings)) {
-            throw new \RuntimeException(sprintf(
+            throw new DatabaseQueryFailure(sprintf(
                 'the bindings must resolve to an object or an array of objects, got %s',
                 get_debug_type($bindings)
             ));
@@ -125,7 +152,7 @@ class DatabaseQueryRunner
         }
         foreach ($bindings as $i => $set) {
             if (!\is_array($set) || array_is_list($set)) {
-                throw new \RuntimeException(sprintf(
+                throw new DatabaseQueryFailure(sprintf(
                     'bindings run #%d must be an object of parameter values, got %s',
                     $i + 1,
                     get_debug_type($set)
@@ -145,7 +172,7 @@ class DatabaseQueryRunner
     private function placeholders(string $sql): array
     {
         $bare = preg_replace(["/'(?:[^']|'')*'/", '/"[^"]*"/'], ' ', $sql) ?? $sql;
-        preg_match_all('/(?<![:\w]):([a-zA-Z_][a-zA-Z0-9_]*)/', $bare, $matches);
+        preg_match_all('/(?<![:\w]):([a-zA-Z_]\w*)/', $bare, $matches);
 
         return array_values(array_unique($matches[1] ?? []));
     }
@@ -161,33 +188,33 @@ class DatabaseQueryRunner
     {
         $engine = trim((string) ($config['engine'] ?? ConnectorTester::ENGINE_POSTGRESQL));
         if ($engine !== '' && $engine !== ConnectorTester::ENGINE_POSTGRESQL) {
-            throw new \RuntimeException(sprintf('unsupported database engine "%s" (PostgreSQL only for now)', $engine));
+            throw new DatabaseQueryFailure(sprintf('unsupported database engine "%s" (PostgreSQL only for now)', $engine));
         }
         $host = trim((string) ($config['server'] ?? ''));
         $port = (int) ($config['port'] ?? 5432);
         $database = trim((string) ($config['database'] ?? ''));
         $user = trim((string) ($config['user'] ?? ''));
         if ($host === '' || $database === '' || $user === '') {
-            throw new \RuntimeException('the connector has no server/database/user configured');
+            throw new DatabaseQueryFailure('the connector has no server/database/user configured');
         }
-        if (!\in_array('pgsql', \PDO::getAvailableDrivers(), true)) {
-            throw new \RuntimeException('the pdo_pgsql PHP extension is not installed on the server');
+        if (!\in_array('pgsql', $this->availableDrivers(), true)) {
+            throw new DatabaseQueryFailure('the pdo_pgsql PHP extension is not installed on the server');
         }
         // PDO splits the pgsql DSN on ";" BEFORE libpq sees it — a value containing one would
         // inject another connection parameter, so it is refused (same as the connector Test).
         foreach (['server' => $host, 'database' => $database] as $label => $value) {
             if (str_contains($value, ';')) {
-                throw new \RuntimeException(sprintf('the %s must not contain ";"', $label));
+                throw new DatabaseQueryFailure(sprintf('the %s must not contain ";"', $label));
             }
         }
 
         $dsn = sprintf('pgsql:host=%s;port=%d;dbname=%s;connect_timeout=%d', $host, $port, $database, self::CONNECT_TIMEOUT);
         try {
-            $pdo = new \PDO($dsn, $user, (string) ($config['password'] ?? ''), [
+            $pdo = $this->openPdo($dsn, $user, (string) ($config['password'] ?? ''), [
                 \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
             ]);
         } catch (\PDOException $e) {
-            throw new \RuntimeException('could not connect to the database: ' . $e->getMessage(), 0, $e);
+            throw new DatabaseQueryFailure('could not connect to the database: ' . $e->getMessage(), 0, $e);
         }
 
         $schema = trim((string) ($config['schema'] ?? ''));
@@ -197,5 +224,21 @@ class DatabaseQueryRunner
         }
 
         return $pdo;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    protected function availableDrivers(): array
+    {
+        return \PDO::getAvailableDrivers();
+    }
+
+    /**
+     * @param array<int, mixed> $options
+     */
+    protected function openPdo(string $dsn, string $user, string $password, array $options): \PDO
+    {
+        return new \PDO($dsn, $user, $password, $options);
     }
 }

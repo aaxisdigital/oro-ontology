@@ -48,6 +48,8 @@ final class Lexer
         'enum' => TokenType::Enum,
     ];
 
+    private const DOLLARS = [1 => TokenType::Dollar, 2 => TokenType::DollarDollar, 3 => TokenType::DollarDollarDollar];
+
     public function __construct(string $source)
     {
         $this->source = $source;
@@ -78,56 +80,38 @@ final class Lexer
     private function nextToken(): ?Token
     {
         $ch = $this->source[$this->pos];
+
+        return match (true) {
+            // %dw version directive
+            $ch === '%' && $this->lookAhead('dw ') => $this->readDwVersion(),
+            // --- separator
+            $ch === '-' && $this->lookAhead('--') => $this->readSeparator(),
+            $this->startsNumber($ch) => $this->readNumber(),
+            // Strings: single/double quoted and backtick
+            $ch === '"' || $ch === '\'' || $ch === '`' => $this->readString($ch),
+            $ch === '/' && $this->isRegexContext() => $this->readRegex(),
+            // Identifiers and keywords
+            ctype_alpha($ch) || $ch === '_' => $this->readIdentifier(),
+            // Date/time/period literal: |2003-10-01|, |23:57:59|, |PT1S|… — anything not date-shaped
+            // between the pipes falls back to the `|` operator (type unions); then operators and
+            // delimiters.
+            default => ($ch === '|' ? $this->tryReadDateLiteral() : null) ?? $this->readOperator(),
+        };
+    }
+
+    private function readSeparator(): Token
+    {
         $line = $this->line;
         $col = $this->column;
+        $this->advance(3);
 
-        // %dw version directive
-        if ($ch === '%' && $this->lookAhead('dw ')) {
-            return $this->readDwVersion();
-        }
+        return new Token(TokenType::Separator, '---', $line, $col);
+    }
 
-        // --- separator
-        if ($ch === '-' && $this->lookAhead('--')) {
-            $this->advance(3);
-            return new Token(TokenType::Separator, '---', $line, $col);
-        }
-
-        // Numbers
-        if (ctype_digit($ch) || ($ch === '.' && $this->pos + 1 < $this->length && ctype_digit($this->source[$this->pos + 1]))) {
-            return $this->readNumber();
-        }
-
-        // Strings
-        if ($ch === '"' || $ch === '\'') {
-            return $this->readString($ch);
-        }
-
-        // Backtick strings
-        if ($ch === '`') {
-            return $this->readString('`');
-        }
-
-        // Regex
-        if ($ch === '/' && $this->isRegexContext()) {
-            return $this->readRegex();
-        }
-
-        // Identifiers and keywords
-        if (ctype_alpha($ch) || $ch === '_') {
-            return $this->readIdentifier();
-        }
-
-        // Date/time/period literal: |2003-10-01|, |23:57:59|, |PT1S|… — anything not date-shaped
-        // between the pipes falls back to the `|` operator (type unions).
-        if ($ch === '|') {
-            $literal = $this->tryReadDateLiteral();
-            if ($literal !== null) {
-                return $literal;
-            }
-        }
-
-        // Operators and delimiters
-        return $this->readOperator();
+    private function startsNumber(string $ch): bool
+    {
+        return ctype_digit($ch)
+            || ($ch === '.' && $this->pos + 1 < $this->length && ctype_digit($this->source[$this->pos + 1]));
     }
 
     /**
@@ -140,22 +124,23 @@ final class Lexer
         $line = $this->line;
         $col = $this->column;
         $end = $this->pos + 1;
+        $literal = null;
         while ($end < $this->length && $end - $this->pos <= 64) {
             $c = $this->source[$end];
             if ($c === '|') {
                 $inner = substr($this->source, $this->pos + 1, $end - $this->pos - 1);
                 if ($inner !== '' && preg_match('/^(-?P[0-9.YMWDTHS]+|\d{2,4}[:\-][0-9:.TZ+\-]+)$/i', $inner)) {
                     $this->advance($end - $this->pos + 1);
-                    return new Token(TokenType::DateLiteral, $inner, $line, $col);
+                    $literal = new Token(TokenType::DateLiteral, $inner, $line, $col);
                 }
-                return null;
+                break;
             }
             if ($c === "\n" || preg_match('/[^0-9A-Za-z:.+\-]/', $c)) {
-                return null;
+                break;
             }
             $end++;
         }
-        return null;
+        return $literal;
     }
 
     private function readDwVersion(): Token
@@ -303,18 +288,11 @@ final class Lexer
             return new Token($result[0], $result[1], $line, $col);
         }
 
-        // Dollar signs
+        // Dollar signs: $, $$ or $$$ (the longest run, at most three)
         if ($ch === '$') {
-            if ($next === '$') {
-                if ($this->pos + 2 < $this->length && $this->source[$this->pos + 2] === '$') {
-                    $this->advance(3);
-                    return new Token(TokenType::DollarDollarDollar, '$$$', $line, $col);
-                }
-                $this->advance(2);
-                return new Token(TokenType::DollarDollar, '$$', $line, $col);
-            }
-            $this->advance();
-            return new Token(TokenType::Dollar, '$', $line, $col);
+            $run = strspn($this->source, '$', $this->pos, 3);
+            $this->advance($run);
+            return new Token(self::DOLLARS[$run], str_repeat('$', $run), $line, $col);
         }
 
         // Single-character operators
@@ -353,38 +331,42 @@ final class Lexer
         while ($this->pos < $this->length) {
             $ch = $this->source[$this->pos];
 
-            if ($ch === ' ' || $ch === "\t" || $ch === "\r") {
+            if ($ch === ' ' || $ch === "\t" || $ch === "\r" || $ch === "\n") {
                 $this->advance();
-                continue;
+            } elseif ($this->atCommentStart('/')) {
+                $this->skipLineComment();
+            } elseif ($this->atCommentStart('*')) {
+                $this->skipBlockComment();
+            } else {
+                break;
             }
+        }
+    }
 
-            if ($ch === "\n") {
-                $this->advance();
-                continue;
-            }
+    /** A `/` followed by $second: `//` opens a line comment, `/*` a block comment. */
+    private function atCommentStart(string $second): bool
+    {
+        return $this->source[$this->pos] === '/'
+            && $this->pos + 1 < $this->length && $this->source[$this->pos + 1] === $second;
+    }
 
-            // Line comment
-            if ($ch === '/' && $this->pos + 1 < $this->length && $this->source[$this->pos + 1] === '/') {
-                while ($this->pos < $this->length && $this->source[$this->pos] !== "\n") {
-                    $this->advance();
-                }
-                continue;
-            }
+    private function skipLineComment(): void
+    {
+        while ($this->pos < $this->length && $this->source[$this->pos] !== "\n") {
+            $this->advance();
+        }
+    }
 
-            // Block comment
-            if ($ch === '/' && $this->pos + 1 < $this->length && $this->source[$this->pos + 1] === '*') {
+    /** Skips past the closing `*\/` — or to the end of the source when there is none. */
+    private function skipBlockComment(): void
+    {
+        $this->advance(2);
+        while ($this->pos < $this->length) {
+            if ($this->source[$this->pos] === '*' && $this->pos + 1 < $this->length && $this->source[$this->pos + 1] === '/') {
                 $this->advance(2);
-                while ($this->pos < $this->length) {
-                    if ($this->source[$this->pos] === '*' && $this->pos + 1 < $this->length && $this->source[$this->pos + 1] === '/') {
-                        $this->advance(2);
-                        break;
-                    }
-                    $this->advance();
-                }
-                continue;
+                break;
             }
-
-            break;
+            $this->advance();
         }
     }
 

@@ -909,7 +909,7 @@
 
         &[disabled] {
             background: #f4f6f8;
-            color: #9aa7b4;
+            color: #69727a;
         }
     }
 
@@ -980,7 +980,7 @@
         // Result no longer matches the current script/limit (not re-run yet).
         &.is-stale {
             background: #eceff2;
-            color: #6b7a89;
+            color: #606e7b;
         }
 
         // Script/parse/runtime error text.
@@ -1127,7 +1127,7 @@
         border: 1px solid #d6dde4;
         border-radius: 4px;
         background: #fff;
-        color: #8a98a6;
+        color: #6d7883;
         cursor: pointer;
 
         &:hover {
@@ -1482,7 +1482,7 @@
         border-bottom: 0;
         border-radius: 6px 6px 0 0;
         background: #e4e9ee;
-        color: #5c6b7a;
+        color: #5b6a79;
         font-size: 12.5px;
         cursor: pointer;
         white-space: nowrap;

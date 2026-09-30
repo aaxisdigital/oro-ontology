@@ -48,6 +48,19 @@ interface VersionEntry {
     payload: any;
 }
 
+/** Working state of the textual JSON re-indenter (see reindentJson). */
+interface ReindentState {
+    out: string;
+    depth: number;
+    inString: boolean;
+    escaped: boolean;
+}
+
+/** A newline plus two spaces per nesting level. */
+function indentPad(depth: number): string {
+    return '\n' + '  '.repeat(depth);
+}
+
 /**
  * Data View page built on the reusable DataGrid widget, with an "Add Data" form.
  */
@@ -295,7 +308,7 @@ class OntologyDataViewComponent extends BaseComponent {
             const $cur = $marks.eq(current_match).addClass('is-current');
             $count.text((current_match + 1) + ' / ' + $marks.length);
             const el = $cur.get(0);
-            if (el && el.scrollIntoView) {
+            if (el?.scrollIntoView) {
                 el.scrollIntoView({block: 'nearest'});
             }
         };
@@ -579,7 +592,7 @@ class OntologyDataViewComponent extends BaseComponent {
         $entity.on('change', () => {
             const ent = this.entities.find(e => String(e.id) === String($entity.val()));
             this.addUniqueAttribute = ent ? String(ent.uniqueAttribute || '') : '';
-            if (ent && ent.systemId != null) {
+            if (ent?.systemId != null) {
                 this.addSyncing = true;
                 $system.val(String(ent.systemId)).trigger('change');
                 this.addSyncing = false;
@@ -676,28 +689,39 @@ class OntologyDataViewComponent extends BaseComponent {
         }
 
         if (!this.isFormatValid(format, raw)) {
-            this.$addPayloadError.text(format === 'csv'
-                ? __('aaxis.ontology.data_view.csv_header_required')
-                : __('aaxis.ontology.data_view.payload_invalid'));
+            this.$addPayloadError.text(this.invalidPayloadMessage(format));
             return false;
         }
 
         const attr = this.addUniqueAttribute;
         if (attr !== '' && (format === 'json' || format === 'csv')) {
-            const records = this.parseAllRecords(format, raw);
-            if (records === null || records.length === 0) {
-                this.$addPayloadError.text(__('aaxis.ontology.data_view.payload_invalid'));
+            return this.validateUniqueAttribute(format, raw, attr);
+        }
+        return true;
+    }
+
+    /** The message for a payload that does not parse: CSV's only failure mode is a missing header row. */
+    private invalidPayloadMessage(format: string): string {
+        return format === 'csv'
+            ? __('aaxis.ontology.data_view.csv_header_required')
+            : __('aaxis.ontology.data_view.payload_invalid');
+    }
+
+    /** Every parsed record must carry the entity's unique attribute; flags the first row that does not. */
+    private validateUniqueAttribute(format: string, raw: string, attr: string): boolean {
+        const records = this.parseAllRecords(format, raw);
+        if (records === null || records.length === 0) {
+            this.$addPayloadError.text(__('aaxis.ontology.data_view.payload_invalid'));
+            return false;
+        }
+        for (let i = 0; i < records.length; i++) {
+            const rec = records[i];
+            const value = (rec && typeof rec === 'object' && !Array.isArray(rec)) ? rec[attr] : undefined;
+            if (value === undefined || value === null || String(value).trim() === '') {
+                this.$addPayloadError.text(__('aaxis.ontology.data_view.unique_attribute_missing', {
+                    attribute: attr, row: i + 1
+                }));
                 return false;
-            }
-            for (let i = 0; i < records.length; i++) {
-                const rec = records[i];
-                const value = (rec && typeof rec === 'object' && !Array.isArray(rec)) ? rec[attr] : undefined;
-                if (value === undefined || value === null || String(value).trim() === '') {
-                    this.$addPayloadError.text(__('aaxis.ontology.data_view.unique_attribute_missing', {
-                        attribute: attr, row: i + 1
-                    }));
-                    return false;
-                }
             }
         }
         return true;
@@ -718,7 +742,7 @@ class OntologyDataViewComponent extends BaseComponent {
                 const lines = raw.split(/\r\n|\r|\n/).filter(l => l.trim() !== '');
                 return lines.length > 0 && lines[0].trim() !== '';
             }
-        } catch (e) {
+        } catch {
             return false;
         }
         return false;
@@ -776,9 +800,7 @@ class OntologyDataViewComponent extends BaseComponent {
         // Only gate formatting on parseability (not the unique-attribute check), so the payload can
         // be tidied before the id attribute is filled in.
         if (!this.isFormatValid(format, raw)) {
-            this.$addPayloadError.text(format === 'csv'
-                ? __('aaxis.ontology.data_view.csv_header_required')
-                : __('aaxis.ontology.data_view.payload_invalid'));
+            this.$addPayloadError.text(this.invalidPayloadMessage(format));
             return;
         }
         if (format === 'json') {
@@ -834,63 +856,68 @@ class OntologyDataViewComponent extends BaseComponent {
      * numbers exactly and compares them numerically.
      */
     private reindentJson(raw: string): string {
-        const pad = (depth: number): string => '\n' + '  '.repeat(depth);
-        let out = '';
-        let depth = 0;
-        let inString = false;
-        let escaped = false;
+        const state: ReindentState = {out: '', depth: 0, inString: false, escaped: false};
 
         for (let i = 0; i < raw.length; i++) {
             const ch = raw[i];
-            if (inString) {
-                out += ch;
-                if (escaped) {
-                    escaped = false;
-                } else if (ch === '\\') {
-                    escaped = true;
-                } else if (ch === '"') {
-                    inString = false;
-                }
-                continue;
+            if (state.inString) {
+                this.reindentStringChar(state, ch);
+            } else if (ch === '"') {
+                state.inString = true;
+                state.out += ch;
+            } else if (ch === '{' || ch === '[') {
+                i += this.reindentOpener(state, raw, i);
+            } else {
+                this.reindentStructural(state, ch);
             }
-            if (ch === '"') {
-                inString = true;
-                out += ch;
-                continue;
-            }
-            if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
-                continue; // structural whitespace is rebuilt below
-            }
-            if (ch === '{' || ch === '[') {
-                // An empty container stays on one line, like JSON.stringify renders it.
-                const next = raw.slice(i + 1).search(/\S/);
-                const closer = ch === '{' ? '}' : ']';
-                if (next !== -1 && raw[i + 1 + next] === closer) {
-                    out += ch + closer;
-                    i += 1 + next;
-                    continue;
-                }
-                depth++;
-                out += ch + pad(depth);
-                continue;
-            }
-            if (ch === '}' || ch === ']') {
-                depth = Math.max(0, depth - 1);
-                out += pad(depth) + ch;
-                continue;
-            }
-            if (ch === ',') {
-                out += ',' + pad(depth);
-                continue;
-            }
-            if (ch === ':') {
-                out += ': ';
-                continue;
-            }
-            out += ch;
         }
 
-        return out;
+        return state.out;
+    }
+
+    /** Inside a string literal every character is copied verbatim; only the closing quote ends it. */
+    private reindentStringChar(state: ReindentState, ch: string): void {
+        state.out += ch;
+        if (state.escaped) {
+            state.escaped = false;
+        } else if (ch === '\\') {
+            state.escaped = true;
+        } else if (ch === '"') {
+            state.inString = false;
+        }
+    }
+
+    /** Opens a container; returns how many extra characters of `raw` an EMPTY container consumed. */
+    private reindentOpener(state: ReindentState, raw: string, at: number): number {
+        const ch = raw[at];
+        // An empty container stays on one line, like JSON.stringify renders it.
+        const next = raw.slice(at + 1).search(/\S/);
+        const closer = ch === '{' ? '}' : ']';
+        if (next !== -1 && raw[at + 1 + next] === closer) {
+            state.out += ch + closer;
+            return 1 + next;
+        }
+        state.depth++;
+        state.out += ch + indentPad(state.depth);
+
+        return 0;
+    }
+
+    /** Closers, commas, colons and other tokens outside strings; structural whitespace is dropped. */
+    private reindentStructural(state: ReindentState, ch: string): void {
+        if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+            return; // structural whitespace is rebuilt from the depth
+        }
+        if (ch === '}' || ch === ']') {
+            state.depth = Math.max(0, state.depth - 1);
+            state.out += indentPad(state.depth) + ch;
+        } else if (ch === ',') {
+            state.out += ',' + indentPad(state.depth);
+        } else if (ch === ':') {
+            state.out += ': ';
+        } else {
+            state.out += ch;
+        }
     }
 
     private prettyXml(xml: string): string {
@@ -927,9 +954,9 @@ class OntologyDataViewComponent extends BaseComponent {
         };
         this.setAddSubmitBusy(true);
         apiFetch(routing.generate('aaxis_ontology_data_create'), 'POST', body).then(res => {
-            if (!res.ok || !res.data || !res.data.success) {
+            if (!res.ok || !res.data?.success) {
                 this.setAddSubmitBusy(false);
-                this.showFormError(this.$addError, (res.data && res.data.message) || __('aaxis.ontology.data_view.save_error'));
+                this.showFormError(this.$addError, res.data?.message || __('aaxis.ontology.data_view.save_error'));
                 this.updateAddState();
                 return;
             }
@@ -1021,7 +1048,7 @@ class OntologyDataViewComponent extends BaseComponent {
         textNodes.forEach(textNode => {
             const text = textNode.nodeValue || '';
             const lower = text.toLowerCase();
-            if (lower.indexOf(needle) === -1) {
+            if (!lower.includes(needle)) {
                 return;
             }
             const fragment = document.createDocumentFragment();
@@ -1051,7 +1078,7 @@ class OntologyDataViewComponent extends BaseComponent {
     private copyToClipboard(text: string): void {
         const done = () => messenger.notificationFlashMessage('success', __('aaxis.ontology.data_view.copied'));
         const fail = () => messenger.notificationFlashMessage('error', __('aaxis.ontology.data_view.copy_error'));
-        if (navigator.clipboard && navigator.clipboard.writeText) {
+        if (navigator.clipboard?.writeText) {
             navigator.clipboard.writeText(text).then(done).catch(fail);
             return;
         }
@@ -1064,9 +1091,9 @@ class OntologyDataViewComponent extends BaseComponent {
             document.body.appendChild(ta);
             ta.select();
             document.execCommand('copy');
-            document.body.removeChild(ta);
+            ta.remove();
             done();
-        } catch (e) {
+        } catch {
             fail();
         }
     }

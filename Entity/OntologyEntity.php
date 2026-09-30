@@ -156,10 +156,8 @@ class OntologyEntity
 
     public function removeAttribute(OntologyEntityAttribute $attribute): self
     {
-        if ($this->attributes->removeElement($attribute)) {
-            if ($attribute->getEntity() === $this) {
-                $attribute->setEntity(null);
-            }
+        if ($this->attributes->removeElement($attribute) && $attribute->getEntity() === $this) {
+            $attribute->setEntity(null);
         }
 
         return $this;

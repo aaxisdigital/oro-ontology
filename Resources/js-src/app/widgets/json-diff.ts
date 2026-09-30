@@ -12,26 +12,32 @@ export function isPlainObject(value: any): boolean {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+// The token grammar is assembled from small pieces (one alternative each) so each regex stays readable.
+const JSON_STRING_TOKEN = /"(?:\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?/;
+const JSON_LITERAL_TOKEN = /\b(?:true|false)\b|\bnull\b/;
+const JSON_NUMBER_TOKEN = /-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?/;
+const JSON_TOKEN = new RegExp(
+    [JSON_STRING_TOKEN, JSON_LITERAL_TOKEN, JSON_NUMBER_TOKEN].map(token => '(?:' + token.source + ')').join('|'),
+    'g'
+);
+
 /** Colours a pretty-printed JSON string (keys/strings/numbers/bools/null spans). */
 export function highlightJson(json: string): string {
     const escaped = json
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
-    return escaped.replace(
-        /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|\bnull\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
-        (match: string) => {
-            let cls = 'aaxis-json-num';
-            if (/^"/.test(match)) {
-                cls = /:$/.test(match) ? 'aaxis-json-key' : 'aaxis-json-str';
-            } else if (/true|false/.test(match)) {
-                cls = 'aaxis-json-bool';
-            } else if (/null/.test(match)) {
-                cls = 'aaxis-json-null';
-            }
-            return '<span class="' + cls + '">' + match + '</span>';
+    return escaped.replace(JSON_TOKEN, (match: string) => {
+        let cls = 'aaxis-json-num';
+        if (match.startsWith('"')) {
+            cls = match.endsWith(':') ? 'aaxis-json-key' : 'aaxis-json-str';
+        } else if (/true|false/.test(match)) {
+            cls = 'aaxis-json-bool';
+        } else if (/null/.test(match)) {
+            cls = 'aaxis-json-null';
         }
-    );
+        return '<span class="' + cls + '">' + match + '</span>';
+    });
 }
 
 /** Pretty-prints a JS value to coloured JSON HTML, aligning continuation lines to `indent`. */
@@ -171,31 +177,40 @@ export function pruneToDiff(sel: any, prev: any): {sel: any; prev: any} | null {
         return null;
     }
     if (Array.isArray(sel) && Array.isArray(prev)) {
-        const outSelList: any[] = [];
-        const outPrevList: any[] = [];
-        const length = Math.max(sel.length, prev.length);
-        for (let i = 0; i < length; i++) {
-            if (i < sel.length && i < prev.length) {
-                const branch = pruneToDiff(sel[i], prev[i]);
-                if (branch !== null) {
-                    outSelList.push(branch.sel);
-                    outPrevList.push(branch.prev);
-                }
-                continue;
-            }
-            // A trailing element only one side has: added (highlighted) or removed (struck).
-            if (i < sel.length) {
-                outSelList.push(sel[i]);
-            } else {
-                outPrevList.push(prev[i]);
-            }
-        }
-        return {sel: outSelList, prev: outPrevList};
+        return pruneArrays(sel, prev);
     }
     if (!isPlainObject(sel) || !isPlainObject(prev)) {
         return {sel, prev};
     }
 
+    return pruneObjects(sel, prev);
+}
+
+function pruneArrays(sel: any[], prev: any[]): {sel: any[]; prev: any[]} {
+    const outSelList: any[] = [];
+    const outPrevList: any[] = [];
+    const length = Math.max(sel.length, prev.length);
+    for (let i = 0; i < length; i++) {
+        if (i < sel.length && i < prev.length) {
+            const branch = pruneToDiff(sel[i], prev[i]);
+            if (branch !== null) {
+                outSelList.push(branch.sel);
+                outPrevList.push(branch.prev);
+            }
+            continue;
+        }
+        // A trailing element only one side has: added (highlighted) or removed (struck).
+        if (i < sel.length) {
+            outSelList.push(sel[i]);
+        } else {
+            outPrevList.push(prev[i]);
+        }
+    }
+
+    return {sel: outSelList, prev: outPrevList};
+}
+
+function pruneObjects(sel: Record<string, any>, prev: Record<string, any>): {sel: any; prev: any} {
     const outSel: Record<string, any> = {};
     const outPrev: Record<string, any> = {};
     const keys: string[] = Object.keys(sel);

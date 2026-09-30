@@ -143,8 +143,9 @@ class OroEntityReader
         [$em, $md, $selects] = $this->prepare($entity);
 
         $orderBy = trim((string) $orderBy);
+        $sqlDirection = strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC';
         $order = $md->hasField($orderBy)
-            ? sprintf('e.%s %s, %s', $orderBy, strtoupper($direction) === 'DESC' ? 'DESC' : 'ASC', $this->identifierOrder($md))
+            ? sprintf('e.%s %s, %s', $orderBy, $sqlDirection, $this->identifierOrder($md))
             : $this->identifierOrder($md);
 
         $query = $em->createQuery(sprintf(

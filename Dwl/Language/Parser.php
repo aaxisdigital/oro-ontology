@@ -243,6 +243,17 @@ final class Parser
     private function parseTypeExpression(): Node
     {
         $name = $this->consume(TokenType::Identifier)->value;
+        $metadata = $this->parseTypeMetadata();
+        return new TypeReference($name, $metadata, $this->current()->line, $this->current()->column);
+    }
+
+    /**
+     * The optional `{key: value, …}` block after a type name (`String {format: "yyyy"}`).
+     *
+     * @return array<string, string>
+     */
+    private function parseTypeMetadata(): array
+    {
         $metadata = [];
         if ($this->check(TokenType::LeftBrace)) {
             $this->advance();
@@ -257,7 +268,7 @@ final class Parser
             }
             $this->consume(TokenType::RightBrace);
         }
-        return new TypeReference($name, $metadata, $this->current()->line, $this->current()->column);
+        return $metadata;
     }
 
     private function parseNsDirective(): NsDirective
@@ -317,8 +328,7 @@ final class Parser
     private function parsePrivateDirective(): Directive
     {
         $this->consume(TokenType::Private);
-        $directive = $this->parseDirective();
-        return $directive; // Private is just a visibility modifier
+        return $this->parseDirective(); // Private is just a visibility modifier
     }
 
     private function parseImplicitObject(): ObjectLiteral
@@ -359,226 +369,170 @@ final class Parser
                 break;
             }
 
-            // Handle different infix forms
-            if ($this->isBinaryOperator($token)) {
-                $op = $token->value;
-                $this->advance();
-                $right = $this->parseExpression($opPrec);
-                $left = new BinaryOp($left, $op, $right, $token->line, $token->column);
-                continue;
+            $next = $this->parseInfixOperation($left, $token, $opPrec);
+            if ($next === null) {
+                break;
             }
-
-            // Infix function call: value functionName value
-            if ($token->type === TokenType::Identifier && $this->isInfixFunction($token->value)) {
-                $name = $token->value;
-                $this->advance();
-                $right = $this->parseExpression($opPrec);
-                $left = new InfixFunctionCall($left, $name, $right, $token->line, $token->column);
-                continue;
-            }
-
-            // Keyword-based infix operators: default, match
-            if ($token->type === TokenType::Default || $token->type === TokenType::Match) {
-                $name = $token->value;
-                $this->advance();
-                $right = $this->parseExpression($opPrec);
-                $left = new InfixFunctionCall($left, $name, $right, $token->line, $token->column);
-                continue;
-            }
-
-            // Member access: .property — the key may also be QUOTED (.'some key' / ."some key"),
-            // which DataWeave allows for keys that are not valid identifiers (or just quoted, as
-            // in `$.'type'`).
-            if ($token->type === TokenType::Dot) {
-                $this->advance();
-                if ($this->check(TokenType::Identifier) || $this->isKeywordToken($this->current())
-                    || $this->check(TokenType::String)
-                ) {
-                    $prop = $this->advance()->value;
-                    $left = new MemberAccess($left, $prop, $token->line, $token->column);
-                    continue;
-                }
-            }
-
-            // Descendant selector: ..property (recursively collects all matching values)
-            if ($token->type === TokenType::DotDot) {
-                $this->advance();
-                if ($this->check(TokenType::Identifier) || $this->isKeywordToken($this->current())
-                    || $this->check(TokenType::String)
-                ) {
-                    $prop = $this->advance()->value;
-                    $left = new DescendantSelector($left, $prop, $token->line, $token->column);
-                    continue;
-                }
-            }
-
-            // Multi-value selector: .*property (quoted keys allowed, like the plain selector)
-            if ($token->type === TokenType::DotStar) {
-                $this->advance();
-                $prop = $this->check(TokenType::String)
-                    ? $this->advance()->value
-                    : $this->consume(TokenType::Identifier)->value;
-                $left = new MultiValueSelector($left, $prop, $token->line, $token->column);
-                continue;
-            }
-
-            // Index access: [expr]
-            if ($token->type === TokenType::LeftBracket) {
-                $this->advance();
-                $index = $this->parseExpression();
-                $this->consume(TokenType::RightBracket);
-                $left = new IndexAccess($left, $index, $token->line, $token->column);
-                continue;
-            }
-
-            // Type coercion: expr as Type
-            if ($token->type === TokenType::As) {
-                $this->advance();
-                $typeName = $this->consume(TokenType::Identifier)->value;
-                $metadata = [];
-                if ($this->check(TokenType::LeftBrace)) {
-                    $this->advance();
-                    while (!$this->check(TokenType::RightBrace)) {
-                        $key = $this->consume(TokenType::Identifier)->value;
-                        $this->consume(TokenType::Colon);
-                        $val = $this->consumeAny()->value;
-                        $metadata[$key] = $val;
-                        if ($this->check(TokenType::Comma)) {
-                            $this->advance();
-                        }
-                    }
-                    $this->consume(TokenType::RightBrace);
-                }
-                $typeRef = new TypeReference($typeName, $metadata, $token->line, $token->column);
-                $left = new TypeCoercion($left, $typeRef, $token->line, $token->column);
-                continue;
-            }
-
-            // is Type check
-            if ($token->type === TokenType::Is) {
-                $this->advance();
-                $typeName = $this->consume(TokenType::Identifier)->value;
-                $left = new BinaryOp($left, 'is', new Identifier($typeName, $token->line, $token->column), $token->line, $token->column);
-                continue;
-            }
-
-            break;
+            $left = $next;
         }
 
         return $left;
+    }
+
+    /**
+     * One infix step on $left; null when the token turns out to start no infix form (a dangling
+     * `.`/`..` selector, which is consumed and dropped).
+     */
+    private function parseInfixOperation(Node $left, Token $token, int $opPrec): ?Node
+    {
+        return match (true) {
+            $this->isBinaryOperator($token)
+                => new BinaryOp($left, $token->value, $this->parseRightOperand($opPrec), $token->line, $token->column),
+            // Infix function call (value functionName value) and the keyword-based infix
+            // operators: default, match
+            $this->isInfixCallToken($token)
+                => new InfixFunctionCall($left, $token->value, $this->parseRightOperand($opPrec), $token->line, $token->column),
+            default => $this->parseSelector($left, $token),
+        };
+    }
+
+    private function parseRightOperand(int $opPrec): Node
+    {
+        $this->advance();
+        return $this->parseExpression($opPrec);
+    }
+
+    private function isInfixCallToken(Token $token): bool
+    {
+        return ($token->type === TokenType::Identifier && $this->isInfixFunction($token->value))
+            || $token->type === TokenType::Default || $token->type === TokenType::Match;
+    }
+
+    private function parseSelector(Node $left, Token $token): ?Node
+    {
+        return match ($token->type) {
+            TokenType::Dot => $this->parseDotSelector($left, $token, false),
+            TokenType::DotDot => $this->parseDotSelector($left, $token, true),
+            TokenType::DotStar => $this->parseMultiValueSelector($left, $token),
+            TokenType::LeftBracket => $this->parseIndexAccess($left, $token),
+            TokenType::As => $this->parseTypeCoercion($left, $token),
+            TokenType::Is => $this->parseIsCheck($left, $token),
+            default => null,
+        };
+    }
+
+    /**
+     * Member access `.property` and the descendant selector `..property` (recursively collects all
+     * matching values). The key may also be QUOTED (.'some key' / ."some key"), which DataWeave
+     * allows for keys that are not valid identifiers (or just quoted, as in `$.'type'`).
+     */
+    private function parseDotSelector(Node $left, Token $token, bool $descendant): ?Node
+    {
+        $this->advance();
+        if (!$this->check(TokenType::Identifier) && !$this->isKeywordToken($this->current())
+            && !$this->check(TokenType::String)
+        ) {
+            return null;
+        }
+        $prop = $this->advance()->value;
+
+        return $descendant
+            ? new DescendantSelector($left, $prop, $token->line, $token->column)
+            : new MemberAccess($left, $prop, $token->line, $token->column);
+    }
+
+    /** Multi-value selector: .*property (quoted keys allowed, like the plain selector) */
+    private function parseMultiValueSelector(Node $left, Token $token): MultiValueSelector
+    {
+        $this->advance();
+        $prop = $this->check(TokenType::String)
+            ? $this->advance()->value
+            : $this->consume(TokenType::Identifier)->value;
+        return new MultiValueSelector($left, $prop, $token->line, $token->column);
+    }
+
+    /** Index access: [expr] */
+    private function parseIndexAccess(Node $left, Token $token): IndexAccess
+    {
+        $this->advance();
+        $index = $this->parseExpression();
+        $this->consume(TokenType::RightBracket);
+        return new IndexAccess($left, $index, $token->line, $token->column);
+    }
+
+    /** Type coercion: expr as Type {metadata} */
+    private function parseTypeCoercion(Node $left, Token $token): TypeCoercion
+    {
+        $this->advance();
+        $typeName = $this->consume(TokenType::Identifier)->value;
+        $metadata = $this->parseTypeMetadata();
+        $typeRef = new TypeReference($typeName, $metadata, $token->line, $token->column);
+        return new TypeCoercion($left, $typeRef, $token->line, $token->column);
+    }
+
+    /** is Type check */
+    private function parseIsCheck(Node $left, Token $token): BinaryOp
+    {
+        $this->advance();
+        $typeName = $this->consume(TokenType::Identifier)->value;
+        return new BinaryOp($left, 'is', new Identifier($typeName, $token->line, $token->column), $token->line, $token->column);
     }
 
     private function parsePrimary(): Node
     {
         $token = $this->current();
 
-        // Date/time/period literal (|2003-10-01|, |PT1S|…)
-        if ($token->type === TokenType::DateLiteral) {
-            $this->advance();
-            return new DateTimeLiteral($token->value, $token->line, $token->column);
-        }
+        return match ($token->type) {
+            TokenType::DateLiteral, TokenType::Number, TokenType::String, TokenType::True, TokenType::False,
+            TokenType::NullKeyword, TokenType::Regex,
+            TokenType::Dollar, TokenType::DollarDollar, TokenType::DollarDollarDollar => $this->parseLiteral($token),
+            TokenType::Minus, TokenType::Not => $this->parseUnary($token),
+            // Parenthesized expression or lambda
+            TokenType::LeftParen => $this->parseParenOrLambda(),
+            TokenType::LeftBracket => $this->parseArray(),
+            TokenType::LeftBrace => $this->parseObject(),
+            TokenType::If => $this->parseIfExpression(),
+            TokenType::Match => $this->parseMatchExpression(),
+            TokenType::Do => $this->parseDoExpression(),
+            // Identifier (variable, function call, module ref)
+            TokenType::Identifier => $this->parseIdentifierExpression(),
+            default => throw new ParserException(
+                "Unexpected token {$token->type->value} '{$token->value}' at line {$token->line}, column {$token->column}"
+            ),
+        };
+    }
 
-        // Number literal
-        if ($token->type === TokenType::Number) {
-            $this->advance();
-            $val = str_contains($token->value, '.') ? (float) $token->value : (int) $token->value;
-            return new NumberLiteral($val, $token->line, $token->column);
-        }
+    /** Literals (date/time/period, number, string, boolean, null, regex) and $ / $$ / $$$. */
+    private function parseLiteral(Token $token): Node
+    {
+        $this->advance();
 
-        // String literal
-        if ($token->type === TokenType::String) {
-            $this->advance();
-            return new StringLiteral($token->value, $token->line, $token->column);
-        }
+        return match ($token->type) {
+            TokenType::DateLiteral => new DateTimeLiteral($token->value, $token->line, $token->column),
+            TokenType::Number => new NumberLiteral(
+                str_contains($token->value, '.') ? (float) $token->value : (int) $token->value,
+                $token->line,
+                $token->column
+            ),
+            TokenType::String => new StringLiteral($token->value, $token->line, $token->column),
+            TokenType::True => new BooleanLiteral(true, $token->line, $token->column),
+            TokenType::False => new BooleanLiteral(false, $token->line, $token->column),
+            TokenType::NullKeyword => new NullLiteral($token->line, $token->column),
+            TokenType::Regex => new RegexLiteral($token->value, $token->line, $token->column),
+            TokenType::Dollar => new DollarRef(1, $token->line, $token->column),
+            TokenType::DollarDollar => new DollarRef(2, $token->line, $token->column),
+            TokenType::DollarDollarDollar => new DollarRef(3, $token->line, $token->column),
+        };
+    }
 
-        // Boolean
-        if ($token->type === TokenType::True) {
-            $this->advance();
-            return new BooleanLiteral(true, $token->line, $token->column);
-        }
-        if ($token->type === TokenType::False) {
-            $this->advance();
-            return new BooleanLiteral(false, $token->line, $token->column);
-        }
+    /** Unary minus binds to the next primary; `not` / `!` to a whole comparison. */
+    private function parseUnary(Token $token): UnaryOp
+    {
+        $this->advance();
 
-        // Null
-        if ($token->type === TokenType::NullKeyword) {
-            $this->advance();
-            return new NullLiteral($token->line, $token->column);
-        }
-
-        // Regex
-        if ($token->type === TokenType::Regex) {
-            $this->advance();
-            return new RegexLiteral($token->value, $token->line, $token->column);
-        }
-
-        // Dollar references
-        if ($token->type === TokenType::Dollar) {
-            $this->advance();
-            return new DollarRef(1, $token->line, $token->column);
-        }
-        if ($token->type === TokenType::DollarDollar) {
-            $this->advance();
-            return new DollarRef(2, $token->line, $token->column);
-        }
-        if ($token->type === TokenType::DollarDollarDollar) {
-            $this->advance();
-            return new DollarRef(3, $token->line, $token->column);
-        }
-
-        // Unary minus
-        if ($token->type === TokenType::Minus) {
-            $this->advance();
-            $operand = $this->parsePrimary();
-            return new UnaryOp('-', $operand, $token->line, $token->column);
-        }
-
-        // Not operator
-        if ($token->type === TokenType::Not) {
-            $this->advance();
-            $operand = $this->parseExpression(12);
-            return new UnaryOp('not', $operand, $token->line, $token->column);
-        }
-
-        // Parenthesized expression or lambda
-        if ($token->type === TokenType::LeftParen) {
-            return $this->parseParenOrLambda();
-        }
-
-        // Array literal
-        if ($token->type === TokenType::LeftBracket) {
-            return $this->parseArray();
-        }
-
-        // Object literal
-        if ($token->type === TokenType::LeftBrace) {
-            return $this->parseObject();
-        }
-
-        // If expression
-        if ($token->type === TokenType::If) {
-            return $this->parseIfExpression();
-        }
-
-        // Match expression
-        if ($token->type === TokenType::Match) {
-            return $this->parseMatchExpression();
-        }
-
-        // Do expression
-        if ($token->type === TokenType::Do) {
-            return $this->parseDoExpression();
-        }
-
-        // Identifier (variable, function call, module ref)
-        if ($token->type === TokenType::Identifier) {
-            return $this->parseIdentifierExpression();
-        }
-
-        throw new ParserException(
-            "Unexpected token {$token->type->value} '{$token->value}' at line {$token->line}, column {$token->column}"
-        );
+        return $token->type === TokenType::Minus
+            ? new UnaryOp('-', $this->parsePrimary(), $token->line, $token->column)
+            : new UnaryOp('not', $this->parseExpression(12), $token->line, $token->column);
     }
 
     private function parseParenOrLambda(): Node
@@ -701,32 +655,27 @@ final class Parser
     {
         $token = $this->current();
 
-        if ($token->type === TokenType::String) {
-            $this->advance();
-            return new StringLiteral($token->value, $token->line, $token->column);
-        }
+        return match (true) {
+            $token->type === TokenType::String => new StringLiteral($this->advance()->value, $token->line, $token->column),
+            $token->type === TokenType::Identifier => $this->parseIdentifierKey($token),
+            // Allow keywords as object keys (e.g., type, name, default, etc.)
+            $this->isKeywordToken($token) => new Identifier($this->advance()->value, $token->line, $token->column),
+            default => throw new ParserException(
+                "Expected object key at line {$token->line}, column {$token->column}"
+            ),
+        };
+    }
 
-        if ($token->type === TokenType::Identifier) {
-            $this->advance();
-            // Check for namespace prefix: ns0#name
-            if ($this->check(TokenType::Hash)) {
-                $prefix = $token->value;
-                $this->advance();
-                $name = $this->consume(TokenType::Identifier)->value;
-                return new NamespaceSelector($prefix, $name, $token->line, $token->column);
-            }
+    /** A plain identifier key, or a namespace-prefixed one: ns0#name */
+    private function parseIdentifierKey(Token $token): Node
+    {
+        $this->advance();
+        if (!$this->check(TokenType::Hash)) {
             return new Identifier($token->value, $token->line, $token->column);
         }
-
-        // Allow keywords as object keys (e.g., type, name, default, etc.)
-        if ($this->isKeywordToken($token)) {
-            $this->advance();
-            return new Identifier($token->value, $token->line, $token->column);
-        }
-
-        throw new ParserException(
-            "Expected object key at line {$token->line}, column {$token->column}"
-        );
+        $this->advance();
+        $name = $this->consume(TokenType::Identifier)->value;
+        return new NamespaceSelector($token->value, $name, $token->line, $token->column);
     }
 
     private function isKeywordToken(Token $token): bool
@@ -773,7 +722,6 @@ final class Parser
                 $body = $this->parseExpression();
                 $cases[] = new MatchCase(null, $body, true);
             } else {
-                $binding = null;
                 if ($this->check(TokenType::Case)) {
                     $this->advance();
                 }
@@ -811,53 +759,37 @@ final class Parser
 
     private function parseIdentifierExpression(): Node
     {
-        $token = $this->current();
+        $token = $this->advance();
+
+        // Module reference (Module::member) or plain name
+        $callee = $this->check(TokenType::ColonColon)
+            ? $this->parseModuleRef($token)
+            : new Identifier($token->value, $token->line, $token->column);
+        if (!$this->check(TokenType::LeftParen)) {
+            return $callee;
+        }
+
+        // Function call: name(args) / Module::member(args)
         $this->advance();
-        $name = $token->value;
+        $args = $this->parseArgList();
+        $this->consume(TokenType::RightParen);
+        return new FunctionCall($callee, $args, $token->line, $token->column);
+    }
 
-        // Module reference: Module::member
-        if ($this->check(TokenType::ColonColon)) {
-            $module = $name;
-            while ($this->check(TokenType::ColonColon)) {
-                $this->advance();
-                $member = $this->consume(TokenType::Identifier)->value;
-                $module .= '::' . $member;
-            }
-            // The last segment is the member, everything before is the module
-            $lastSep = strrpos($module, '::');
-            $modulePath = substr($module, 0, $lastSep);
-            $memberName = substr($module, $lastSep + 2);
-
-            // Check if it's a function call
-            if ($this->check(TokenType::LeftParen)) {
-                $this->advance();
-                $args = $this->parseArgList();
-                $this->consume(TokenType::RightParen);
-                return new FunctionCall(
-                    new ModuleRef($modulePath, $memberName, $token->line, $token->column),
-                    $args,
-                    $token->line,
-                    $token->column
-                );
-            }
-
-            return new ModuleRef($modulePath, $memberName, $token->line, $token->column);
-        }
-
-        // Function call: name(args)
-        if ($this->check(TokenType::LeftParen)) {
+    private function parseModuleRef(Token $token): ModuleRef
+    {
+        $module = $token->value;
+        while ($this->check(TokenType::ColonColon)) {
             $this->advance();
-            $args = $this->parseArgList();
-            $this->consume(TokenType::RightParen);
-            return new FunctionCall(
-                new Identifier($name, $token->line, $token->column),
-                $args,
-                $token->line,
-                $token->column
-            );
+            $member = $this->consume(TokenType::Identifier)->value;
+            $module .= '::' . $member;
         }
+        // The last segment is the member, everything before is the module
+        $lastSep = strrpos($module, '::');
+        $modulePath = substr($module, 0, $lastSep);
+        $memberName = substr($module, $lastSep + 2);
 
-        return new Identifier($name, $token->line, $token->column);
+        return new ModuleRef($modulePath, $memberName, $token->line, $token->column);
     }
 
     /** @return Node[] */

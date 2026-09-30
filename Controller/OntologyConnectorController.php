@@ -115,17 +115,17 @@ class OntologyConnectorController extends AbstractOntologyController
     #[CsrfProtection]
     public function testConfigAction(Request $request): JsonResponse
     {
-        if (!$this->isGranted('aaxis_ontology_connector_create') && !$this->isGranted('aaxis_ontology_connector_update')) {
-            return new JsonResponse(['success' => false, 'message' => 'Access denied.', 'steps' => []], 403);
-        }
-
         $payload = json_decode($request->getContent(), true);
-        if (!\is_array($payload)) {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid request body.', 'steps' => []], 400);
-        }
-        $type = (string) ($payload['type'] ?? '');
-        if (!\in_array($type, OntologyConnector::TYPES, true)) {
-            return new JsonResponse(['success' => false, 'message' => 'Unknown connector type.', 'steps' => []], 400);
+        $type = \is_array($payload) && \is_scalar($payload['type'] ?? null) ? (string) $payload['type'] : '';
+        $refusal = match (true) {
+            !$this->isGranted('aaxis_ontology_connector_create') && !$this->isGranted('aaxis_ontology_connector_update')
+                => ['Access denied.', 403],
+            !\is_array($payload) => ['Invalid request body.', 400],
+            !\in_array($type, OntologyConnector::TYPES, true) => ['Unknown connector type.', 400],
+            default => null,
+        };
+        if ($refusal !== null) {
+            return new JsonResponse(['success' => false, 'message' => $refusal[0], 'steps' => []], $refusal[1]);
         }
         $config = \is_array($payload['config'] ?? null) ? $payload['config'] : null;
 

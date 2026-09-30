@@ -54,28 +54,39 @@ class DbUsageType extends AbstractType
 
     private function tableSize(string $table): string
     {
+        $bytes = $this->tableBytes($table);
+
+        return $bytes === null ? '—' : self::formatBytes($bytes);
+    }
+
+    /**
+     * The table's total size in bytes, or null when it cannot be told (unknown/renamed table, or
+     * a database error — the config page must render either way).
+     */
+    private function tableBytes(string $table): ?int
+    {
         try {
             // to_regclass() is NULL for a missing table and the size function passes it through,
-            // so an unknown/renamed table renders as "—" instead of erroring the config page.
+            // so an unknown/renamed table comes back null.
             $bytes = $this->doctrine->getConnection()->fetchOne(
                 'SELECT pg_total_relation_size(to_regclass(?))',
                 [$table]
             );
         } catch (\Throwable) {
-            return '—';
-        }
-        if ($bytes === null || $bytes === false) {
-            return '—';
+            return null;
         }
 
-        $kb = ((int) $bytes) / 1024;
-        if ($kb < 1024) {
-            return number_format($kb, 1) . ' kb';
-        }
-        if ($kb < 1024 * 1024) {
-            return number_format($kb / 1024, 1) . ' mb';
-        }
+        return $bytes === null || $bytes === false ? null : (int) $bytes;
+    }
 
-        return number_format($kb / (1024 * 1024), 2) . ' gb';
+    private static function formatBytes(int $bytes): string
+    {
+        $kb = $bytes / 1024;
+
+        return match (true) {
+            $kb < 1024 => number_format($kb, 1) . ' kb',
+            $kb < 1024 * 1024 => number_format($kb / 1024, 1) . ' mb',
+            default => number_format($kb / (1024 * 1024), 2) . ' gb',
+        };
     }
 }

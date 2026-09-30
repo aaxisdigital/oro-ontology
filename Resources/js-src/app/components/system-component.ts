@@ -140,8 +140,8 @@ class OntologySystemComponent extends BaseComponent {
             name: values.name,
             enabled: !!values.enabled
         }).then(res => {
-            if (!res.ok || !res.data || !res.data.success) {
-                throw new Error((res.data && res.data.message) || __('aaxis.ontology.system_manager.save_error'));
+            if (!res.ok || !res.data?.success) {
+                throw new Error(res.data?.message || __('aaxis.ontology.system_manager.save_error'));
             }
             messenger.notificationFlashMessage('success', __('aaxis.ontology.system_manager.saved'));
             this.load();
@@ -188,10 +188,10 @@ class OntologySystemComponent extends BaseComponent {
         this.setBusy(true);
         apiFetch(routing.generate('aaxis_ontology_system_delete', {id: system.id}), 'DELETE')
             .then(res => {
-                if (!res.ok || !res.data || !res.data.successful) {
+                if (!res.ok || !res.data?.successful) {
                     messenger.notificationFlashMessage(
                         'error',
-                        (res.data && res.data.message) || __('aaxis.ontology.system_manager.delete_error')
+                        res.data?.message || __('aaxis.ontology.system_manager.delete_error')
                     );
                     return;
                 }

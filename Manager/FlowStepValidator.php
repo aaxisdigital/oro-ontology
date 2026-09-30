@@ -20,6 +20,31 @@ use Symfony\Contracts\Translation\TranslatorInterface;
  */
 class FlowStepValidator
 {
+    /**
+     * The DWL-capable config fields, in reporting order: [step type ("file_*" = every File
+     * Operations type), config key, the toggle that makes the field DWL (null = always DWL)].
+     */
+    private const array DWL_FIELDS = [
+        ['dwl_transform', 'code', null],
+        ['invoke', 'body_content', 'body_dwl'],
+        ['entity_write', 'content', 'content_dwl'],
+        ['file_write', 'content', 'content_dwl'],
+        // File Operations: the path (all five) and the rename's new name are DWL-capable too.
+        ['file_*', 'path', 'path_dwl'],
+        ['file_rename', 'new_name', 'new_name_dwl'],
+        ['choice', 'expression', null],
+        // Invoke PHP: the parameters object is ALWAYS a DWL expression.
+        ['invoke_php', 'params', null],
+        // Endpoint trigger: the optional response binding is ALWAYS a DWL expression.
+        ['endpoint', 'response', null],
+        // Event / Logger: DWL only while their toggle is on (plain text otherwise).
+        ['event', 'value', 'value_dwl'],
+        ['logger', 'message', 'message_dwl'],
+        // SQL Query: the SQL text and the bindings are DWL-capable too.
+        ['sql_query', 'sql', 'sql_dwl'],
+        ['sql_query', 'binding', 'binding_dwl'],
+    ];
+
     public function __construct(
         private readonly DwlTransformer $dwl,
         private readonly TranslatorInterface $translator,
@@ -34,28 +59,34 @@ class FlowStepValidator
         if (!\is_array($raw) || !array_is_list($raw)) {
             return null;
         }
+        $steps = array_map($this->normalizeStep(...), $raw);
 
-        $steps = [];
-        foreach ($raw as $step) {
-            $name = \is_string($step['name'] ?? null) ? trim($step['name']) : '';
-            $config = $step['config'] ?? null;
-            if (!\is_array($step) || !\in_array($step['type'] ?? null, OntologyFlow::STEP_TYPES, true)
-                || $name === '' || mb_strlen($name) > 64
-                || !is_numeric($step['x'] ?? null) || !is_numeric($step['y'] ?? null)
-                || ($config !== null && (!\is_array($config) || array_is_list($config)))
-            ) {
-                return null;
-            }
-            $steps[] = [
-                'type' => (string) $step['type'],
-                'name' => $name,
-                'x' => max(0, (int) $step['x']),
-                'y' => max(0, (int) $step['y']),
-                'config' => $config,
-            ];
+        return \in_array(null, $steps, true) ? null : $steps;
+    }
+
+    /**
+     * @return array{type: string, name: string, x: int, y: int, config: array<string, mixed>|null}|null
+     *         null when the step is malformed
+     */
+    private function normalizeStep(mixed $step): ?array
+    {
+        $name = \is_string($step['name'] ?? null) ? trim($step['name']) : '';
+        $config = $step['config'] ?? null;
+        if (!\is_array($step) || !\in_array($step['type'] ?? null, OntologyFlow::STEP_TYPES, true)
+            || $name === '' || mb_strlen($name) > 64
+            || !is_numeric($step['x'] ?? null) || !is_numeric($step['y'] ?? null)
+            || ($config !== null && (!\is_array($config) || array_is_list($config)))
+        ) {
+            return null;
         }
 
-        return $steps;
+        return [
+            'type' => (string) $step['type'],
+            'name' => $name,
+            'x' => max(0, (int) $step['x']),
+            'y' => max(0, (int) $step['y']),
+            'config' => $config,
+        ];
     }
 
     /**
@@ -162,220 +193,29 @@ class FlowStepValidator
             return [];
         }
         $snippets = [];
-        if ($step['type'] === 'dwl_transform' && \is_string($config['code'] ?? null) && trim($config['code']) !== '') {
-            $snippets[] = $config['code'];
-        }
-        if ($step['type'] === 'invoke' && ($config['body_dwl'] ?? false) === true
-            && \is_string($config['body_content'] ?? null) && trim($config['body_content']) !== ''
-        ) {
-            $snippets[] = $config['body_content'];
-        }
-        if (\in_array($step['type'], ['entity_write', 'file_write'], true) && ($config['content_dwl'] ?? false) === true
-            && \is_string($config['content'] ?? null) && trim($config['content']) !== ''
-        ) {
-            $snippets[] = $config['content'];
-        }
-        // File Operations: the path (all five) and the rename's new name are DWL-capable too.
-        if (str_starts_with($step['type'], 'file_') && ($config['path_dwl'] ?? false) === true
-            && \is_string($config['path'] ?? null) && trim($config['path']) !== ''
-        ) {
-            $snippets[] = $config['path'];
-        }
-        if ($step['type'] === 'file_rename' && ($config['new_name_dwl'] ?? false) === true
-            && \is_string($config['new_name'] ?? null) && trim($config['new_name']) !== ''
-        ) {
-            $snippets[] = $config['new_name'];
-        }
-        if ($step['type'] === 'choice' && \is_string($config['expression'] ?? null) && trim($config['expression']) !== '') {
-            $snippets[] = $config['expression'];
-        }
-        // Invoke PHP: the parameters object is ALWAYS a DWL expression.
-        if ($step['type'] === 'invoke_php' && \is_string($config['params'] ?? null) && trim($config['params']) !== '') {
-            $snippets[] = $config['params'];
-        }
-        // Endpoint trigger: the optional response binding is ALWAYS a DWL expression.
-        if ($step['type'] === 'endpoint' && \is_string($config['response'] ?? null) && trim($config['response']) !== '') {
-            $snippets[] = $config['response'];
-        }
-        // Event: the value is DWL only while its toggle is on (plain text otherwise).
-        if ($step['type'] === 'event' && ($config['value_dwl'] ?? false) === true
-            && \is_string($config['value'] ?? null) && trim($config['value']) !== ''
-        ) {
-            $snippets[] = $config['value'];
-        }
-        // Logger: the message is DWL only while its toggle is on (plain text otherwise).
-        if ($step['type'] === 'logger' && ($config['message_dwl'] ?? false) === true
-            && \is_string($config['message'] ?? null) && trim($config['message']) !== ''
-        ) {
-            $snippets[] = $config['message'];
-        }
-        // SQL Query: the SQL text and the bindings are DWL-capable too.
-        if ($step['type'] === 'sql_query') {
-            if (($config['sql_dwl'] ?? false) === true && \is_string($config['sql'] ?? null) && trim($config['sql']) !== '') {
-                $snippets[] = $config['sql'];
-            }
-            if (($config['binding_dwl'] ?? false) === true && \is_string($config['binding'] ?? null) && trim($config['binding']) !== '') {
-                $snippets[] = $config['binding'];
+        foreach (self::DWL_FIELDS as [$type, $key, $toggle]) {
+            if (self::typeMatches($step['type'], $type)
+                && ($toggle === null || ($config[$toggle] ?? false) === true)
+                && \is_string($config[$key] ?? null) && trim($config[$key]) !== ''
+            ) {
+                $snippets[] = $config[$key];
             }
         }
 
         return $snippets;
     }
 
-    private function isStepConfigValid(array $step): bool
+    /** $pattern is a step type, or a "prefix*" matching every type that starts with the prefix. */
+    private static function typeMatches(string $type, string $pattern): bool
     {
-        // A missing config is NOT a free pass: a type that needs parameters is exactly as broken
-        // never-configured as it is half-configured (fresh drops start red and the flow cannot
-        // run until they are completed). Types whose arms accept an empty config — triggers via
-        // $onlyEnabled(), parameterless placeholders via the default arm — stay valid.
-        $config = \is_array($step['config']) ? $step['config'] : [];
-        $filled = static fn (string $key): bool => \is_string($config[$key] ?? null) && trim($config[$key]) !== '';
-
-        // Enum keys are lenient when ABSENT (configs saved by older editors) but strict when set.
-        $enumOk = static fn (string $key, array $allowed): bool =>
-            !isset($config[$key]) || \in_array($config[$key], $allowed, true);
-
-        // The DWL on/off toggles (body_dwl / content_dwl) are lenient when absent, bool when set.
-        $boolOk = static fn (string $key): bool => !isset($config[$key]) || \is_bool($config[$key]);
-
-        // A trigger holding ONLY its enabled flag counts as "not configured yet" (the editor seeds
-        // {enabled: true} the moment a trigger is dropped, so the flow starts armed without the
-        // fresh tile turning red for the fields the user has not filled in yet). Endpoint drops
-        // also seed the Response EXAMPLE, so that key is ignored by the test too.
-        $onlyEnabled = static fn (): bool => array_diff_key($config, ['enabled' => 0, 'response' => 0]) === [];
-
-        // "flowUuid" is reserved (every execution seeds its uuid into the context under it) and so
-        // is "choiceResults" (choice steps record their branch verdicts there); the legacy
-        // "flow-uuid" spelling stays rejected too.
-        $destinationOk = static fn (): bool =>
-            $filled('destination')
-            && !\in_array(
-                strtolower(trim((string) $config['destination'])),
-                ['flowuuid', 'flow-uuid', 'choiceresults'],
-                true
-            );
-
-        $connectorOk = static fn (): bool =>
-            is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
-            && $filled('path')
-            && $enumOk('operation', ['get', 'put', 'post', 'patch', 'delete'])
-            && $enumOk('body', ['empty', 'json', 'text', 'xml'])
-            && $boolOk('body_dwl');
-
-        // The entity READ rules — shared by the generic reader's entity variant and the typed
-        // entity_read step (identical config, minus the reader discriminator).
-        $entityReadOk = static fn (): bool =>
-            $filled('system') && $filled('entity')
-            && $enumOk('mode', ['all', 'by_id', 'by_attribute'])
-            && (($config['mode'] ?? 'all') !== 'by_id' || $filled('record_id'))
-            // "By attribute" carries the attribute to compare and the value to match.
-            && (($config['mode'] ?? 'all') !== 'by_attribute'
-                || ($filled('attribute') && $filled('attr_value')))
-            // "All" extras, each optional: order_by attribute (+ direction) and limit.
-            && (!isset($config['order_by']) || \is_string($config['order_by']))
-            && $enumOk('order_dir', ['asc', 'desc'])
-            && $enumOk('limit', [1, 10, 100, 1000]);
-
-        // The entity WRITE rules — shared by the generic writer's entity variant and entity_write.
-        $entityWriteOk = static fn (): bool =>
-            $filled('system') && $filled('entity') && $filled('content') && $boolOk('content_dwl');
-
-        // File Operations share a connector + DWL-capable path core.
-        $fileOpOk = static fn (): bool =>
-            is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
-            && $filled('path') && $boolOk('path_dwl');
-
-        return match ($step['type']) {
-            // Schedule: interval (value + unit) or cron (expression; also the LEGACY shape, which
-            // carries no mode). Expression syntax is checked separately with Cron\CronExpression.
-            'cron' => $boolOk('enabled') && ($onlyEnabled() || match ($config['mode'] ?? 'cron') {
-                'interval' => \is_int($config['value'] ?? null) && $config['value'] >= 1
-                    && \in_array($config['unit'] ?? null, ['minute', 'hour', 'day', 'week', 'month', 'year'], true),
-                'cron' => $filled('expression'),
-                default => false,
-            }),
-            'entity_change' => $boolOk('enabled') && ($onlyEnabled() || ($filled('system') && $filled('entity'))),
-            // The remaining triggers carry only the enabled flag (bool when set; a missing flag
-            // reads as DISABLED at evaluation, not as invalid — old flows stay green).
-            'subflow' => $boolOk('enabled'),
-            // Endpoint trigger: method + path (+ the public switch). Path segments are literals
-            // or {param} placeholders; a param name must be a valid identifier and not shadow a
-            // reserved context variable (the params are seeded into the context by name).
-            'endpoint' => $boolOk('enabled') && ($onlyEnabled() || (
-                $enumOk('method', ['GET', 'POST', 'PUT', 'QUERY', 'PATCH', 'DELETE'])
-                && $boolOk('public')
-                && self::endpointPathOk((string) ($config['path'] ?? ''))
-                && (!isset($config['response']) || \is_string($config['response']))
-            )),
-            // Choice: the success expression is the whole config (syntax checked via
-            // stepDwlSnippets); the branch links live in the design, not here.
-            'choice' => $filled('expression'),
-            'dwl_transform' => $filled('code') && $destinationOk(),
-            'entity_read' => $destinationOk() && $entityReadOk(),
-            'entity_write' => $destinationOk() && $entityWriteOk(),
-            // "HTTP Request": a rest_api connector call — connector/operation/path/body shape, the
-            // response stored under the destination.
-            'invoke' => $destinationOk() && $connectorOk(),
-            'file_read', 'file_list', 'file_delete' => $destinationOk() && $fileOpOk(),
-            'file_write' => $destinationOk() && $fileOpOk() && $filled('content') && $boolOk('content_dwl'),
-            'file_rename' => $destinationOk() && $fileOpOk() && $filled('new_name') && $boolOk('new_name_dwl'),
-            // "Call Subflow": which subflow to invoke (existence/type/enabled are RUNTIME checks —
-            // this validator stays DB-free).
-            'sub_flow' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== '',
-            // "Foreach Loop": the subflow + the array variable + the per-element variable name
-            // (which must not shadow the injected `index` or a reserved context name).
-            'foreach' => is_scalar($config['subflow'] ?? null) && (string) $config['subflow'] !== ''
-                && $filled('array')
-                && $filled('item')
-                && !\in_array(strtolower(trim((string) $config['item'])), ['index', 'flowuuid', 'flow-uuid', 'choiceresults'], true),
-            // "Invoke PHP": the service class + method (existence/callability are RUNTIME
-            // checks — this validator stays container-free) and the optional parameters DWL.
-            'invoke_php' => $destinationOk() && $filled('class') && $filled('method')
-                && (!isset($config['params']) || \is_string($config['params'])),
-            // "Logger": the message text (DWL-capable via its toggle).
-            'logger' => $filled('message') && $boolOk('message_dwl'),
-            // "Event": the value emitted as a log-message flow event (DWL-capable via toggle).
-            'event' => $filled('value') && $boolOk('value_dwl'),
-            // "MS Teams": the context variable holding the message (stringified at run time)
-            // plus the Power Automate webhook — a well-formed HTTPS URL (plain text, not DWL;
-            // the domain is deliberately NOT restricted to powerplatform.com).
-            'ms_teams' => $filled('message')
-                && \is_string($config['webhook'] ?? null)
-                && filter_var(trim($config['webhook']), FILTER_VALIDATE_URL) !== false
-                && str_starts_with(strtolower(trim($config['webhook'])), 'https://'),
-            // "SQL Query": a database connector, the (DWL-capable) SQL, optional bindings.
-            'sql_query' => $destinationOk()
-                && is_scalar($config['connector'] ?? null) && (string) $config['connector'] !== ''
-                && $filled('sql') && $boolOk('sql_dwl')
-                && (!isset($config['binding']) || \is_string($config['binding']))
-                && $boolOk('binding_dwl'),
-            default => true,
-        };
+        return str_ends_with($pattern, '*')
+            ? str_starts_with($type, substr($pattern, 0, -1))
+            : $type === $pattern;
     }
 
-    /**
-     * Endpoint trigger path: non-empty; each segment a literal ([A-Za-z0-9_.-]+) or a "{param}"
-     * placeholder whose name is a valid identifier and not a reserved context variable.
-     */
-    private static function endpointPathOk(string $path): bool
+    private function isStepConfigValid(array $step): bool
     {
-        $path = trim($path, " \t/");
-        if ($path === '') {
-            return false;
-        }
-        foreach (explode('/', $path) as $segment) {
-            if (preg_match('/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/', $segment, $m) === 1) {
-                if (\in_array(strtolower($m[1]), ['body', 'headers', 'queryparams', 'oauthapplication', 'flowuuid', 'flow-uuid', 'choiceresults', 'payload'], true)) {
-                    return false;
-                }
-                continue;
-            }
-            if (preg_match('/^[A-Za-z0-9_.-]+$/', $segment) !== 1) {
-                return false;
-            }
-        }
-
-        return true;
+        return FlowStepConfigRules::isValid($step['type'], \is_array($step['config']) ? $step['config'] : []);
     }
 
     /**

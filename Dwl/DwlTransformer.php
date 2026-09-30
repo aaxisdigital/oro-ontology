@@ -163,35 +163,30 @@ class DwlTransformer
 
     private function toValue(mixed $data): Value
     {
-        if ($data === null) {
-            return Value::null();
-        }
-        if (\is_bool($data)) {
-            return Value::boolean($data);
-        }
-        if (\is_int($data) || \is_float($data)) {
-            return Value::number($data);
-        }
-        if (\is_string($data)) {
-            return Value::string($data);
-        }
-        if (\is_array($data)) {
-            if (array_is_list($data)) {
-                return Value::array(array_map(fn (mixed $item): Value => $this->toValue($item), $data));
-            }
-            $entries = [];
-            foreach ($data as $key => $item) {
-                $entries[] = [Value::string((string) $key), $this->toValue($item)];
-            }
+        return match (true) {
+            $data === null => Value::null(),
+            \is_bool($data) => Value::boolean($data),
+            \is_int($data) || \is_float($data) => Value::number($data),
+            \is_string($data) => Value::string($data),
+            \is_array($data) => $this->arrayToValue($data),
+            $data instanceof \stdClass => $this->toValue((array) $data),
+            // Anything exotic degrades to its JSON string representation.
+            default => Value::string((string) json_encode($data)),
+        };
+    }
 
-            return Value::object($entries);
+    /** A list becomes a DWL array, anything keyed a DWL object. */
+    private function arrayToValue(array $data): Value
+    {
+        if (array_is_list($data)) {
+            return Value::array(array_map(fn (mixed $item): Value => $this->toValue($item), $data));
         }
-        if ($data instanceof \stdClass) {
-            return $this->toValue((array) $data);
+        $entries = [];
+        foreach ($data as $key => $item) {
+            $entries[] = [Value::string((string) $key), $this->toValue($item)];
         }
 
-        // Anything exotic degrades to its JSON string representation.
-        return Value::string((string) json_encode($data));
+        return Value::object($entries);
     }
 
     /**

@@ -65,12 +65,14 @@ class OntologyConnectorType extends AbstractType
                 'attr' => ['rows' => 8, 'class' => 'aaxis-ontology-json', 'readonly' => 'readonly'],
             ]);
 
-        // The stored config is needed to restore masked secrets when the submit comes back.
-        $originalConfig = null;
-        $builder->addEventListener(FormEvents::PRE_SET_DATA, static function (FormEvent $event) use (&$originalConfig): void {
+        // The stored config is needed to restore masked secrets when the submit comes back: captured
+        // when the form is given its data, read when the submit is transformed back.
+        $stored = new \stdClass();
+        $stored->config = null;
+        $builder->addEventListener(FormEvents::PRE_SET_DATA, static function (FormEvent $event) use ($stored): void {
             $data = $event->getData();
             if ($data instanceof OntologyConnector) {
-                $originalConfig = $data->getConfig();
+                $stored->config = $data->getConfig();
             }
         });
 
@@ -81,7 +83,7 @@ class OntologyConnectorType extends AbstractType
             static fn (?array $value): string => $value === null || $value === []
                 ? ''
                 : (string) json_encode($secrets->mask($value), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES),
-            static function (?string $value) use ($secrets, &$originalConfig): ?array {
+            static function (?string $value) use ($secrets, $stored): ?array {
                 $value = trim((string) $value);
                 if ($value === '') {
                     return null;
@@ -91,7 +93,7 @@ class OntologyConnectorType extends AbstractType
                     throw new TransformationFailedException('The configuration must be a valid JSON object.');
                 }
 
-                return $secrets->merge($decoded, $originalConfig);
+                return $secrets->merge($decoded, $stored->config);
             }
         ));
     }

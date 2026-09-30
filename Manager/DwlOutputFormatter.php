@@ -89,27 +89,25 @@ class DwlOutputFormatter
 
     private function toText(mixed $data): string
     {
-        if (\is_string($data)) {
-            return $data;
-        }
-        if ($data === null) {
-            return '';
-        }
-        if (\is_bool($data)) {
-            return $data ? 'true' : 'false';
-        }
-        if (is_scalar($data)) {
-            return (string) $data;
-        }
-        // A list of scalars reads best as one value per line; anything richer falls back to JSON.
-        if (\is_array($data) && array_is_list($data) && $data !== []) {
-            $scalars = array_filter($data, static fn (mixed $item): bool => is_scalar($item) || $item === null);
-            if (\count($scalars) === \count($data)) {
-                return implode("\n", array_map(fn (mixed $item): string => $this->toText($item), $data));
-            }
-        }
+        return match (true) {
+            \is_string($data) => $data,
+            $data === null => '',
+            \is_bool($data) => $data ? 'true' : 'false',
+            is_scalar($data) => (string) $data,
+            // A list of scalars reads best as one value per line; anything richer falls back to JSON.
+            $this->isScalarList($data) => implode("\n", array_map(fn (mixed $item): string => $this->toText($item), $data)),
+            default => $this->toJson($data),
+        };
+    }
 
-        return $this->toJson($data);
+    private function isScalarList(mixed $data): bool
+    {
+        if (!\is_array($data) || !array_is_list($data) || $data === []) {
+            return false;
+        }
+        $scalars = array_filter($data, static fn (mixed $item): bool => is_scalar($item) || $item === null);
+
+        return \count($scalars) === \count($data);
     }
 
     /**
@@ -179,17 +177,12 @@ class DwlOutputFormatter
 
     private function toCell(mixed $value): string
     {
-        if ($value === null) {
-            return '';
-        }
-        if (\is_bool($value)) {
-            return $value ? 'true' : 'false';
-        }
-        if (is_scalar($value)) {
-            return (string) $value;
-        }
-
-        return (string) json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        return match (true) {
+            $value === null => '',
+            \is_bool($value) => $value ? 'true' : 'false',
+            is_scalar($value) => (string) $value,
+            default => (string) json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        };
     }
 
     /** XML with a `<result>` root; list items become `<item>`, non-identifier keys are sanitized. */

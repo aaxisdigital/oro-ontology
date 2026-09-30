@@ -26,6 +26,14 @@ class BucketFlowEventStore
 {
     private const ROOT = 'flow-events';
 
+    /** Day folders: {yyyy}/{mm}/{dd}. */
+    private const DAY_PATH = 'Y/m/d';
+    private const PREVIOUS_DAY = '-1 day';
+    private const NEXT_DAY = '+1 day';
+
+    /** The event kinds that close a run. */
+    private const FINISH_KINDS = ['flow-finish', 'flow-exception'];
+
     public function __construct(private readonly OntologyBucketClient $client)
     {
     }
@@ -46,7 +54,7 @@ class BucketFlowEventStore
     {
         $at = date_create_immutable($datetime, new \DateTimeZone('UTC'))
             ?: new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-        $key = $this->runPrefix($at->format('Y/m/d'), $flowId, $uuid)
+        $key = $this->runPrefix($at->format(self::DAY_PATH), $flowId, $uuid)
             . $at->format('YmdHisu') . '_' . $event . '_' . substr(bin2hex(random_bytes(3)), 0, 6) . '.json';
 
         $this->client->put($key, json_encode([
@@ -73,37 +81,10 @@ class BucketFlowEventStore
         $runs = [];
         $day = new \DateTimeImmutable('today', new \DateTimeZone('UTC'));
         for ($i = 0; $i < max(1, $days); $i++) {
-            foreach ($this->client->listKeys($this->dayPrefix($day->format('Y/m/d'))) as $key) {
-                $parsed = $this->parseKey($key);
-                if ($parsed === null) {
-                    continue;
-                }
-                $uuid = $parsed['uuid'];
-                $runs[$uuid] ??= [
-                    'flowUuid' => $uuid,
-                    'flowId' => $parsed['flowId'],
-                    'startAll' => null, 'startOfStart' => null,
-                    'finishedAtRaw' => null, 'finishEvent' => null,
-                    'events' => 0,
-                ];
-                $run = &$runs[$uuid];
-                $run['events']++;
-                $run['flowId'] ??= $parsed['flowId'];
-                if ($run['startAll'] === null || $parsed['stamp'] < $run['startAll']) {
-                    $run['startAll'] = $parsed['stamp'];
-                }
-                if ($parsed['kind'] === 'flow-start'
-                    && ($run['startOfStart'] === null || $parsed['stamp'] < $run['startOfStart'])) {
-                    $run['startOfStart'] = $parsed['stamp'];
-                }
-                if (\in_array($parsed['kind'], ['flow-finish', 'flow-exception'], true)
-                    && ($run['finishedAtRaw'] === null || $parsed['stamp'] > $run['finishedAtRaw'])) {
-                    $run['finishedAtRaw'] = $parsed['stamp'];
-                    $run['finishEvent'] = $parsed['kind'];
-                }
-                unset($run);
+            foreach ($this->parsedKeysOfDay($day) as $parsed) {
+                $this->tallyRun($runs, $parsed);
             }
-            $day = $day->modify('-1 day');
+            $day = $day->modify(self::PREVIOUS_DAY);
         }
 
         return array_values(array_map(static fn (array $run): array => [
@@ -117,6 +98,39 @@ class BucketFlowEventStore
     }
 
     /**
+     * Folds one listed event key into its run's aggregate: event count, earliest event, earliest
+     * flow-start and the latest finish/exception.
+     *
+     * @param array<string, array<string, mixed>>                          $runs
+     * @param array{flowId: int|null, uuid: string, stamp: string, kind: string} $parsed
+     */
+    private function tallyRun(array &$runs, array $parsed): void
+    {
+        $runs[$parsed['uuid']] ??= [
+            'flowUuid' => $parsed['uuid'],
+            'flowId' => $parsed['flowId'],
+            'startAll' => null, 'startOfStart' => null,
+            'finishedAtRaw' => null, 'finishEvent' => null,
+            'events' => 0,
+        ];
+        $run = &$runs[$parsed['uuid']];
+        $run['events']++;
+        $run['flowId'] ??= $parsed['flowId'];
+        if ($run['startAll'] === null || $parsed['stamp'] < $run['startAll']) {
+            $run['startAll'] = $parsed['stamp'];
+        }
+        if ($parsed['kind'] === 'flow-start'
+            && ($run['startOfStart'] === null || $parsed['stamp'] < $run['startOfStart'])) {
+            $run['startOfStart'] = $parsed['stamp'];
+        }
+        if (\in_array($parsed['kind'], self::FINISH_KINDS, true)
+            && ($run['finishedAtRaw'] === null || $parsed['stamp'] > $run['finishedAtRaw'])) {
+            $run['finishedAtRaw'] = $parsed['stamp'];
+            $run['finishEvent'] = $parsed['kind'];
+        }
+    }
+
+    /**
      * Every event of ONE run, chronological, envelopes included (this is the popup — bodies are
      * needed here). The run's folders are scanned across the started..finished day range (+1 day
      * of margin each side, capped) since a run crossing midnight spans several day folders.
@@ -125,31 +139,59 @@ class BucketFlowEventStore
      */
     public function runEvents(?int $flowId, string $uuid, ?string $startedAtRaw, ?string $finishedAtRaw): array
     {
-        $from = $startedAtRaw !== null ? date_create_immutable($startedAtRaw, new \DateTimeZone('UTC')) : false;
-        $from = ($from ?: new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->modify('-1 day');
-        $to = $finishedAtRaw !== null ? date_create_immutable($finishedAtRaw, new \DateTimeZone('UTC')) : false;
-        $to = ($to ?: new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->modify('+1 day');
+        $from = self::stampOrNow($startedAtRaw)->modify(self::PREVIOUS_DAY);
+        $to = self::stampOrNow($finishedAtRaw)->modify(self::NEXT_DAY);
 
         $events = [];
         $day = $from;
-        for ($i = 0; $i < 14 && $day <= $to; $i++, $day = $day->modify('+1 day')) {
-            foreach ($this->client->listKeys($this->runPrefix($day->format('Y/m/d'), $flowId, $uuid)) as $key) {
-                $raw = $this->client->get($key);
-                $decoded = $raw === null ? null : json_decode($raw, true);
-                if (!\is_array($decoded) || !\is_string($decoded['event'] ?? null)) {
-                    continue;
+        for ($i = 0; $i < 14 && $day <= $to; $i++, $day = $day->modify(self::NEXT_DAY)) {
+            foreach ($this->client->listKeys($this->runPrefix($day->format(self::DAY_PATH), $flowId, $uuid)) as $key) {
+                $event = $this->readEvent($key);
+                if ($event !== null) {
+                    $events[] = $event;
                 }
-                $events[] = [
-                    'flowName' => \is_string($decoded['flowName'] ?? null) ? $decoded['flowName'] : null,
-                    'event' => (string) $decoded['event'],
-                    'datetime' => (string) ($decoded['datetime'] ?? ''),
-                    'payload' => \is_array($decoded['payload'] ?? null) ? $decoded['payload'] : [],
-                ];
             }
         }
         usort($events, static fn (array $a, array $b): int => strcmp($a['datetime'], $b['datetime']));
 
         return $events;
+    }
+
+    /** A run's raw started/finished stamp as a UTC date — "now" when absent or unparseable. */
+    private static function stampOrNow(?string $raw): \DateTimeImmutable
+    {
+        $at = $raw !== null ? date_create_immutable($raw, new \DateTimeZone('UTC')) : false;
+
+        return $at ?: new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+    }
+
+    /**
+     * One stored event for the popup, or null when the object is gone or not an event envelope.
+     *
+     * @return array{flowName: string|null, event: string, datetime: string, payload: array}|null
+     */
+    private function readEvent(string $key): ?array
+    {
+        $decoded = $this->fetchJson($key);
+        if ($decoded === null || !\is_string($decoded['event'] ?? null)) {
+            return null;
+        }
+
+        return [
+            'flowName' => \is_string($decoded['flowName'] ?? null) ? $decoded['flowName'] : null,
+            'event' => (string) $decoded['event'],
+            'datetime' => (string) ($decoded['datetime'] ?? ''),
+            'payload' => \is_array($decoded['payload'] ?? null) ? $decoded['payload'] : [],
+        ];
+    }
+
+    /** @return array<mixed>|null the decoded JSON object stored under $key, null when absent/invalid */
+    private function fetchJson(string $key): ?array
+    {
+        $raw = $this->client->get($key);
+        $decoded = $raw === null ? null : json_decode($raw, true);
+
+        return \is_array($decoded) ? $decoded : null;
     }
 
     /**
@@ -167,29 +209,9 @@ class BucketFlowEventStore
         $cutoffStamp = $cutoff->setTimezone(new \DateTimeZone('UTC'))->format('YmdHisu');
         $runs = [];
         $day = new \DateTimeImmutable('today', new \DateTimeZone('UTC'));
-        for ($i = 0; $i < 2; $i++, $day = $day->modify('-1 day')) {
-            foreach ($this->client->listKeys($this->dayPrefix($day->format('Y/m/d'))) as $key) {
-                $parsed = $this->parseKey($key);
-                if ($parsed === null) {
-                    continue;
-                }
-                $uuid = $parsed['uuid'];
-                $runs[$uuid] ??= ['flowId' => $parsed['flowId'], 'startKey' => null, 'startStamp' => null,
-                    'finished' => false, 'maxStamp' => ''];
-                $run = &$runs[$uuid];
-                $run['flowId'] ??= $parsed['flowId'];
-                if ($parsed['stamp'] > $run['maxStamp']) {
-                    $run['maxStamp'] = $parsed['stamp'];
-                }
-                if ($parsed['kind'] === 'flow-start'
-                    && ($run['startStamp'] === null || $parsed['stamp'] < $run['startStamp'])) {
-                    $run['startStamp'] = $parsed['stamp'];
-                    $run['startKey'] = $key;
-                }
-                if (\in_array($parsed['kind'], ['flow-finish', 'flow-exception'], true)) {
-                    $run['finished'] = true;
-                }
-                unset($run);
+        for ($i = 0; $i < 2; $i++, $day = $day->modify(self::PREVIOUS_DAY)) {
+            foreach ($this->parsedKeysOfDay($day) as $parsed) {
+                $this->trackSession($runs, $parsed);
             }
         }
 
@@ -198,19 +220,62 @@ class BucketFlowEventStore
             if ($run['startKey'] === null || $run['finished'] || $run['maxStamp'] >= $cutoffStamp) {
                 continue;
             }
-            $raw = $this->client->get($run['startKey']);
-            $decoded = $raw === null ? null : json_decode($raw, true);
-            if (!\is_array($decoded) || (($decoded['payload']['trigger'] ?? null) !== 'debug')) {
+            $start = $this->fetchJson($run['startKey']);
+            if ($start === null || (($start['payload']['trigger'] ?? null) !== 'debug')) {
                 continue;
             }
             $stale[] = [
                 'flow_uuid' => (string) $uuid,
                 'flow_id' => $run['flowId'],
-                'flow_name' => \is_string($decoded['flowName'] ?? null) ? $decoded['flowName'] : null,
+                'flow_name' => \is_string($start['flowName'] ?? null) ? $start['flowName'] : null,
             ];
         }
 
         return $stale;
+    }
+
+    /**
+     * Folds one listed event key into its session's state: latest event, earliest flow-start
+     * (and its key) and whether the run was closed.
+     *
+     * @param array<string, array<string, mixed>>                                       $runs
+     * @param array{flowId: int|null, uuid: string, stamp: string, kind: string, key: string} $parsed
+     */
+    private function trackSession(array &$runs, array $parsed): void
+    {
+        $runs[$parsed['uuid']] ??= ['flowId' => $parsed['flowId'], 'startKey' => null, 'startStamp' => null,
+            'finished' => false, 'maxStamp' => ''];
+        $run = &$runs[$parsed['uuid']];
+        $run['flowId'] ??= $parsed['flowId'];
+        if ($parsed['stamp'] > $run['maxStamp']) {
+            $run['maxStamp'] = $parsed['stamp'];
+        }
+        if ($parsed['kind'] === 'flow-start'
+            && ($run['startStamp'] === null || $parsed['stamp'] < $run['startStamp'])) {
+            $run['startStamp'] = $parsed['stamp'];
+            $run['startKey'] = $parsed['key'];
+        }
+        if (\in_array($parsed['kind'], self::FINISH_KINDS, true)) {
+            $run['finished'] = true;
+        }
+    }
+
+    /**
+     * The event keys of one UTC day, parsed (keys of any other shape are skipped).
+     *
+     * @return list<array{flowId: int|null, uuid: string, stamp: string, kind: string, key: string}>
+     */
+    private function parsedKeysOfDay(\DateTimeImmutable $day): array
+    {
+        $parsed = [];
+        foreach ($this->client->listKeys($this->dayPrefix($day->format(self::DAY_PATH))) as $key) {
+            $entry = $this->parseKey($key);
+            if ($entry !== null) {
+                $parsed[] = $entry + ['key' => $key];
+            }
+        }
+
+        return $parsed;
     }
 
     // --- Keys -------------------------------------------------------------------------------

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aaxis\Bundle\OntologyBundle\Manager;
 
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
+use Aaxis\Bundle\OntologyBundle\Exception\PhpInvocationFailure;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Symfony\Contracts\Service\ServiceProviderInterface;
 
@@ -93,59 +94,33 @@ class PhpMethodInvoker
      * @param array<string, mixed> $config  {class, method, params?}
      * @param array<string, mixed> $context
      *
-     * @throws \RuntimeException with a user-readable message (the executor prefixes nothing here,
-     *                           so every message names the step itself)
+     * @throws PhpInvocationFailure with a user-readable message (the executor prefixes nothing
+     *                              here, so every message names the step itself)
      */
     public function invoke(string $stepName, array $config, array $context): mixed
     {
         $class = ltrim(trim((string) ($config['class'] ?? '')), '\\');
         $method = trim((string) ($config['method'] ?? ''));
         if ($class === '' || $method === '') {
-            throw new \RuntimeException(sprintf('Step "%s" is not configured.', $stepName));
+            throw new PhpInvocationFailure(sprintf('Step "%s" is not configured.', $stepName));
         }
         if (!$this->isInvokable($class)) {
-            throw new \RuntimeException(sprintf(
+            throw new PhpInvocationFailure(sprintf(
                 'Step "%s": "%s" is not an invokable service (the class must exist as a service AND match the configured namespace prefixes).',
                 $stepName,
                 $class
             ));
         }
 
-        $args = [];
-        $expression = trim((string) ($config['params'] ?? ''));
-        if ($expression !== '') {
-            try {
-                $args = $this->dwl->transform($expression, $context);
-            } catch (\Throwable $e) {
-                throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
-            }
-            if ($args === null) {
-                $args = [];
-            }
-            if (!\is_array($args) || ($args !== [] && array_is_list($args))) {
-                throw new \RuntimeException(sprintf(
-                    'Step "%s": the parameters must resolve to an object of named values, got %s.',
-                    $stepName,
-                    get_debug_type($args)
-                ));
-            }
-        }
-
+        $args = $this->resolveArguments($stepName, $config, $context);
         $service = $this->services->get($class);
-        try {
-            $reflection = new \ReflectionMethod($service, $method);
-        } catch (\ReflectionException) {
-            throw new \RuntimeException(sprintf('Step "%s": %s has no method "%s".', $stepName, $class, $method));
-        }
-        if (!$reflection->isPublic() || $reflection->isAbstract() || $reflection->isConstructor() || $reflection->isDestructor()) {
-            throw new \RuntimeException(sprintf('Step "%s": %s::%s is not callable.', $stepName, $class, $method));
-        }
+        $reflection = $this->callableMethod($stepName, $service, $class, $method);
 
         $ordered = $this->bindParameters($reflection, $args, $stepName);
         try {
             $result = $reflection->invokeArgs($reflection->isStatic() ? null : $service, $ordered);
         } catch (\Throwable $e) {
-            throw new \RuntimeException(sprintf(
+            throw new PhpInvocationFailure(sprintf(
                 'Step "%s": %s::%s failed — %s',
                 $stepName,
                 $class,
@@ -155,6 +130,52 @@ class PhpMethodInvoker
         }
 
         return $this->normalize($result);
+    }
+
+    /**
+     * The named arguments: the step's parameters DWL evaluated against the context — an object of
+     * named values; no expression (or a null result) means none.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array<string, mixed>
+     */
+    private function resolveArguments(string $stepName, array $config, array $context): array
+    {
+        $expression = trim((string) ($config['params'] ?? ''));
+        if ($expression === '') {
+            return [];
+        }
+        try {
+            $args = $this->dwl->transform($expression, $context) ?? [];
+        } catch (\Throwable $e) {
+            throw new PhpInvocationFailure(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+        }
+        if (!\is_array($args) || ($args !== [] && array_is_list($args))) {
+            throw new PhpInvocationFailure(sprintf(
+                'Step "%s": the parameters must resolve to an object of named values, got %s.',
+                $stepName,
+                get_debug_type($args)
+            ));
+        }
+
+        return $args;
+    }
+
+    /** The method, when it exists and is an ordinary public one (no constructor/destructor). */
+    private function callableMethod(string $stepName, object $service, string $class, string $method): \ReflectionMethod
+    {
+        try {
+            $reflection = new \ReflectionMethod($service, $method);
+        } catch (\ReflectionException) {
+            throw new PhpInvocationFailure(sprintf('Step "%s": %s has no method "%s".', $stepName, $class, $method));
+        }
+        if (!$reflection->isPublic() || $reflection->isAbstract() || $reflection->isConstructor() || $reflection->isDestructor()) {
+            throw new PhpInvocationFailure(sprintf('Step "%s": %s::%s is not callable.', $stepName, $class, $method));
+        }
+
+        return $reflection;
     }
 
     /**
@@ -181,7 +202,7 @@ class PhpMethodInvoker
                 $ordered[] = $parameter->getDefaultValue();
                 continue;
             }
-            throw new \RuntimeException(sprintf(
+            throw new PhpInvocationFailure(sprintf(
                 'Step "%s": the required parameter "%s" of %s::%s was not provided.',
                 $stepName,
                 $name,
@@ -192,7 +213,7 @@ class PhpMethodInvoker
 
         $unknown = array_keys(array_diff_key($args, $known));
         if ($unknown !== []) {
-            throw new \RuntimeException(sprintf(
+            throw new PhpInvocationFailure(sprintf(
                 'Step "%s": %s::%s has no parameter named "%s".',
                 $stepName,
                 $method->getDeclaringClass()->getName(),
@@ -210,7 +231,7 @@ class PhpMethodInvoker
         if ($type === null || $this->matchesType($type, $value)) {
             return;
         }
-        throw new \RuntimeException(sprintf(
+        throw new PhpInvocationFailure(sprintf(
             'Step "%s": parameter "%s" of %s::%s expects %s, got %s.',
             $stepName,
             $parameter->getName(),
@@ -223,24 +244,33 @@ class PhpMethodInvoker
 
     private function matchesType(\ReflectionType $type, mixed $value): bool
     {
-        if ($type instanceof \ReflectionUnionType) {
-            foreach ($type->getTypes() as $member) {
-                if ($this->matchesType($member, $value)) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-        if (!$type instanceof \ReflectionNamedType) {
+        return match (true) {
+            $type instanceof \ReflectionUnionType => $this->matchesAnyType($type->getTypes(), $value),
             // Intersection types are object contracts a flow value can never satisfy.
-            return false;
-        }
-        if ($value === null) {
-            return $type->allowsNull();
+            !$type instanceof \ReflectionNamedType => false,
+            $value === null => $type->allowsNull(),
+            default => $this->matchesNamedType($type->getName(), $value),
+        };
+    }
+
+    /**
+     * @param array<int, \ReflectionType> $types
+     */
+    private function matchesAnyType(array $types, mixed $value): bool
+    {
+        foreach ($types as $member) {
+            if ($this->matchesType($member, $value)) {
+                return true;
+            }
         }
 
-        return match ($type->getName()) {
+        return false;
+    }
+
+    /** A non-null value against one named type. */
+    private function matchesNamedType(string $name, mixed $value): bool
+    {
+        return match ($name) {
             'mixed' => true,
             'int' => \is_int($value),
             // Numeric widening only: an int is a fine float, a string never is.

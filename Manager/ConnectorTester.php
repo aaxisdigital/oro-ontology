@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Manager;
 
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Contracts\HttpClient\HttpClientInterface;
 
 /**
  * Runs the "Test" checks of the connector Configure popups against a (possibly unsaved)
@@ -32,18 +33,34 @@ use Symfony\Component\HttpClient\HttpClient;
  *
  * Result shape: {success, message, steps: [{label, success, message}]}. Messages are plain
  * English (matching the connection-tester convention) and NEVER contain credentials.
+ *
+ * The file_system, rest_api and bucket checks live here; the sftp and database ones are delegated
+ * to {@see SftpConnectorProbe} and {@see DatabaseConnectorProbe} (same shared plumbing,
+ * {@see ConnectorProbe}).
  */
-class ConnectorTester
+class ConnectorTester extends ConnectorProbe
 {
     public const string ENGINE_POSTGRESQL = 'postgresql';
 
-    private const int SOCKET_TIMEOUT = 5;
-    private const int SSH_TIMEOUT = 8;
     private const int HTTP_TIMEOUT = 10;
-    private const int POSTGRES_DEFAULT_PORT = 5432;
 
-    public function __construct(private readonly S3RequestSigner $signer)
-    {
+    private const string LABEL_PATH_CHECK = 'Path check';
+    private const string MSG_NO_HTTP_CLIENT = 'The Symfony HTTP client is not available on the server.';
+    private const string MSG_HTTP_STATUS = 'HTTP %d from %s.';
+
+    private readonly SftpConnectorProbe $sftp;
+    private readonly DatabaseConnectorProbe $database;
+
+    /**
+     * The sftp and database arms have their own classes; they are created here unless given.
+     */
+    public function __construct(
+        private readonly S3RequestSigner $signer,
+        ?SftpConnectorProbe $sftp = null,
+        ?DatabaseConnectorProbe $database = null,
+    ) {
+        $this->sftp = $sftp ?? new SftpConnectorProbe();
+        $this->database = $database ?? new DatabaseConnectorProbe();
     }
 
     /**
@@ -57,10 +74,10 @@ class ConnectorTester
 
         return match ($type) {
             OntologyConnector::TYPE_FILE_SYSTEM => $this->testFileSystem($config),
-            OntologyConnector::TYPE_SFTP => $this->testSftp($config),
+            OntologyConnector::TYPE_SFTP => $this->sftp->test($config),
             OntologyConnector::TYPE_REST_API => $this->testRestApi($config),
             OntologyConnector::TYPE_BUCKET => $this->testBucket($config),
-            OntologyConnector::TYPE_DATABASE => $this->testDatabase($config),
+            OntologyConnector::TYPE_DATABASE => $this->database->test($config),
             default => $this->result([$this->step('Configuration', false, 'Unknown connector type.')]),
         };
     }
@@ -72,108 +89,23 @@ class ConnectorTester
      */
     private function testFileSystem(array $config): array
     {
-        $path = trim((string) ($config['base_path'] ?? ''));
-        if ($path === '') {
-            return $this->result([$this->step('Path check', false, 'No base path configured.')]);
-        }
-        if (!file_exists($path)) {
-            return $this->result([$this->step('Path check', false, sprintf('Path "%s" does not exist on the server.', $path))]);
-        }
-        if (!is_dir($path)) {
-            return $this->result([$this->step('Path check', false, sprintf('Path "%s" is not a directory.', $path))]);
-        }
-        if (!is_readable($path)) {
-            return $this->result([$this->step('Path check', false, sprintf('Path "%s" is not readable by the application.', $path))]);
-        }
+        [$ok, $message] = $this->checkBasePath(trim((string) ($config['base_path'] ?? '')));
 
-        return $this->result([$this->step('Path check', true, sprintf('Path "%s" exists and is readable.', $path))]);
+        return $this->result([$this->step(self::LABEL_PATH_CHECK, $ok, $message)]);
     }
 
     /**
-     * @param array<string, mixed> $config
-     *
-     * @return array{success: bool, message: string, steps: list<array{label: string, success: bool, message: string}>}
-     */
-    private function testSftp(array $config): array
-    {
-        $host = trim((string) ($config['server'] ?? ''));
-        $port = $this->normalizePort($config['port'] ?? null, 22);
-        $user = trim((string) ($config['user'] ?? ''));
-        $auth = (string) ($config['auth'] ?? 'none');
-
-        if ($host === '') {
-            return $this->result([$this->step('Socket', false, 'No server configured.')]);
-        }
-        if ($port === null) {
-            return $this->result([$this->step('Socket', false, 'The port must be between 1 and 65535.')]);
-        }
-
-        [$socketOk, $socketMessage] = $this->openSocket($host, $port, true);
-        $steps = [$this->step('Socket', $socketOk, $socketMessage)];
-        if (!$socketOk) {
-            // Authentication cannot be attempted if the server is unreachable.
-            $steps[] = $this->step('Authentication', false, 'Skipped — the server is unreachable.');
-
-            return $this->result($steps);
-        }
-
-        if ($auth === 'none') {
-            $steps[] = $this->step('Authentication', true, 'No authentication configured — skipped.');
-        } elseif ($user === '') {
-            $steps[] = $this->step('Authentication', false, 'No user configured.');
-        } else {
-            $steps[] = $this->step('Authentication', ...$this->sftpAuthenticate($host, $port, $user, $auth, $config));
-        }
-
-        return $this->result($steps);
-    }
-
-    /**
-     * @param array<string, mixed> $config
-     *
      * @return array{0: bool, 1: string}
      */
-    private function sftpAuthenticate(string $host, int $port, string $user, string $auth, array $config): array
+    private function checkBasePath(string $path): array
     {
-        $password = (string) ($config['password'] ?? '');
-        $key = (string) ($config['key'] ?? '');
-        $secret = $auth === 'key' ? $key : $password;
-        if ($secret === '') {
-            return [false, $auth === 'key' ? 'No key value available to test.' : 'No password value available to test.'];
-        }
-
-        if (class_exists(\phpseclib3\Net\SFTP::class)) {
-            try {
-                $sftp = new \phpseclib3\Net\SFTP($host, $port, self::SSH_TIMEOUT);
-                $credential = $auth === 'key' ? \phpseclib3\Crypt\PublicKeyLoader::load($key) : $password;
-                if ($sftp->login($user, $credential)) {
-                    return [true, sprintf('Authenticated as "%s".', $user)];
-                }
-
-                return [false, sprintf('The server rejected the %s for user "%s".', $auth === 'key' ? 'key' : 'password', $user)];
-            } catch (\Throwable $e) {
-                return [false, 'SFTP authentication failed: ' . $e->getMessage()];
-            }
-        }
-
-        if ($auth === 'password' && \function_exists('ssh2_connect')) {
-            try {
-                $connection = @ssh2_connect($host, $port);
-                if ($connection === false) {
-                    return [false, 'Could not open an SSH session (ext-ssh2).'];
-                }
-                if (@ssh2_auth_password($connection, $user, $password)) {
-                    return [true, sprintf('Authenticated as "%s".', $user)];
-                }
-
-                return [false, sprintf('The server rejected the password for user "%s".', $user)];
-            } catch (\Throwable $e) {
-                return [false, 'SFTP authentication failed: ' . $e->getMessage()];
-            }
-        }
-
-        return [false, 'No SSH client is available on the server — install the phpseclib/phpseclib package'
-            . ($auth === 'password' ? ' or ext-ssh2' : '') . ' to test authentication.'];
+        return match (true) {
+            $path === '' => [false, 'No base path configured.'],
+            !file_exists($path) => [false, sprintf('Path "%s" does not exist on the server.', $path)],
+            !is_dir($path) => [false, sprintf('Path "%s" is not a directory.', $path)],
+            !is_readable($path) => [false, sprintf('Path "%s" is not readable by the application.', $path)],
+            default => [true, sprintf('Path "%s" exists and is readable.', $path)],
+        };
     }
 
     /**
@@ -184,30 +116,18 @@ class ConnectorTester
     private function testRestApi(array $config): array
     {
         [$scheme, $host, $port] = $this->resolveHttpEndpoint($config);
-        $auth = (string) ($config['auth'] ?? 'none');
 
-        if ($host === '') {
-            return $this->result([$this->step('Socket', false, 'No server configured.')]);
-        }
-        if ($port === null) {
-            return $this->result([$this->step('Socket', false, 'The port must be between 1 and 65535.')]);
+        $problem = $this->endpointProblem($host, $port);
+        if ($problem !== null) {
+            return $problem;
         }
 
-        [$socketOk, $socketMessage] = $this->openSocket($host, $port, false);
-        $steps = [$this->step('Socket', $socketOk, $socketMessage)];
-        if (!$socketOk) {
-            $steps[] = $this->step('OAuth', false, 'Skipped — the server is unreachable.');
-
-            return $this->result($steps);
+        [$steps, $reachable] = $this->socketSteps($host, $port, false, 'OAuth');
+        if ($reachable) {
+            $steps[] = ((string) ($config['auth'] ?? 'none')) === 'oauth'
+                ? $this->step('OAuth', ...$this->oauthCall($scheme, $host, $port, $config))
+                : $this->step('Authentication', true, 'Only socket connectivity is tested for this authentication mode.');
         }
-
-        if ($auth !== 'oauth') {
-            $steps[] = $this->step('Authentication', true, 'Only socket connectivity is tested for this authentication mode.');
-
-            return $this->result($steps);
-        }
-
-        $steps[] = $this->step('OAuth', ...$this->oauthCall($scheme, $host, $port, $config));
 
         return $this->result($steps);
     }
@@ -221,11 +141,14 @@ class ConnectorTester
     {
         $oauth = \is_array($config['oauth'] ?? null) ? $config['oauth'] : [];
         $path = trim((string) ($oauth['path'] ?? ''));
-        if ($path === '') {
-            return [false, 'No OAuth path configured.'];
-        }
-        if (!class_exists(HttpClient::class)) {
-            return [false, 'The Symfony HTTP client is not available on the server.'];
+        $client = $path === '' ? null : $this->createHttpClient();
+        $unusable = match (true) {
+            $path === '' => 'No OAuth path configured.',
+            $client === null => self::MSG_NO_HTTP_CLIENT,
+            default => null,
+        };
+        if ($unusable !== null) {
+            return [false, $unusable];
         }
 
         $url = $scheme . '://' . $host . ':' . $port . '/' . ltrim($path, '/');
@@ -236,20 +159,15 @@ class ConnectorTester
         $body = $this->stringMap($oauth['body'] ?? null);
 
         try {
-            $client = HttpClient::create(['timeout' => self::HTTP_TIMEOUT, 'max_redirects' => 3]);
-            $response = $client->request('POST', $url, [
+            $status = $client->request('POST', $url, [
                 'headers' => $headers,
                 'body' => $body === [] ? null : http_build_query($body),
-            ]);
-            $status = $response->getStatusCode();
-            if ($status < 400) {
-                return [true, sprintf('HTTP %d from %s.', $status, $url)];
-            }
-
-            return [false, sprintf('HTTP %d from %s.', $status, $url)];
+            ])->getStatusCode();
         } catch (\Throwable $e) {
             return [false, 'The OAuth request failed: ' . $e->getMessage()];
         }
+
+        return [$status < 400, sprintf(self::MSG_HTTP_STATUS, $status, $url)];
     }
 
     /**
@@ -261,22 +179,15 @@ class ConnectorTester
     {
         [$scheme, $host, $port] = $this->resolveHttpEndpoint($config);
 
-        if ($host === '') {
-            return $this->result([$this->step('Socket', false, 'No server configured.')]);
-        }
-        if ($port === null) {
-            return $this->result([$this->step('Socket', false, 'The port must be between 1 and 65535.')]);
+        $problem = $this->endpointProblem($host, $port);
+        if ($problem !== null) {
+            return $problem;
         }
 
-        [$socketOk, $socketMessage] = $this->openSocket($host, $port, false);
-        $steps = [$this->step('Socket', $socketOk, $socketMessage)];
-        if (!$socketOk) {
-            $steps[] = $this->step('Bucket', false, 'Skipped — the server is unreachable.');
-
-            return $this->result($steps);
+        [$steps, $reachable] = $this->socketSteps($host, $port, false, 'Bucket');
+        if ($reachable) {
+            $steps[] = $this->step('Bucket', ...$this->bucketListCall($scheme, $host, $port, $config));
         }
-
-        $steps[] = $this->step('Bucket', ...$this->bucketListCall($scheme, $host, $port, $config));
 
         return $this->result($steps);
     }
@@ -295,19 +206,35 @@ class ConnectorTester
         $accessKey = trim((string) ($config['access_key'] ?? ''));
         $secretKey = (string) ($config['secret_key'] ?? '');
 
-        if ($bucket === '') {
-            return [false, 'No bucket name configured.'];
+        $missing = match (true) {
+            $bucket === '' => 'No bucket name configured.',
+            $accessKey === '' => 'No access key configured.',
+            $secretKey === '' => 'No secret key value available to test.',
+            default => null,
+        };
+        if ($missing !== null) {
+            return [false, $missing];
         }
-        if ($accessKey === '') {
-            return [false, 'No access key configured.'];
-        }
-        if ($secretKey === '') {
-            return [false, 'No secret key value available to test.'];
-        }
-        if (!class_exists(HttpClient::class)) {
-            return [false, 'The Symfony HTTP client is not available on the server.'];
+        $client = $this->createHttpClient();
+        if ($client === null) {
+            return [false, self::MSG_NO_HTTP_CLIENT];
         }
 
+        return $this->signedBucketList($client, $scheme, $host, $port, $bucket, $accessKey, $secretKey);
+    }
+
+    /**
+     * @return array{0: bool, 1: string}
+     */
+    private function signedBucketList(
+        HttpClientInterface $client,
+        string $scheme,
+        string $host,
+        int $port,
+        string $bucket,
+        string $accessKey,
+        string $secretKey
+    ): array {
         // Path-style addressing (endpoint/bucket) — supported by every S3-compatible provider,
         // and it keeps the signed host independent of the bucket name.
         $hostHeader = $this->signer->hostHeader($scheme, $host, $port);
@@ -325,7 +252,6 @@ class ConnectorTester
                 $secretKey,
                 $this->signer->regionFromHost($host)
             );
-            $client = HttpClient::create(['timeout' => self::HTTP_TIMEOUT, 'max_redirects' => 3]);
             $status = $client->request('GET', $url, ['headers' => $headers])->getStatusCode();
         } catch (\Throwable $e) {
             return [false, 'The bucket request failed: ' . $e->getMessage()];
@@ -340,168 +266,8 @@ class ConnectorTester
                 $bucket
             )],
             $status === 404 => [false, sprintf('Bucket "%s" does not exist on this endpoint (HTTP 404).', $bucket)],
-            default => [false, sprintf('HTTP %d from %s.', $status, $scheme . '://' . $hostHeader . $path)],
+            default => [false, sprintf(self::MSG_HTTP_STATUS, $status, $scheme . '://' . $hostHeader . $path)],
         };
-    }
-
-    /**
-     * @param array<string, mixed> $config
-     *
-     * @return array{success: bool, message: string, steps: list<array{label: string, success: bool, message: string}>}
-     */
-    private function testDatabase(array $config): array
-    {
-        // Absent engine = a config written before the field existed; PostgreSQL is the only value.
-        $engine = trim((string) ($config['engine'] ?? self::ENGINE_POSTGRESQL));
-        if ($engine !== '' && $engine !== self::ENGINE_POSTGRESQL) {
-            return $this->result([$this->step(
-                'Configuration',
-                false,
-                sprintf('Only PostgreSQL is supported for now — "%s" cannot be tested.', $engine)
-            )]);
-        }
-
-        [$host, $port] = $this->resolveDatabaseEndpoint($config);
-        if ($host === '') {
-            return $this->result([$this->step('Socket', false, 'No server configured.')]);
-        }
-        if ($port === null) {
-            return $this->result([$this->step('Socket', false, 'The port must be between 1 and 65535.')]);
-        }
-
-        [$socketOk, $socketMessage] = $this->openSocket($host, $port, false);
-        $steps = [$this->step('Socket', $socketOk, $socketMessage)];
-        if (!$socketOk) {
-            $steps[] = $this->step('Connection', false, 'Skipped — the server is unreachable.');
-
-            return $this->result($steps);
-        }
-
-        [$connected, $connectionMessage, $pdo] = $this->postgresConnect($host, $port, $config);
-        $steps[] = $this->step('Connection', $connected, $connectionMessage);
-
-        // The schema is optional — only report on it when one is configured.
-        $schema = trim((string) ($config['schema'] ?? ''));
-        if ($schema !== '') {
-            $steps[] = $this->step('Schema', ...($pdo instanceof \PDO
-                ? $this->postgresSchemaCheck($pdo, $schema)
-                : [false, 'Skipped — no connection to the database.']));
-        }
-
-        return $this->result($steps);
-    }
-
-    /**
-     * Opens a real connection with the informed credentials and reports the server version.
-     *
-     * @param array<string, mixed> $config
-     *
-     * @return array{0: bool, 1: string, 2: \PDO|null}
-     */
-    private function postgresConnect(string $host, int $port, array $config): array
-    {
-        $database = trim((string) ($config['database'] ?? ''));
-        $user = trim((string) ($config['user'] ?? ''));
-        $password = (string) ($config['password'] ?? '');
-
-        if ($database === '') {
-            return [false, 'No database configured.', null];
-        }
-        if ($user === '') {
-            return [false, 'No user configured.', null];
-        }
-        if (!\in_array('pgsql', \PDO::getAvailableDrivers(), true)) {
-            return [false, 'The pdo_pgsql PHP extension is not installed on the server.', null];
-        }
-        // PDO splits the pgsql DSN on ";" BEFORE libpq sees it, so a value containing one would
-        // inject another connection parameter — no quoting can rescue that, hence the refusal.
-        foreach (['server' => $host, 'database' => $database] as $label => $value) {
-            if (str_contains($value, ';')) {
-                return [false, sprintf('The %s must not contain ";".', $label), null];
-            }
-        }
-
-        $dsn = sprintf(
-            'pgsql:host=%s;port=%d;dbname=%s;connect_timeout=%d',
-            $host,
-            $port,
-            $database,
-            self::SOCKET_TIMEOUT
-        );
-
-        try {
-            // Credentials go as constructor arguments, never inside the DSN — a failure message
-            // built from the DSN would otherwise carry them.
-            $pdo = new \PDO($dsn, $user, $password, [
-                \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-                \PDO::ATTR_TIMEOUT => self::SOCKET_TIMEOUT,
-            ]);
-            $version = (string) $pdo->getAttribute(\PDO::ATTR_SERVER_VERSION);
-
-            return [
-                true,
-                sprintf(
-                    'Connected to database "%s" as "%s"%s.',
-                    $database,
-                    $user,
-                    $version === '' ? '' : ' — PostgreSQL ' . $version
-                ),
-                $pdo,
-            ];
-        } catch (\Throwable $e) {
-            return [false, 'Connection failed: ' . $this->withoutSecret($e->getMessage(), $password), null];
-        }
-    }
-
-    /**
-     * @return array{0: bool, 1: string}
-     */
-    private function postgresSchemaCheck(\PDO $pdo, string $schema): array
-    {
-        try {
-            // pg_namespace, NOT information_schema.schemata: the latter only lists schemas the
-            // current user OWNS, so an existing schema the user merely reads would look missing.
-            // The ::int cast avoids depending on how the driver hands back a boolean.
-            $statement = $pdo->prepare(
-                'SELECT has_schema_privilege(nspname, \'USAGE\')::int FROM pg_catalog.pg_namespace WHERE nspname = :schema'
-            );
-            $statement->execute(['schema' => $schema]);
-            $usable = $statement->fetchColumn();
-
-            return match (true) {
-                $usable === false => [false, sprintf('Schema "%s" does not exist in this database.', $schema)],
-                (int) $usable === 1 => [true, sprintf('Schema "%s" exists and is accessible.', $schema)],
-                default => [false, sprintf('Schema "%s" exists but the user has no USAGE permission on it.', $schema)],
-            };
-        } catch (\Throwable $e) {
-            return [false, 'The schema check failed: ' . $e->getMessage()];
-        }
-    }
-
-    /**
-     * Resolves host/port for a database endpoint: a bare host, or "host:port" — no scheme is
-     * involved, so this deliberately does not go through {@see resolveHttpEndpoint()}.
-     *
-     * @param array<string, mixed> $config
-     *
-     * @return array{0: string, 1: int|null}
-     */
-    private function resolveDatabaseEndpoint(array $config): array
-    {
-        $host = trim((string) ($config['server'] ?? ''));
-        $hostPort = null;
-        if (str_contains($host, ':')) {
-            [$host, $rawPort] = explode(':', $host, 2);
-            $hostPort = (int) $rawPort;
-        }
-
-        return [$host, $this->normalizePort($config['port'] ?? null, $hostPort ?? self::POSTGRES_DEFAULT_PORT)];
-    }
-
-    /** Belt and braces: strips a secret from a message built by code we do not control. */
-    private function withoutSecret(string $message, string $secret): string
-    {
-        return $secret === '' ? $message : str_replace($secret, ConnectorConfigSecrets::SENTINEL, $message);
     }
 
     /**
@@ -517,7 +283,6 @@ class ConnectorTester
     {
         $server = trim((string) ($config['server'] ?? ''));
         $scheme = 'https';
-        $host = $server;
         $urlPort = null;
 
         if (preg_match('~^(https?)://~i', $server, $matches) === 1) {
@@ -540,45 +305,6 @@ class ConnectorTester
     }
 
     /**
-     * @return array{0: bool, 1: string}
-     */
-    private function openSocket(string $host, int $port, bool $readSshBanner): array
-    {
-        $errno = 0;
-        $errstr = '';
-        $socket = @stream_socket_client('tcp://' . $host . ':' . $port, $errno, $errstr, self::SOCKET_TIMEOUT);
-        if ($socket === false) {
-            return [false, sprintf('Could not connect to %s:%d — %s.', $host, $port, $errstr !== '' ? $errstr : 'connection failed')];
-        }
-
-        $message = sprintf('Connected to %s:%d.', $host, $port);
-        if ($readSshBanner) {
-            stream_set_timeout($socket, 2);
-            $banner = fgets($socket, 256);
-            if (\is_string($banner) && str_starts_with($banner, 'SSH-')) {
-                $message .= ' Server: ' . trim($banner) . '.';
-            }
-        }
-        fclose($socket);
-
-        return [true, $message];
-    }
-
-    /** Returns the validated port (1–65535), the default when absent, or null when invalid. */
-    private function normalizePort(mixed $value, int $default): ?int
-    {
-        if ($value === null || $value === '') {
-            return $default;
-        }
-        if (!is_numeric($value)) {
-            return null;
-        }
-        $port = (int) $value;
-
-        return $port >= 1 && $port <= 65535 ? $port : null;
-    }
-
-    /**
      * @return array<string, string>
      */
     private function stringMap(mixed $value): array
@@ -596,34 +322,13 @@ class ConnectorTester
         return $out;
     }
 
-    /**
-     * @param array{label: string, success: bool, message: string} ...$steps
-     *
-     * @return array{success: bool, message: string, steps: list<array{label: string, success: bool, message: string}>}
-     */
-    private function result(array $steps): array
-    {
-        $success = true;
-        $failure = '';
-        foreach ($steps as $step) {
-            if (!$step['success'] && $success) {
-                $success = false;
-                $failure = $step['message'];
-            }
-        }
+    // I/O boundary to the HTTP client: protected so a test can stand in for the network.
 
-        return [
-            'success' => $success,
-            'message' => $success ? 'All checks passed.' : $failure,
-            'steps' => array_values($steps),
-        ];
-    }
-
-    /**
-     * @return array{label: string, success: bool, message: string}
-     */
-    private function step(string $label, bool $success, string $message): array
+    /** Null when the Symfony HTTP client is not installed. */
+    protected function createHttpClient(): ?HttpClientInterface
     {
-        return ['label' => $label, 'success' => $success, 'message' => $message];
+        return class_exists(HttpClient::class)
+            ? HttpClient::create(['timeout' => self::HTTP_TIMEOUT, 'max_redirects' => 3])
+            : null;
     }
 }

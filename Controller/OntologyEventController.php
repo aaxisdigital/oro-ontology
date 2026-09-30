@@ -14,6 +14,7 @@ use Oro\Bundle\SecurityBundle\Attribute\AclAncestor;
 use Symfony\Bridge\Twig\Attribute\Template;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Routing\Attribute\Route;
 
 /**
@@ -62,42 +63,26 @@ class OntologyEventController extends AbstractController
              ORDER BY coalesce(min(datetime) FILTER (WHERE event = 'flow-start'), min(datetime)) DESC"
         );
 
-        $atom = static fn (?string $raw): ?string => $raw !== null
-            ? date_create($raw, new \DateTimeZone('UTC'))->format(\DateTimeInterface::ATOM)
-            : null;
-        $millis = static fn (?string $raw): ?float => $raw !== null
-            ? (float) date_create($raw, new \DateTimeZone('UTC'))->format('U.u') * 1000
-            : null;
-
         return new JsonResponse([
-            'records' => array_map(static function (array $row) use ($atom, $millis): array {
-                $start = $millis($row['started_at']);
-                $finish = $millis($row['finished_at']);
-
-                return [
-                    'flowUuid' => $row['flow_uuid'],
-                    'flowId' => $row['start_flow_id'] ?? $row['any_flow_id'],
-                    'flowName' => $row['start_name'] ?? $row['any_name'],
-                    'startedAt' => $atom($row['started_at']),
-                    'finishedAt' => $atom($row['finished_at']),
-                    // Milliseconds between start and finish; null = still running (grid sorts on it).
-                    'elapsedMs' => $start !== null && $finish !== null ? max(0, (int) round($finish - $start)) : null,
-                    // How the run ended: which finish event came last (null = still running).
-                    'status' => match ($row['finish_event'] ?? null) {
-                        'flow-finish' => 'success',
-                        'flow-exception' => 'exception',
-                        default => 'running',
-                    },
-                    'events' => (int) $row['events'],
-                ];
-            }, $rows),
+            'records' => array_map(static fn (array $row): array => [
+                'flowUuid' => $row['flow_uuid'],
+                'flowId' => $row['start_flow_id'] ?? $row['any_flow_id'],
+                'flowName' => $row['start_name'] ?? $row['any_name'],
+                'startedAt' => self::atom($row['started_at']),
+                'finishedAt' => self::atom($row['finished_at']),
+                // Milliseconds between start and finish; null = still running (grid sorts on it).
+                'elapsedMs' => self::elapsedMs($row['started_at'], $row['finished_at']),
+                // How the run ended: which finish event came last (null = still running).
+                'status' => self::runStatus($row['finish_event'] ?? null),
+                'events' => (int) $row['events'],
+            ], $rows),
         ]);
     }
 
     /** The FULL event list of one run (uuid), datetime ASC — the "view events" popup. */
     #[Route(path: '/events/api/run', name: 'aaxis_ontology_event_run', options: ['expose' => true], methods: ['GET'])]
     #[AclAncestor('aaxis_ontology_event_view')]
-    public function runAction(\Symfony\Component\HttpFoundation\Request $request): JsonResponse
+    public function runAction(Request $request): JsonResponse
     {
         $uuid = trim((string) $request->query->get('uuid', ''));
         if ($uuid === '') {
@@ -106,34 +91,41 @@ class OntologyEventController extends AbstractController
 
         // Bucket-backed run rows (the list arm marks them bucket: true) address their events by
         // uuid + flow id + the run's day range — the store scans the matching day folders.
-        if ($request->query->get('bucket')) {
-            $store = $this->container->get(BucketFlowEventStore::class);
-            $flowIdRaw = $request->query->get('flowId');
-            $records = $store->runEvents(
-                is_numeric($flowIdRaw) ? (int) $flowIdRaw : null,
-                $uuid,
-                $request->query->get('startedAt') ?: null,
-                $request->query->get('finishedAt') ?: null
-            );
+        return $request->query->get('bucket')
+            ? $this->bucketRunEvents($request, $uuid)
+            : $this->tableRunEvents($uuid);
+    }
 
-            return new JsonResponse([
-                'records' => array_map(static function (array $event, int $i): array {
-                    $at = $event['datetime'] !== ''
-                        ? date_create($event['datetime'], new \DateTimeZone('UTC'))
-                        : false;
+    private function bucketRunEvents(Request $request, string $uuid): JsonResponse
+    {
+        $flowIdRaw = $request->query->get('flowId');
+        $records = $this->container->get(BucketFlowEventStore::class)->runEvents(
+            is_numeric($flowIdRaw) ? (int) $flowIdRaw : null,
+            $uuid,
+            $request->query->get('startedAt') ?: null,
+            $request->query->get('finishedAt') ?: null
+        );
 
-                    return [
-                        'id' => $i + 1,
-                        'flowName' => $event['flowName'],
-                        'event' => $event['event'],
-                        'datetime' => $at !== false ? $at->format(\DateTimeInterface::ATOM) : null,
-                        'ms' => $at !== false ? (float) $at->format('U.u') * 1000 : null,
-                        'payload' => $event['payload'],
-                    ];
-                }, $records, array_keys($records)),
-            ]);
-        }
+        return new JsonResponse([
+            'records' => array_map(static function (array $event, int $i): array {
+                $at = $event['datetime'] !== ''
+                    ? date_create($event['datetime'], new \DateTimeZone('UTC'))
+                    : false;
 
+                return [
+                    'id' => $i + 1,
+                    'flowName' => $event['flowName'],
+                    'event' => $event['event'],
+                    'datetime' => $at !== false ? $at->format(\DateTimeInterface::ATOM) : null,
+                    'ms' => $at !== false ? (float) $at->format('U.u') * 1000 : null,
+                    'payload' => $event['payload'],
+                ];
+            }, $records, array_keys($records)),
+        ]);
+    }
+
+    private function tableRunEvents(string $uuid): JsonResponse
+    {
         /** @var OntologyFlowEvent[] $records */
         $records = $this->container->get(ManagerRegistry::class)
             ->getRepository(OntologyFlowEvent::class)
@@ -144,14 +136,10 @@ class OntologyEventController extends AbstractController
                 'id' => $event->getId(),
                 'flowName' => $event->getFlowName(),
                 'event' => $event->getEvent(),
-                'datetime' => $event->getDatetime() !== null
-                    ? date_create($event->getDatetime(), new \DateTimeZone('UTC'))->format(\DateTimeInterface::ATOM)
-                    : null,
+                'datetime' => self::atom($event->getDatetime()),
                 // Micro-precision epoch millis: the popup shows step rows as a DELTA from the
                 // previous event, which second-precision ATOM cannot express.
-                'ms' => $event->getDatetime() !== null
-                    ? (float) date_create($event->getDatetime(), new \DateTimeZone('UTC'))->format('U.u') * 1000
-                    : null,
+                'ms' => self::millis($event->getDatetime()),
                 'payload' => $event->getPayload(),
             ], $records),
         ]);
@@ -177,39 +165,54 @@ class OntologyEventController extends AbstractController
             }
         }
 
-        $atom = static fn (?string $raw): ?string => $raw !== null
-            ? date_create($raw, new \DateTimeZone('UTC'))->format(\DateTimeInterface::ATOM)
-            : null;
-        $millis = static fn (?string $raw): ?float => $raw !== null
-            ? (float) date_create($raw, new \DateTimeZone('UTC'))->format('U.u') * 1000
-            : null;
-
-        $records = array_map(static function (array $run) use ($atom, $millis, $names): array {
-            $start = $millis($run['startedAtRaw']);
-            $finish = $millis($run['finishedAtRaw']);
-
-            return [
-                'flowUuid' => $run['flowUuid'],
-                'flowId' => $run['flowId'],
-                'flowName' => $run['flowId'] !== null ? ($names[$run['flowId']] ?? null) : null,
-                'startedAt' => $atom($run['startedAtRaw']),
-                'finishedAt' => $atom($run['finishedAtRaw']),
-                'elapsedMs' => $start !== null && $finish !== null ? max(0, (int) round($finish - $start)) : null,
-                'status' => match ($run['finishEvent']) {
-                    'flow-finish' => 'success',
-                    'flow-exception' => 'exception',
-                    default => 'running',
-                },
-                'events' => $run['events'],
-                // The popup needs these to find the run's day folders (see runAction's bucket arm).
-                'bucket' => true,
-                'startedAtRaw' => $run['startedAtRaw'],
-                'finishedAtRaw' => $run['finishedAtRaw'],
-            ];
-        }, $runs);
+        $records = array_map(static fn (array $run): array => [
+            'flowUuid' => $run['flowUuid'],
+            'flowId' => $run['flowId'],
+            'flowName' => $run['flowId'] !== null ? ($names[$run['flowId']] ?? null) : null,
+            'startedAt' => self::atom($run['startedAtRaw']),
+            'finishedAt' => self::atom($run['finishedAtRaw']),
+            'elapsedMs' => self::elapsedMs($run['startedAtRaw'], $run['finishedAtRaw']),
+            'status' => self::runStatus($run['finishEvent']),
+            'events' => $run['events'],
+            // The popup needs these to find the run's day folders (see runAction's bucket arm).
+            'bucket' => true,
+            'startedAtRaw' => $run['startedAtRaw'],
+            'finishedAtRaw' => $run['finishedAtRaw'],
+        ], $runs);
         usort($records, static fn (array $a, array $b): int => strcmp((string) $b['startedAt'], (string) $a['startedAt']));
 
         return new JsonResponse(['records' => $records]);
+    }
+
+    /** A UTC timestamp string as ATOM; null stays null. */
+    private static function atom(?string $raw): ?string
+    {
+        return $raw !== null ? date_create($raw, new \DateTimeZone('UTC'))->format(\DateTimeInterface::ATOM) : null;
+    }
+
+    /** A UTC timestamp string as epoch milliseconds (micro-precision); null stays null. */
+    private static function millis(?string $raw): ?float
+    {
+        return $raw !== null ? (float) date_create($raw, new \DateTimeZone('UTC'))->format('U.u') * 1000 : null;
+    }
+
+    /** Milliseconds between a run's start and finish; null while it is still running. */
+    private static function elapsedMs(?string $startedAt, ?string $finishedAt): ?int
+    {
+        $start = self::millis($startedAt);
+        $finish = self::millis($finishedAt);
+
+        return $start !== null && $finish !== null ? max(0, (int) round($finish - $start)) : null;
+    }
+
+    /** How a run ended, from its last finish event (anything else = still running). */
+    private static function runStatus(?string $finishEvent): string
+    {
+        return match ($finishEvent) {
+            'flow-finish' => 'success',
+            'flow-exception' => 'exception',
+            default => 'running',
+        };
     }
 
     #[\Override]

@@ -5,7 +5,7 @@ import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
-import {bindGridToolbar, formatDateTime, setRefreshBusy} from './component-support';
+import {bindGridToolbar, csrfToken, formatDateTime, setRefreshBusy} from './component-support';
 
 interface OntologyFlowOptions {
     _sourceElement: any;
@@ -153,18 +153,16 @@ class OntologyFlowComponent extends BaseComponent {
 
     private doDelete(row: FlowRecord, done: () => void): void {
         this.setBusy(true);
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = window.document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
         fetch(routing.generate('aaxis_ontology_flow_delete', {id: row.id}), {
             method: 'DELETE',
             credentials: 'same-origin',
-            headers: {'X-CSRF-Header': match ? decodeURIComponent(match[1]) : ''}
+            headers: {'X-CSRF-Header': csrfToken()}
         }).then(r => r.json().then(d => ({ok: r.ok, data: d})))
             .then(res => {
                 if (!res.ok || !res.data || !(res.data.successful || res.data.success)) {
                     messenger.notificationFlashMessage(
                         'error',
-                        (res.data && res.data.message) || __('aaxis.ontology.flow_view.delete_error')
+                        res.data?.message || __('aaxis.ontology.flow_view.delete_error')
                     );
                     return;
                 }
@@ -183,8 +181,8 @@ class OntologyFlowComponent extends BaseComponent {
         fetch(routing.generate('aaxis_ontology_flow_export', {id: row.id}), {credentials: 'same-origin'})
             .then(r => r.json().then(d => ({ok: r.ok, data: d})))
             .then(res => {
-                if (!res.ok || !res.data || !res.data.success) {
-                    const errors: string[] = (res.data && res.data.errors) || [];
+                if (!res.ok || !res.data?.success) {
+                    const errors: string[] = res.data?.errors || [];
                     throw new Error(errors[0] || __('aaxis.ontology.flow_view.export_error'));
                 }
                 this.saveJsonFile(
@@ -251,33 +249,28 @@ class OntologyFlowComponent extends BaseComponent {
                 return;
             }
             $submit.prop('disabled', true);
-            const reader = new FileReader();
-            reader.onerror = () => {
-                this.showImportErrors($errors, [__('aaxis.ontology.flow_view.import_read_error')]);
-                $submit.prop('disabled', false);
-            };
-            reader.onload = () => {
-                this.sendImport(String(reader.result || ''), dialog, $errors, $submit);
+            file.text().then(text => {
+                this.sendImport(text, dialog, $errors, $submit);
                 // Clear the picker: re-selecting the SAME file fires no change event otherwise,
                 // which would strand the user on a dialog that stays open after an error.
                 $file.val('');
                 $submit.prop('disabled', true);
-            };
-            reader.readAsText(file);
+            }, () => {
+                this.showImportErrors($errors, [__('aaxis.ontology.flow_view.import_read_error')]);
+                $submit.prop('disabled', false);
+            });
         });
     }
 
     private sendImport(document: string, dialog: Dialog, $errors: any, $submit: any): void {
-        const name = window.location.protocol === 'https:' ? 'https-_csrf' : '_csrf';
-        const match = window.document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
         fetch(routing.generate('aaxis_ontology_flow_import'), {
             method: 'POST',
             credentials: 'same-origin',
-            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': match ? decodeURIComponent(match[1]) : ''},
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Header': csrfToken()},
             body: JSON.stringify({document})
         }).then(r => r.json().then(d => ({ok: r.ok, data: d}))).then(res => {
-            if (!res.ok || !res.data || !res.data.success) {
-                this.showImportErrors($errors, (res.data && res.data.errors) || [__('aaxis.ontology.flow_view.import_error')]);
+            if (!res.ok || !res.data?.success) {
+                this.showImportErrors($errors, res.data?.errors || [__('aaxis.ontology.flow_view.import_error')]);
                 $submit.prop('disabled', false);
                 return;
             }

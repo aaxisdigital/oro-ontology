@@ -112,7 +112,21 @@ final class StandardLibrary
         };
     }
 
+    /**
+     * dw::core::Arrays — assembled from a few groups so that no single builder carries every
+     * closure (member order is the module's declaration order).
+     */
     private static function getCoreArraysModule(): array
+    {
+        return array_merge(
+            self::arraysAggregateFunctions(),
+            self::arraysSliceFunctions(),
+            self::arraysSearchFunctions(),
+            self::arraysSplitAndJoinFunctions(),
+        );
+    }
+
+    private static function arraysAggregateFunctions(): array
     {
         return [
             'countBy' => Value::func(function (array $args) {
@@ -145,6 +159,12 @@ final class StandardLibrary
                 }
                 return Value::boolean(true);
             }),
+        ];
+    }
+
+    private static function arraysSliceFunctions(): array
+    {
+        return [
             'some' => Value::func(function (array $args) {
                 foreach ($args[0]->data as $item) {
                     if (($args[1]->data)([$item])->isTruthy()) {
@@ -186,6 +206,12 @@ final class StandardLibrary
                 }
                 return Value::array(\array_slice($items, $i));
             }),
+        ];
+    }
+
+    private static function arraysSearchFunctions(): array
+    {
+        return [
             // firstWith(array, (item, index) -> Boolean) — the first match, or null.
             'firstWith' => Value::func(function (array $args) {
                 foreach ($args[0]->data as $i => $item) {
@@ -205,6 +231,12 @@ final class StandardLibrary
                 }
                 return Value::number($found);
             }),
+        ];
+    }
+
+    private static function arraysSplitAndJoinFunctions(): array
+    {
+        return [
             'indexWhere' => Value::func(function (array $args) {
                 foreach ($args[0]->data as $i => $item) {
                     if (($args[1]->data)([$item, Value::number($i)])->isTruthy()) {
@@ -295,7 +327,7 @@ final class StandardLibrary
     private static function getRuntimeModule(): array
     {
         return [
-            'props' => Value::func(function (array $args) {
+            'props' => Value::func(function () {
                 $entries = [];
                 foreach (getenv() as $key => $value) {
                     $entries[] = [Value::string($key), Value::string($value)];
@@ -429,7 +461,8 @@ final class StandardLibrary
     private static function last(Value $val): Value
     {
         if ($val->type === ValueType::Array && !empty($val->data)) {
-            return end($val->data);
+            // end() takes its argument by reference, which a readonly property refuses.
+            return $val->data[array_key_last($val->data)];
         }
         return Value::null();
     }
@@ -460,11 +493,9 @@ final class StandardLibrary
             }
         }
         if ($mode === 'outer') {
-            foreach ($rightBuckets as $key => $items) {
-                if (!isset($matched[$key])) {
-                    foreach ($items as $rightItem) {
-                        $rows[] = Value::object([[Value::string('r'), $rightItem]]);
-                    }
+            foreach (array_diff_key($rightBuckets, $matched) as $items) {
+                foreach ($items as $rightItem) {
+                    $rows[] = Value::object([[Value::string('r'), $rightItem]]);
                 }
             }
         }

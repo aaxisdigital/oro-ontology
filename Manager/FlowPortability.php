@@ -69,6 +69,18 @@ class FlowPortability
             throw new FlowImportException(array_values(array_unique($errors)));
         }
 
+        // The referenced entities with the unique attribute the step configs do not carry — null
+        // when the entity is already missing locally: names still travel, so the export stays
+        // usable and the import reports what it cannot match.
+        $manifest = [];
+        foreach ($this->entityRefs($flow->getSteps(), $flow->getDesign()) as [$systemName, $entityName]) {
+            $manifest[] = [
+                'system' => $systemName,
+                'entity' => $entityName,
+                'uniqueAttribute' => $this->findEntity($systemName, $entityName)?->getUniqueAttribute(),
+            ];
+        }
+
         return [
             'format' => self::FORMAT,
             'version' => self::VERSION,
@@ -79,7 +91,7 @@ class FlowPortability
                 'steps' => $steps,
                 'design' => $design,
             ],
-            'entities' => $this->entityManifest($flow),
+            'entities' => $manifest,
         ];
     }
 
@@ -92,11 +104,7 @@ class FlowPortability
      */
     public function import(mixed $document): OntologyFlow
     {
-        $errors = [];
-        if (!\is_array($document) || array_is_list($document)) {
-            throw new FlowImportException([$this->trans('invalid_format')]);
-        }
-        if (($document['format'] ?? null) !== self::FORMAT) {
+        if (!\is_array($document) || array_is_list($document) || ($document['format'] ?? null) !== self::FORMAT) {
             throw new FlowImportException([$this->trans('invalid_format')]);
         }
         if (($document['version'] ?? null) !== self::VERSION) {
@@ -105,64 +113,24 @@ class FlowPortability
                 '{{ supported }}' => (string) self::VERSION,
             ])]);
         }
-
         $flowData = $document['flow'] ?? null;
         if (!\is_array($flowData) || array_is_list($flowData)) {
             throw new FlowImportException([$this->trans('invalid_format')]);
         }
+
+        $errors = [];
         $name = \is_string($flowData['name'] ?? null) ? trim($flowData['name']) : '';
         if ($name === '' || mb_strlen($name) > 128) {
             $errors[] = $this->trans('invalid_name');
         } elseif ($this->doctrine->getRepository(OntologyFlow::class)->findOneBy(['name' => $name]) !== null) {
             $errors[] = $this->trans('name_taken', ['{{ name }}' => $name]);
         }
-
-        $steps = $flowData['steps'] ?? null;
-        if ($steps !== null && !\is_array($steps)) {
-            $errors[] = $this->trans('invalid_format');
-            $steps = null;
-        }
-        $design = $flowData['design'] ?? null;
-        if ($design !== null && (!\is_array($design) || array_is_list($design))) {
-            $errors[] = $this->trans('invalid_format');
-            $design = null;
-        }
-        if (\is_array($design)) {
-            // A design of another canvas version would still be scheduled and executed (the runner
-            // reads design.steps) while the editor refuses it as corrupted and opens empty — an
-            // uneditable running flow. Refuse the file instead.
-            if (($design['version'] ?? null) !== OntologyFlow::DESIGN_VERSION) {
-                $errors[] = $this->trans('unsupported_design', [
-                    '{{ version }}' => \is_scalar($design['version'] ?? null) ? (string) $design['version'] : '?',
-                    '{{ supported }}' => (string) OntologyFlow::DESIGN_VERSION,
-                ]);
-            }
-            // The logical steps decide type/triggerType (so, scheduling) while the canvas steps are
-            // what actually executes: a document where they disagree is not importable.
-            if (!$this->stepsAgree($steps, $design['steps'] ?? null)) {
-                $errors[] = $this->trans('steps_design_mismatch');
-            }
-        }
-
-        // A document must never smuggle in a RAW connector or subflow id: it would silently point
-        // at whatever those ids happen to be here. Export always replaces both with descriptors.
-        $rawKeys = ['connector' => 'raw_connector_id', 'subflow' => 'raw_subflow_id'];
-        foreach ($this->allConfigs($steps, $design) as $config) {
-            foreach ($rawKeys as $rawKey => $message) {
-                if (\array_key_exists($rawKey, $config)) {
-                    $errors[] = $this->trans($message);
-                    unset($rawKeys[$rawKey]);
-                }
-            }
-            if ($rawKeys === []) {
-                break;
-            }
-        }
+        [$steps, $design] = $this->checkDefinition($flowData, $errors);
 
         // Resolve references against THIS environment, collecting every mismatch.
         $connectorIds = $this->resolveConnectors($steps, $design, $errors);
         $subflowIds = $this->resolveSubflows($steps, $design, $errors);
-        $this->checkEntities($steps, $design, \is_array($document['entities'] ?? null) ? $document['entities'] : [], $errors);
+        $this->checkEntities($steps, $design, $document['entities'] ?? null, $errors);
 
         if ($errors !== []) {
             throw new FlowImportException(array_values(array_unique($errors)));
@@ -176,6 +144,66 @@ class FlowPortability
             $design['steps'] = $this->applySubflowIds($this->applyConnectorIds($design['steps'], $connectorIds), $subflowIds);
         }
 
+        return $this->storeFlow($name, $importedSteps, $design);
+    }
+
+    /**
+     * The document's step list and canvas design, recording what makes them unusable: the wrong
+     * shape, another canvas version, the two disagreeing, or RAW connector/subflow ids.
+     *
+     * @param array<string, mixed> $flowData
+     * @param array<int, string>   $errors
+     *
+     * @return array{0: mixed, 1: mixed} [steps, design] — each null when unusable
+     */
+    private function checkDefinition(array $flowData, array &$errors): array
+    {
+        $steps = $flowData['steps'] ?? null;
+        if ($steps !== null && !\is_array($steps)) {
+            $errors[] = $this->trans('invalid_format');
+            $steps = null;
+        }
+        $design = $flowData['design'] ?? null;
+        if ($design !== null && (!\is_array($design) || array_is_list($design))) {
+            $errors[] = $this->trans('invalid_format');
+            $design = null;
+        }
+        // A design of another canvas version would still be scheduled and executed (the runner
+        // reads design.steps) while the editor refuses it as corrupted and opens empty — an
+        // uneditable running flow. Refuse the file instead.
+        if (\is_array($design) && ($design['version'] ?? null) !== OntologyFlow::DESIGN_VERSION) {
+            $errors[] = $this->trans('unsupported_design', [
+                '{{ version }}' => \is_scalar($design['version'] ?? null) ? (string) $design['version'] : '?',
+                '{{ supported }}' => (string) OntologyFlow::DESIGN_VERSION,
+            ]);
+        }
+        // The logical steps decide type/triggerType (so, scheduling) while the canvas steps are
+        // what actually executes: a document where they disagree is not importable.
+        if (\is_array($design) && !$this->stepsAgree($steps, $design['steps'] ?? null)) {
+            $errors[] = $this->trans('steps_design_mismatch');
+        }
+
+        // A document must never smuggle in a RAW connector or subflow id: it would silently point
+        // at whatever those ids happen to be here. Export always replaces both with descriptors.
+        // Each is reported once, in the order first met.
+        $pending = ['connector' => 'raw_connector_id', 'subflow' => 'raw_subflow_id'];
+        foreach ($this->allConfigs($steps, $design) as $config) {
+            foreach (array_intersect_key($pending, $config) as $rawKey => $message) {
+                $errors[] = $this->trans($message);
+                unset($pending[$rawKey]);
+            }
+        }
+
+        return [$steps, $design];
+    }
+
+    /**
+     * Validates the resolved steps like an editor save and stores the flow — always DISABLED.
+     *
+     * @param array<int, mixed> $importedSteps the steps with local connector/subflow ids
+     */
+    private function storeFlow(string $name, array $importedSteps, mixed $design): OntologyFlow
+    {
         // The imported steps must clear exactly the bar an editor save clears — otherwise a file
         // could store a flow the editor or the executor chokes on. Run it AFTER the connector ids
         // are back, since the step rules require a resolved connector.
@@ -246,35 +274,8 @@ class FlowPortability
                 $errors[] = $this->trans('malformed_step');
                 continue;
             }
-            $config = $step['config'] ?? null;
-            if (\is_array($config) && \array_key_exists('connector', $config)) {
-                $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) $config['connector']);
-                if ($connector === null) {
-                    $errors[] = $this->trans('export_connector_missing', [
-                        '{{ name }}' => (string) ($step['name'] ?? '?'),
-                    ]);
-                } else {
-                    unset($config['connector']);
-                    $config['connectorRef'] = [
-                        'name' => $connector->getName(),
-                        'type' => $connector->getType(),
-                        'system' => $connector->getSystem()?->getName(),
-                    ];
-                }
-                $step['config'] = $config;
-            }
-            if (\is_array($config) && \array_key_exists('subflow', $config)) {
-                $target = $this->doctrine->getRepository(OntologyFlow::class)->find((int) $config['subflow']);
-                // A wrong-type target is exactly as broken as a missing one: the run would fail.
-                if ($target === null || $target->getType() !== OntologyFlow::TYPE_SUBFLOW) {
-                    $errors[] = $this->trans('export_subflow_missing', [
-                        '{{ name }}' => (string) ($step['name'] ?? '?'),
-                    ]);
-                } else {
-                    unset($config['subflow']);
-                    $config['subflowRef'] = ['name' => $target->getName()];
-                }
-                $step['config'] = $config;
+            if (\is_array($step['config'] ?? null)) {
+                $step['config'] = $this->portableConfig($step['name'] ?? '?', $step['config'], $errors);
             }
             $out[] = $step;
         }
@@ -283,26 +284,41 @@ class FlowPortability
     }
 
     /**
-     * The referenced entities with the unique attribute the step configs do not carry.
+     * One step config with its connector id / subflow id swapped for descriptors; an id pointing
+     * nowhere (or at a flow that is not a subflow) is recorded and left in place.
      *
-     * @return array<int, array<string, mixed>>
+     * @param array<string, mixed> $config
+     * @param array<int, string>   $errors
+     *
+     * @return array<string, mixed>
      */
-    private function entityManifest(OntologyFlow $flow): array
+    private function portableConfig(mixed $stepName, array $config, array &$errors): array
     {
-        $manifest = [];
-        foreach ($this->entityRefs($flow->getSteps(), $flow->getDesign()) as $key => [$systemName, $entityName]) {
-            $entity = $this->findEntity($systemName, $entityName);
-            $manifest[] = [
-                'system' => $systemName,
-                'entity' => $entityName,
-                // Null when the entity is already missing locally: names still travel, so the
-                // export stays usable and the import reports what it cannot match.
-                'uniqueAttribute' => $entity?->getUniqueAttribute(),
-            ];
-            unset($key);
+        if (\array_key_exists('connector', $config)) {
+            $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) $config['connector']);
+            if ($connector === null) {
+                $errors[] = $this->trans('export_connector_missing', ['{{ name }}' => (string) $stepName]);
+            } else {
+                unset($config['connector']);
+                $config['connectorRef'] = [
+                    'name' => $connector->getName(),
+                    'type' => $connector->getType(),
+                    'system' => $connector->getSystem()?->getName(),
+                ];
+            }
+        }
+        if (\array_key_exists('subflow', $config)) {
+            $target = $this->doctrine->getRepository(OntologyFlow::class)->find((int) $config['subflow']);
+            // A wrong-type target is exactly as broken as a missing one: the run would fail.
+            if ($target === null || $target->getType() !== OntologyFlow::TYPE_SUBFLOW) {
+                $errors[] = $this->trans('export_subflow_missing', ['{{ name }}' => (string) $stepName]);
+            } else {
+                unset($config['subflow']);
+                $config['subflowRef'] = ['name' => $target->getName()];
+            }
         }
 
-        return $manifest;
+        return $config;
     }
 
     /**
@@ -360,48 +376,55 @@ class FlowPortability
         $resolved = [];
         foreach ($this->allConfigs($steps, $design) as $config) {
             $ref = $config['connectorRef'] ?? null;
-            if (!\is_array($ref)) {
+            if (!\is_array($ref) || isset($resolved[self::connectorKey($ref)])) {
                 continue;
             }
-            $key = self::connectorKey($ref);
-            if (isset($resolved[$key])) {
-                continue;
+            $id = $this->resolveConnectorRef($ref, $errors);
+            if ($id !== null) {
+                $resolved[self::connectorKey($ref)] = $id;
             }
-            $name = \is_string($ref['name'] ?? null) ? trim($ref['name']) : '';
-            $type = \is_string($ref['type'] ?? null) ? trim($ref['type']) : '';
-            $systemName = \is_string($ref['system'] ?? null) ? trim($ref['system']) : '';
-            if ($name === '' || $type === '' || $systemName === '') {
-                // A partially-filled descriptor used to match loosely (any type / any system),
-                // which is exactly the mis-binding this feature exists to prevent.
-                $errors[] = $this->trans('incomplete_connector_ref', ['{{ name }}' => $name !== '' ? $name : '?']);
-                continue;
-            }
-
-            /** @var OntologyConnector[] $candidates */
-            $candidates = $this->doctrine->getRepository(OntologyConnector::class)->findBy(['name' => $name]);
-            $matches = array_values(array_filter($candidates, static function (OntologyConnector $c) use ($type, $systemName): bool {
-                $typeOk = $type === '' || (string) $c->getType() === $type;
-                $systemOk = $systemName === '' || (string) $c->getSystem()?->getName() === $systemName;
-
-                return $typeOk && $systemOk;
-            }));
-
-            if ($matches === []) {
-                $errors[] = $this->trans('connector_missing', [
-                    '{{ name }}' => $name,
-                    '{{ type }}' => $type !== '' ? $type : '?',
-                ]);
-                continue;
-            }
-            if (\count($matches) > 1) {
-                // Connector names are not unique across systems: refuse to guess.
-                $errors[] = $this->trans('connector_ambiguous', ['{{ name }}' => $name]);
-                continue;
-            }
-            $resolved[$key] = (int) $matches[0]->getId();
         }
 
         return $resolved;
+    }
+
+    /**
+     * The local id of the ONE connector a descriptor names (name + type + system), or null with
+     * the problem recorded: an incomplete descriptor, no match, or several.
+     *
+     * @param array<string, mixed> $ref
+     * @param array<int, string>   $errors
+     */
+    private function resolveConnectorRef(array $ref, array &$errors): ?int
+    {
+        $name = \is_string($ref['name'] ?? null) ? trim($ref['name']) : '';
+        $type = \is_string($ref['type'] ?? null) ? trim($ref['type']) : '';
+        $systemName = \is_string($ref['system'] ?? null) ? trim($ref['system']) : '';
+        if ($name === '' || $type === '' || $systemName === '') {
+            // A partially-filled descriptor used to match loosely (any type / any system),
+            // which is exactly the mis-binding this feature exists to prevent.
+            $errors[] = $this->trans('incomplete_connector_ref', ['{{ name }}' => $name !== '' ? $name : '?']);
+
+            return null;
+        }
+
+        /** @var OntologyConnector[] $candidates */
+        $candidates = $this->doctrine->getRepository(OntologyConnector::class)->findBy(['name' => $name]);
+        $matches = array_values(array_filter(
+            $candidates,
+            static fn (OntologyConnector $c): bool => (string) $c->getType() === $type
+                && (string) $c->getSystem()?->getName() === $systemName
+        ));
+        if (\count($matches) === 1) {
+            return (int) $matches[0]->getId();
+        }
+        // No match here — or several: connector names are not unique across systems, so refuse
+        // to guess.
+        $errors[] = $matches === []
+            ? $this->trans('connector_missing', ['{{ name }}' => $name, '{{ type }}' => $type])
+            : $this->trans('connector_ambiguous', ['{{ name }}' => $name]);
+
+        return null;
     }
 
     /**
@@ -447,16 +470,13 @@ class FlowPortability
      * Checks every referenced entity exists here under the same system, with the same unique
      * attribute when the document states one.
      *
-     * @param array<int, mixed>  $manifest
+     * @param mixed              $manifest the document's entity manifest (non-arrays ignored)
      * @param array<int, string> $errors
      */
-    private function checkEntities(mixed $steps, mixed $design, array $manifest, array &$errors): void
+    private function checkEntities(mixed $steps, mixed $design, mixed $manifest, array &$errors): void
     {
         $expectedAttribute = [];
-        foreach ($manifest as $row) {
-            if (!\is_array($row)) {
-                continue;
-            }
+        foreach (array_filter(\is_array($manifest) ? $manifest : [], '\is_array') as $row) {
             $system = \is_string($row[self::KEY_SYSTEM] ?? null) ? trim($row[self::KEY_SYSTEM]) : '';
             $entity = \is_string($row[self::KEY_ENTITY] ?? null) ? trim($row[self::KEY_ENTITY]) : '';
             if ($system !== '' && $entity !== '' && \is_string($row['uniqueAttribute'] ?? null)) {

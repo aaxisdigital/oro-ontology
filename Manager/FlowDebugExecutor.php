@@ -8,6 +8,7 @@ use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Exception\FlowExecutionFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
@@ -67,6 +68,21 @@ class FlowDebugExecutor
 
     private const int TIMEOUT = 30;
 
+    /** The step types with execution semantics (triggers and placeholders are no-ops). */
+    private const array EXECUTABLE_STEP_TYPES = [
+        'dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'foreach', 'logger',
+        'event', 'ms_teams', 'invoke_php', 'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename',
+    ];
+
+    /** The executable types WITHOUT a destination: they act on the context or the outside world. */
+    private const array DESTINATIONLESS_STEP_TYPES = ['sub_flow', 'foreach', 'logger', 'event', 'ms_teams'];
+
+    private const string STEP_DETAIL = 'Step "%s": %s';
+    private const string NOT_CONFIGURED = 'Step "%s" is not configured.';
+    private const string VARIABLE_UNDEFINED = 'Step "%s": the variable "%s" is not defined.';
+    private const string TOO_DEEP = 'Step "%s": subflow calls nested deeper than 10 levels.';
+    private const string CIRCULAR = 'Step "%s": circular subflow call — "%s" is already running in this execution.';
+
     public function __construct(
         private readonly OntologyDataApiManager $dataApi,
         private readonly ManagerRegistry $doctrine,
@@ -88,14 +104,30 @@ class FlowDebugExecutor
      *
      * @param array<int, array{id: string, type: string, name: string, config: array<string, mixed>|null}> $steps
      *
-     * @throws \RuntimeException naming the first problem
+     * @throws FlowExecutionFailure naming the first problem
      */
     private function assertRunnable(array $steps): void
     {
         $problems = $this->stepValidator->validate($steps);
         if ($problems !== []) {
-            throw new \RuntimeException($problems[0]);
+            throw new FlowExecutionFailure($problems[0]);
         }
+    }
+
+    /**
+     * The flow-start payload: how the run was triggered (debug | schedule | endpoint | subflow | …)
+     * and — for debug/endpoint runs with credentials — who.
+     *
+     * @param array<string, mixed> $runInfo
+     *
+     * @return array<string, mixed>
+     */
+    private static function startPayload(array $runInfo): array
+    {
+        return array_filter([
+            'trigger' => (string) ($runInfo['trigger'] ?? 'debug'),
+            'user' => \is_array($runInfo['user'] ?? null) ? $runInfo['user'] : null,
+        ], static fn ($v) => $v !== null);
     }
 
     /**
@@ -111,6 +143,7 @@ class FlowDebugExecutor
      * @return array<string, mixed> the accumulated output context
      *
      * @throws \RuntimeException with a user-readable message when a step cannot execute
+     *                           ({@see FlowStepFailure} for a failing step)
      */
     public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null, ?array $seedContext = null, array $runInfo = []): array
     {
@@ -131,10 +164,7 @@ class FlowDebugExecutor
         // triggered (debug | schedule | endpoint | subflow | …) and — for debug/endpoint runs
         // with credentials — who.
         $isNested = ($runInfo['trigger'] ?? '') === 'subflow';
-        $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-start' : 'flow-start', array_filter([
-            'trigger' => (string) ($runInfo['trigger'] ?? 'debug'),
-            'user' => \is_array($runInfo['user'] ?? null) ? $runInfo['user'] : null,
-        ], static fn ($v) => $v !== null));
+        $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-start' : 'flow-start', self::startPayload($runInfo));
 
         // A CALL SUBFLOW run seeds the CALLER's context — the subflow reads and extends it, and
         // the caller continues with the result (shared-context semantics).
@@ -223,68 +253,20 @@ class FlowDebugExecutor
         $this->touchLastExecuted($flow);
         try {
             if ($blob === null || !\is_array($blob['frames'] ?? null)) {
-                $this->assertRunnable($steps);
-                $order = $this->executionOrder($steps, $links);
-                $executionUuid = $this->dataApi->generateUuid();
-                $blob = [
-                    'context' => $this->initialContext($order[0], $input, $executionUuid),
-                    'frames' => [[
-                        'kind' => 'flow',
-                        'flowId' => $flow?->getId(),
-                        'flowName' => $flow?->getName(),
-                        'steps' => $steps,
-                        'links' => $links,
-                        'index' => 0,
-                        'callerStepId' => null,
-                    ]],
-                    'done' => false,
-                ];
-                $this->flowEvents->emit($flow, $executionUuid, 'flow-start', array_filter([
-                    'trigger' => (string) ($runInfo['trigger'] ?? 'debug'),
-                    'user' => \is_array($runInfo['user'] ?? null) ? $runInfo['user'] : null,
-                ], static fn ($v) => $v !== null));
+                $blob = $this->startDebugWalk($steps, $links, $input, $flow, $runInfo);
             }
             if (($blob['done'] ?? false) === true) {
-                throw new \RuntimeException('There is no step left to execute.');
+                throw new FlowExecutionFailure('There is no step left to execute.');
             }
 
-            $trails = [];
-            if ($stepOut && \count($blob['frames']) > 1) {
-                // STEP OUT: run the current frame to completion — remaining foreach iterations
-                // included — stopping the moment it pops back to the caller ('returned').
-                $startFrames = \count($blob['frames']);
-                do {
-                    $response = $this->debugTick($blob, $trails, false);
-                } while (!$blob['done'] && \count($blob['frames']) >= $startFrames);
-                $response['subflowTrails'] = array_values($trails);
-            } else {
-                do {
-                    // Run all steps OVER subflows (atomic — fewer ticks, identical events/trails);
-                    // a single tick honors the caller's choice: step INTO or OVER the invoker.
-                    $response = $this->debugTick($blob, $trails, $runAll ? false : $stepInto);
-                } while ($runAll && !$blob['done'] && \count($blob['frames'] ?? []) > 0);
-
-                if ($runAll) {
-                    $response['subflowTrails'] = array_values($trails);
-                    $response['executedIds'] = $response['rootExecuted'] ?? [];
-                } elseif (($response['_overTrails'] ?? []) !== []) {
-                    // A stepped-OVER invoker: its nested trails feed the editor's visit animation.
-                    $response['subflowTrails'] = $response['_overTrails'];
-                }
-            }
+            $response = $stepOut && \count($blob['frames']) > 1
+                ? $this->debugStepOut($blob)
+                : $this->debugStep($blob, $runAll, $stepInto);
             unset($response['rootExecuted'], $response['_overTrails']);
             $response['context'] = $blob['context'];
             // What the NEXT tick would execute — the editor shows "Step into" when it is a
             // subflow invoker (null when the next tick is a return/re-enter or the run is done).
-            $response['next'] = null;
-            if (!$blob['done'] && \count($blob['frames'] ?? []) > 0) {
-                $top = $blob['frames'][\count($blob['frames']) - 1];
-                $topOrder = $this->executionOrder($top['steps'], $top['links'], self::choiceResults($blob['context']));
-                $upcoming = $topOrder[$top['index']] ?? null;
-                if ($upcoming !== null) {
-                    $response['next'] = ['id' => $upcoming['id'], 'name' => $upcoming['name'], 'type' => $upcoming['type']];
-                }
-            }
+            $response['next'] = $this->upcomingStep($blob);
 
             return ['blob' => $blob, 'response' => $response];
         } finally {
@@ -292,6 +274,100 @@ class FlowDebugExecutor
             // session from looking like a run in progress and blocking the scheduler.
             $this->touchLastFinished($flow);
         }
+    }
+
+    /**
+     * A fresh debug session: the root frame over the whole flow, the seeded context, flow-start.
+     *
+     * @return array<string, mixed> the new blob
+     */
+    private function startDebugWalk(array $steps, array $links, array $input, ?OntologyFlow $flow, array $runInfo): array
+    {
+        $this->assertRunnable($steps);
+        $order = $this->executionOrder($steps, $links);
+        $executionUuid = $this->dataApi->generateUuid();
+        $blob = [
+            'context' => $this->initialContext($order[0], $input, $executionUuid),
+            'frames' => [[
+                'kind' => 'flow',
+                'flowId' => $flow?->getId(),
+                'flowName' => $flow?->getName(),
+                'steps' => $steps,
+                'links' => $links,
+                'index' => 0,
+                'callerStepId' => null,
+            ]],
+            'done' => false,
+        ];
+        $this->flowEvents->emit($flow, $executionUuid, 'flow-start', self::startPayload($runInfo));
+
+        return $blob;
+    }
+
+    /**
+     * STEP OUT: run the current frame to completion — remaining foreach iterations included —
+     * stopping the moment it pops back to the caller ('returned').
+     *
+     * @param array<string, mixed> $blob
+     *
+     * @return array<string, mixed>
+     */
+    private function debugStepOut(array &$blob): array
+    {
+        $trails = [];
+        $startFrames = \count($blob['frames']);
+        do {
+            $response = $this->debugTick($blob, $trails, false);
+        } while (!$blob['done'] && \count($blob['frames']) >= $startFrames);
+        $response['subflowTrails'] = array_values($trails);
+
+        return $response;
+    }
+
+    /**
+     * One tick — or, with $runAll, ticks to the end of the run.
+     *
+     * @param array<string, mixed> $blob
+     *
+     * @return array<string, mixed>
+     */
+    private function debugStep(array &$blob, bool $runAll, bool $stepInto): array
+    {
+        $trails = [];
+        do {
+            // Run all steps OVER subflows (atomic — fewer ticks, identical events/trails);
+            // a single tick honors the caller's choice: step INTO or OVER the invoker.
+            $response = $this->debugTick($blob, $trails, !$runAll && $stepInto);
+        } while ($runAll && !$blob['done'] && \count($blob['frames'] ?? []) > 0);
+
+        if ($runAll) {
+            $response['subflowTrails'] = array_values($trails);
+            $response['executedIds'] = $response['rootExecuted'] ?? [];
+        } elseif (($response['_overTrails'] ?? []) !== []) {
+            // A stepped-OVER invoker: its nested trails feed the editor's visit animation.
+            $response['subflowTrails'] = $response['_overTrails'];
+        }
+
+        return $response;
+    }
+
+    /**
+     * The step the next tick would execute in the innermost frame — null when the next tick is a
+     * return/re-enter or the run is done.
+     *
+     * @param array<string, mixed> $blob
+     *
+     * @return array{id: string, name: string, type: string}|null
+     */
+    private function upcomingStep(array $blob): ?array
+    {
+        if ($blob['done'] || \count($blob['frames'] ?? []) === 0) {
+            return null;
+        }
+        $top = $blob['frames'][\count($blob['frames']) - 1];
+        $upcoming = $this->executionOrder($top['steps'], $top['links'], self::choiceResults($blob['context']))[$top['index']] ?? null;
+
+        return $upcoming === null ? null : ['id' => $upcoming['id'], 'name' => $upcoming['name'], 'type' => $upcoming['type']];
     }
 
     /**
@@ -326,7 +402,7 @@ class FlowDebugExecutor
         // A subflow invoker DESCENDS when stepping INTO; stepping OVER falls through to the
         // atomic arm below (callSubflow/foreachSubflow — events and trails as a full run).
         if ($stepInto && \in_array($step['type'], ['sub_flow', 'foreach'], true)) {
-            return $this->debugEnterFrame($blob, $step, $frameFlow, $executionUuid);
+            return $this->debugEnterFrame($blob, $step, $executionUuid);
         }
 
         // A plain step (or a stepped-OVER invoker): execute it against the shared context.
@@ -389,93 +465,30 @@ class FlowDebugExecutor
      * @param array<string, mixed> $blob
      * @param array<string, mixed> $step
      */
-    private function debugEnterFrame(array &$blob, array $step, ?OntologyFlow $callerFlow, string $executionUuid): array
+    private function debugEnterFrame(array &$blob, array $step, string $executionUuid): array
     {
-        $context = &$blob['context'];
-        $frames = &$blob['frames'];
         $config = \is_array($step['config']) ? $step['config'] : [];
 
         try {
-            if (\count($frames) >= 10) {
-                throw new \RuntimeException(sprintf('Step "%s": subflow calls nested deeper than 10 levels.', $step['name']));
-            }
-            [$id, $target, $subStepsRaw, $subLinksRaw] = $this->resolveSubflowTarget($step['name'], $config);
-            foreach ($frames as $open) {
-                if ((int) ($open['flowId'] ?? 0) === $id && $open['kind'] !== 'flow') {
-                    throw new \RuntimeException(sprintf(
-                        'Step "%s": circular subflow call — "%s" is already running in this execution.',
-                        $step['name'],
-                        (string) $target->getName()
-                    ));
-                }
-            }
-            $subSteps = $this->normalizeDesignSteps($subStepsRaw, $step['name']);
-            $subLinks = $this->normalizeDesignLinks($subLinksRaw);
-            $this->assertRunnable($subSteps);
-            $subOrder = $this->executionOrder($subSteps, $subLinks);
-
-            $frame = [
-                'kind' => $step['type'] === 'foreach' ? 'each' : 'sub',
-                'flowId' => $id,
-                'flowName' => (string) $target->getName(),
-                'steps' => $subSteps,
-                'links' => $subLinks,
-                'index' => 1, // the trigger is consumed by the ENTER tick itself
-                'callerStepId' => $step['id'],
-                'callerStepName' => $step['name'],
-            ];
+            [$frame, $subOrder] = $this->openSubflowFrame($blob['frames'], $step, $config);
             if ($step['type'] === 'foreach') {
-                $arrayVar = trim((string) ($config['array'] ?? ''));
-                $itemVar = trim((string) ($config['item'] ?? ''));
-                if ($arrayVar === '' || $itemVar === '') {
-                    throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
-                }
-                if (!\array_key_exists($arrayVar, $context)) {
-                    throw new \RuntimeException(sprintf('Step "%s": the variable "%s" is not defined.', $step['name'], $arrayVar));
-                }
-                $list = $context[$arrayVar];
-                if (!\is_array($list) || ($list !== [] && !array_is_list($list))) {
-                    throw new \RuntimeException(sprintf(
-                        'Step "%s": the variable "%s" must hold an array, got %s.',
-                        $step['name'],
-                        $arrayVar,
-                        get_debug_type($list)
-                    ));
-                }
+                [$list, $itemVar] = $this->loopItems($step['name'], $config, $blob['context']);
                 if ($list === []) {
                     // Zero iterations: the loop step simply completes — no frame to enter.
-                    $caller = &$frames[\count($frames) - 1];
-                    $caller['index']++;
-                    $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
-                        'name' => $step['name'],
-                        'type' => $step['type'],
-                    ]);
-                    $done = \count($frames) === 1 && $caller['index'] >= \count($this->executionOrder($caller['steps'], $caller['links'], self::choiceResults($context)));
-                    if ($done) {
-                        $blob['done'] = true;
-                        $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'flow-finish');
-                    }
-                    unset($caller);
-
-                    return $this->debugResponse($blob, $step, $this->executionOrder($frames[\count($frames) - 1]['steps'], $frames[\count($frames) - 1]['links'], self::choiceResults($context)), null)
-                        + ['rootExecuted' => \count($frames) === 1 ? [$step['id']] : []];
+                    return $this->debugCompleteEmptyLoop($blob, $step, $executionUuid);
                 }
                 $frame['list'] = array_values($list);
                 $frame['iteration'] = 0;
-                $frame['itemVar'] = $itemVar;
-                $frame['hadItem'] = \array_key_exists($itemVar, $context);
-                $frame['prevItem'] = $context[$itemVar] ?? null;
-                $frame['hadIndex'] = \array_key_exists('index', $context);
-                $frame['prevIndex'] = $context['index'] ?? null;
-                $context[$itemVar] = $frame['list'][0];
-                $context['index'] = 0;
+                $frame += self::loopScope($itemVar, $blob['context']);
+                $blob['context'][$itemVar] = $frame['list'][0];
+                $blob['context']['index'] = 0;
             }
         } catch (\RuntimeException $e) {
             $this->emitDebugException($blob, $e->getMessage(), $executionUuid);
             throw new FlowStepFailure($e->getMessage(), $step['id'], [], $e);
         }
 
-        $frames[] = $frame;
+        $blob['frames'][] = $frame;
         $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
         $trigger = $subOrder[0];
         $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
@@ -484,6 +497,70 @@ class FlowDebugExecutor
         ]);
 
         return $this->debugResponse($blob, $trigger, $subOrder, 'entered') + ['rootExecuted' => []];
+    }
+
+    /**
+     * The frame a sub_flow/foreach step opens (its trigger already consumed) and the subflow's
+     * order — refused when too deep, circular, or the subflow is unusable/unrunnable.
+     *
+     * @param array<int, array<string, mixed>> $frames the open frames
+     * @param array<string, mixed>             $step
+     * @param array<string, mixed>             $config
+     *
+     * @return array{0: array<string, mixed>, 1: array<int, array<string, mixed>>}
+     */
+    private function openSubflowFrame(array $frames, array $step, array $config): array
+    {
+        if (\count($frames) >= 10) {
+            throw new FlowExecutionFailure(sprintf(self::TOO_DEEP, $step['name']));
+        }
+        [$id, $target, $subStepsRaw, $subLinksRaw] = $this->resolveSubflowTarget($step['name'], $config);
+        foreach ($frames as $open) {
+            if ((int) ($open['flowId'] ?? 0) === $id && $open['kind'] !== 'flow') {
+                throw new FlowExecutionFailure(sprintf(self::CIRCULAR, $step['name'], (string) $target->getName()));
+            }
+        }
+        $subSteps = $this->normalizeDesignSteps($subStepsRaw, $step['name']);
+        $subLinks = $this->normalizeDesignLinks($subLinksRaw);
+        $this->assertRunnable($subSteps);
+        $subOrder = $this->executionOrder($subSteps, $subLinks);
+
+        return [[
+            'kind' => $step['type'] === 'foreach' ? 'each' : 'sub',
+            'flowId' => $id,
+            'flowName' => (string) $target->getName(),
+            'steps' => $subSteps,
+            'links' => $subLinks,
+            'index' => 1, // the trigger is consumed by the ENTER tick itself
+            'callerStepId' => $step['id'],
+            'callerStepName' => $step['name'],
+        ], $subOrder];
+    }
+
+    /**
+     * A foreach over an empty list: the loop step completes in the caller's frame at once.
+     *
+     * @param array<string, mixed> $blob
+     * @param array<string, mixed> $step
+     */
+    private function debugCompleteEmptyLoop(array &$blob, array $step, string $executionUuid): array
+    {
+        $frames = &$blob['frames'];
+        $caller = &$frames[\count($frames) - 1];
+        $caller['index']++;
+        $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
+            'name' => $step['name'],
+            'type' => $step['type'],
+        ]);
+        $callerOrder = $this->executionOrder($caller['steps'], $caller['links'], self::choiceResults($blob['context']));
+        if (\count($frames) === 1 && $caller['index'] >= \count($callerOrder)) {
+            $blob['done'] = true;
+            $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'flow-finish');
+        }
+        unset($caller);
+
+        return $this->debugResponse($blob, $step, $callerOrder, null)
+            + ['rootExecuted' => \count($frames) === 1 ? [$step['id']] : []];
     }
 
     /**
@@ -496,10 +573,8 @@ class FlowDebugExecutor
      */
     private function debugLeaveFrame(array &$blob, array &$trails, array $order): array
     {
-        $context = &$blob['context'];
-        $frames = &$blob['frames'];
-        $frame = &$frames[\count($frames) - 1];
-        $executionUuid = (string) ($context['flowUuid'] ?? '');
+        $frame = $blob['frames'][\count($blob['frames']) - 1];
+        $executionUuid = (string) ($blob['context']['flowUuid'] ?? '');
 
         if ($frame['kind'] === 'flow') {
             // Root exhausted (only reachable when the last tick did not already flag it).
@@ -511,43 +586,56 @@ class FlowDebugExecutor
         }
 
         if ($frame['kind'] === 'each' && $frame['iteration'] + 1 < \count($frame['list'])) {
-            // Next iteration: same frame, back to the trigger — the editor clears the canvas.
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
-            $frame['iteration']++;
-            $frame['index'] = 1;
-            $context[$frame['itemVar']] = $frame['list'][$frame['iteration']];
-            $context['index'] = $frame['iteration'];
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
-            $subOrder = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
-            $trigger = $subOrder[0];
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
-                'name' => $trigger['name'],
-                'type' => $trigger['type'],
-            ]);
-
-            return $this->debugResponse($blob, $trigger, $subOrder, 'reentered') + ['rootExecuted' => []];
+            return $this->debugNextIteration($blob, $executionUuid);
         }
 
-        // Frame complete: restore loop-scoped variables, pop, and complete the caller's step.
+        return $this->debugReturnToCaller($blob, $trails, $executionUuid);
+    }
+
+    /**
+     * Next foreach iteration: same frame, back to the trigger — the editor clears the canvas.
+     *
+     * @param array<string, mixed> $blob
+     */
+    private function debugNextIteration(array &$blob, string $executionUuid): array
+    {
+        $context = &$blob['context'];
+        $frame = &$blob['frames'][\count($blob['frames']) - 1];
+        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+        $frame['iteration']++;
+        $frame['index'] = 1;
+        $context[$frame['itemVar']] = $frame['list'][$frame['iteration']];
+        $context['index'] = $frame['iteration'];
+        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
+        $subOrder = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
+        $trigger = $subOrder[0];
+        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
+            'name' => $trigger['name'],
+            'type' => $trigger['type'],
+        ]);
+        unset($frame, $context);
+
+        return $this->debugResponse($blob, $trigger, $subOrder, 'reentered') + ['rootExecuted' => []];
+    }
+
+    /**
+     * Frame complete: restore loop-scoped variables, pop, and complete the caller's step.
+     *
+     * @param array<string, mixed>            $blob
+     * @param array<int, array<string,mixed>> $trails
+     */
+    private function debugReturnToCaller(array &$blob, array &$trails, string $executionUuid): array
+    {
+        $frames = &$blob['frames'];
+        $frame = array_pop($frames);
         $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
         if ($frame['kind'] === 'each') {
-            if ($frame['hadItem']) {
-                $context[$frame['itemVar']] = $frame['prevItem'];
-            } else {
-                unset($context[$frame['itemVar']]);
-            }
-            if ($frame['hadIndex']) {
-                $context['index'] = $frame['prevIndex'];
-            } else {
-                unset($context['index']);
-            }
+            self::restoreLoopScope($frame, $blob['context']);
         }
         $callerStepId = (string) $frame['callerStepId'];
-        unset($frame);
-        array_pop($frames);
 
         $caller = &$frames[\count($frames) - 1];
-        $callerOrder = $this->executionOrder($caller['steps'], $caller['links'], self::choiceResults($context));
+        $callerOrder = $this->executionOrder($caller['steps'], $caller['links'], self::choiceResults($blob['context']));
         $callerStep = null;
         foreach ($callerOrder as $candidate) {
             if ($candidate['id'] === $callerStepId) {
@@ -562,8 +650,7 @@ class FlowDebugExecutor
         ]);
         $caller['index']++;
 
-        $done = \count($frames) === 1 && $caller['index'] >= \count($callerOrder);
-        if ($done) {
+        if (\count($frames) === 1 && $caller['index'] >= \count($callerOrder)) {
             $blob['done'] = true;
             $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'flow-finish');
         }
@@ -635,7 +722,7 @@ class FlowDebugExecutor
         $steps = [];
         foreach ($raw as $step) {
             if (!\is_array($step) || !\is_string($step['id'] ?? null) || !\is_string($step['type'] ?? null)) {
-                throw new \RuntimeException(sprintf('Step "%s": the subflow design is unreadable.', $stepName));
+                throw new FlowExecutionFailure(sprintf('Step "%s": the subflow design is unreadable.', $stepName));
             }
             $steps[] = [
                 'id' => $step['id'],
@@ -682,6 +769,36 @@ class FlowDebugExecutor
      */
     private function executionOrder(array $steps, array $links, array $choiceResults = []): array
     {
+        [$byId, $trigger] = self::indexSteps($steps);
+        $outgoing = self::outgoingLinks($links);
+
+        $visited = [$trigger['id'] => true];
+        $queue = [$trigger['id']];
+        $order = [];
+        while ($queue !== []) {
+            $id = array_shift($queue);
+            $step = $byId[$id];
+            $order[] = $step;
+            foreach (self::linksToFollow($step, $outgoing[$id] ?? [], $choiceResults) as $link) {
+                if (isset($byId[$link['to']]) && !isset($visited[$link['to']])) {
+                    $visited[$link['to']] = true;
+                    $queue[] = $link['to'];
+                }
+            }
+        }
+
+        return $order;
+    }
+
+    /**
+     * The steps by id, and the first trigger step (the walk's start).
+     *
+     * @param array<int, array<string, mixed>> $steps
+     *
+     * @return array{0: array<string, array<string, mixed>>, 1: array<string, mixed>}
+     */
+    private static function indexSteps(array $steps): array
+    {
         $byId = [];
         $trigger = null;
         foreach ($steps as $step) {
@@ -691,9 +808,21 @@ class FlowDebugExecutor
             }
         }
         if ($trigger === null) {
-            throw new \RuntimeException('The flow has no trigger to debug.');
+            throw new FlowExecutionFailure('The flow has no trigger to debug.');
         }
 
+        return [$byId, $trigger];
+    }
+
+    /**
+     * Each step's outgoing links, ordered by port.
+     *
+     * @param array<int, array{from: string, fromPort: int, to: string}> $links
+     *
+     * @return array<string, array<int, array{from: string, fromPort: int, to: string}>>
+     */
+    private static function outgoingLinks(array $links): array
+    {
         $outgoing = [];
         foreach ($links as $link) {
             $outgoing[$link['from']][] = $link;
@@ -703,30 +832,30 @@ class FlowDebugExecutor
         }
         unset($list);
 
-        $visited = [$trigger['id'] => true];
-        $queue = [$trigger['id']];
-        $order = [];
-        while ($queue !== []) {
-            $id = array_shift($queue);
-            $step = $byId[$id];
-            $order[] = $step;
-            $follow = $outgoing[$id] ?? [];
-            if ($step['type'] === 'choice') {
-                if (!\array_key_exists($id, $choiceResults)) {
-                    continue; // verdict pending — the path beyond is not known yet
-                }
-                $port = $choiceResults[$id] ? 0 : 1;
-                $follow = array_values(array_filter($follow, static fn (array $l) => $l['fromPort'] === $port));
-            }
-            foreach ($follow as $link) {
-                if (isset($byId[$link['to']]) && !isset($visited[$link['to']])) {
-                    $visited[$link['to']] = true;
-                    $queue[] = $link['to'];
-                }
-            }
-        }
+        return $outgoing;
+    }
 
-        return $order;
+    /**
+     * The links the walk follows out of a step: all of them, except for a CHOICE — only the port
+     * its verdict picked, or none while the verdict is pending (the path beyond is not known yet).
+     *
+     * @param array<string, mixed>                                      $step
+     * @param array<int, array{from: string, fromPort: int, to: string}> $links
+     * @param array<string, bool>                                       $choiceResults
+     *
+     * @return array<int, array{from: string, fromPort: int, to: string}>
+     */
+    private static function linksToFollow(array $step, array $links, array $choiceResults): array
+    {
+        if ($step['type'] !== 'choice') {
+            return $links;
+        }
+        if (!\array_key_exists($step['id'], $choiceResults)) {
+            return [];
+        }
+        $port = $choiceResults[$step['id']] ? 0 : 1;
+
+        return array_values(array_filter($links, static fn (array $l) => $l['fromPort'] === $port));
     }
 
     /**
@@ -825,158 +954,148 @@ class FlowDebugExecutor
         // under the RESERVED context key `choiceResults` (step id => bool) — the walk reads it to
         // pick the branch: truthy = the green output (port 0), falsy = the red one (port 1).
         if ($step['type'] === 'choice') {
-            $expression = \is_array($step['config']) && \is_string($step['config']['expression'] ?? null)
-                ? trim($step['config']['expression'])
-                : '';
-            if ($expression === '') {
-                throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
-            }
-            try {
-                $result = $this->dwl->transform($expression, $context);
-            } catch (\Throwable $e) {
-                throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
-            }
+            $verdict = $this->choiceVerdict($step, $context);
             $results = \is_array($context['choiceResults'] ?? null) ? $context['choiceResults'] : [];
-            $results[$step['id']] = (bool) $result;
+            $results[$step['id']] = $verdict;
             $context['choiceResults'] = $results;
 
             return;
         }
-
-        $fileOps = ['file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'];
-        if (!\in_array(
-            $step['type'],
-            array_merge(['dwl_transform', 'entity_read', 'entity_write', 'invoke', 'sql_query', 'sub_flow', 'foreach', 'logger', 'event', 'ms_teams', 'invoke_php'], $fileOps),
-            true
-        )) {
+        if (!\in_array($step['type'], self::EXECUTABLE_STEP_TYPES, true)) {
             return; // triggers seed the context in execute(); other types have no debug behaviour yet
         }
 
         $config = $step['config'];
         if (!\is_array($config)) {
-            throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
+            throw new FlowExecutionFailure(sprintf(self::NOT_CONFIGURED, $step['name']));
+        }
+        if (\in_array($step['type'], self::DESTINATIONLESS_STEP_TYPES, true)) {
+            $this->executeDestinationlessStep($step, $config, $context, $flow, $executionUuid);
+        } else {
+            $destination = trim((string) ($config['destination'] ?? ''));
+            if ($destination === '') {
+                throw new FlowExecutionFailure(sprintf('Step "%s" has no destination.', $step['name']));
+            }
+            $context[$destination] = $this->stepResult($step, $config, $context, $flow, $executionUuid);
+        }
+    }
+
+    /**
+     * @param array{id: string, type: string, name: string, config: array<string, mixed>|null} $step
+     * @param array<string, mixed>                                                             $context
+     */
+    private function choiceVerdict(array $step, array $context): bool
+    {
+        $expression = \is_array($step['config']) && \is_string($step['config']['expression'] ?? null)
+            ? trim($step['config']['expression'])
+            : '';
+        if ($expression === '') {
+            throw new FlowExecutionFailure(sprintf(self::NOT_CONFIGURED, $step['name']));
         }
 
-        // Call Subflow has no destination of its own: the subflow runs over the caller's context
-        // and whatever it wrote there is what the next main-flow element sees.
+        return (bool) $this->transformForStep($step['name'], $expression, $context);
+    }
+
+    /**
+     * The steps without a destination of their own.
+     *
+     * @param array{id: string, type: string, name: string, config: array<string, mixed>|null} $step
+     * @param array<string, mixed>                                                             $config
+     * @param array<string, mixed>                                                             $context
+     */
+    private function executeDestinationlessStep(array $step, array $config, array &$context, ?OntologyFlow $flow, string $executionUuid): void
+    {
         if ($step['type'] === 'sub_flow') {
+            // Call Subflow: the subflow runs over the caller's context and whatever it wrote there
+            // is what the next main-flow element sees.
             $context = $this->callSubflow($step['name'], $config, $context, $executionUuid);
-
-            return;
-        }
-
-        // Foreach Loop shares the context the same way — one subflow run per array element.
-        if ($step['type'] === 'foreach') {
+        } elseif ($step['type'] === 'foreach') {
+            // Foreach Loop shares the context the same way — one subflow run per array element.
             $context = $this->foreachSubflow($step['name'], $config, $context, $executionUuid);
-
-            return;
-        }
-
-        // Logger has no destination either: it emits ONE line into the PHP application log,
-        // prefixed with the flow's name. The message is hardcoded text, or — via its DWL
-        // toggle — an expression resolved against the current context.
-        if ($step['type'] === 'logger') {
-            $raw = trim((string) ($config['message'] ?? ''));
-            if ($raw === '') {
-                throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
-            }
-            $text = $raw;
-            if (($config['message_dwl'] ?? false) === true) {
-                try {
-                    $result = $this->dwl->transform($raw, $context);
-                } catch (\Throwable $e) {
-                    throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
-                }
-                // Strings go verbatim; anything else (objects, lists, numbers, booleans) as JSON.
-                $text = \is_string($result)
-                    ? $result
-                    : (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            }
+        } elseif ($step['type'] === 'logger') {
+            // Logger emits ONE line into the PHP application log, prefixed with the flow's name.
+            $text = $this->messageText($step['name'], $config, 'message', $context);
             $this->logger->info(sprintf('[Aaxis Flow - %s] %s', $flow?->getName() ?? 'unsaved', $text));
-
-            return;
-        }
-
-        // Event has no destination either: it queues a log-message flow event with the resolved
-        // value as the message (plain text, or a DWL expression via its toggle) and continues.
-        if ($step['type'] === 'event') {
-            $raw = trim((string) ($config['value'] ?? ''));
-            if ($raw === '') {
-                throw new \RuntimeException(sprintf('Step "%s" is not configured.', $step['name']));
-            }
-            $text = $raw;
-            if (($config['value_dwl'] ?? false) === true) {
-                try {
-                    $result = $this->dwl->transform($raw, $context);
-                } catch (\Throwable $e) {
-                    throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
-                }
-                $text = \is_string($result)
-                    ? $result
-                    : (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            }
+        } elseif ($step['type'] === 'event') {
+            // Event queues a log-message flow event with the resolved value as the message.
+            $text = $this->messageText($step['name'], $config, 'value', $context);
             $this->flowEvents->emit($flow, $executionUuid, 'log-message', ['message' => $text]);
-
-            return;
-        }
-
-        // MS Teams has no destination either: it fires the configured Power Automate webhook
-        // with the current payload as a Teams message and the flow simply continues.
-        if ($step['type'] === 'ms_teams') {
+        } else {
+            // MS Teams fires the configured Power Automate webhook with the current payload as a
+            // Teams message and the flow simply continues.
             $this->msTeamsNotify($step['name'], $config, $context);
-
-            return;
         }
+    }
 
-        $destination = trim((string) ($config['destination'] ?? ''));
-        if ($destination === '') {
-            throw new \RuntimeException(sprintf('Step "%s" has no destination.', $step['name']));
+    /**
+     * The text of a Logger message / Event value: hardcoded text, or — via its `<key>_dwl` toggle —
+     * an expression resolved against the current context (strings verbatim; anything else —
+     * objects, lists, numbers, booleans — as JSON).
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     */
+    private function messageText(string $stepName, array $config, string $key, array $context): string
+    {
+        $raw = trim((string) ($config[$key] ?? ''));
+        if ($raw === '') {
+            throw new FlowExecutionFailure(sprintf(self::NOT_CONFIGURED, $stepName));
         }
-
-        if (\in_array($step['type'], $fileOps, true)) {
-            $context[$destination] = $this->fileOperation($step['type'], $step['name'], $config, $context);
-
-            return;
+        if (($config[$key . '_dwl'] ?? false) !== true) {
+            return $raw;
         }
+        $result = $this->transformForStep($stepName, $raw, $context);
 
-        // "Invoke PHP": one public method of an app-namespace service, parameters bound by name
-        // from the step's DWL object, return value under the destination (see PhpMethodInvoker).
-        if ($step['type'] === 'invoke_php') {
-            $context[$destination] = $this->phpInvoker->invoke($step['name'], $config, $context);
+        return \is_string($result)
+            ? $result
+            : (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
 
-            return;
-        }
+    /**
+     * What a step with a destination produces.
+     *
+     * @param array{id: string, type: string, name: string, config: array<string, mixed>|null} $step
+     * @param array<string, mixed>                                                             $config
+     * @param array<string, mixed>                                                             $context
+     */
+    private function stepResult(array $step, array $config, array $context, ?OntologyFlow $flow, string $executionUuid): mixed
+    {
+        return match ($step['type']) {
+            'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'
+                => $this->fileOperation($step['type'], $step['name'], $config, $context),
+            // "Invoke PHP": one public method of an app-namespace service, parameters bound by
+            // name from the step's DWL object (see PhpMethodInvoker).
+            'invoke_php' => $this->phpInvoker->invoke($step['name'], $config, $context),
+            // The typed successors of the generic reader/writer (same config, no discriminator),
+            // and "HTTP Request" (`invoke`) — a rest_api connector call.
+            'entity_read' => $this->readEntity($step['name'], $config),
+            'entity_write' => $this->writeEntity($step['name'], $config, $context, $flow, $executionUuid),
+            'invoke' => $this->readConnector($step['name'], $config, $context),
+            'sql_query' => $this->sqlQuery($step['name'], $config, $context),
+            // dwl_transform: the WHOLE current context is visible to the script (payload, prior
+            // destinations…).
+            default => $this->transformForStep($step['name'], (string) ($config['code'] ?? ''), $context),
+        };
+    }
 
-        // The typed successors of the generic reader/writer (same config, no discriminator), and
-        // "HTTP Request" (`invoke`) — a rest_api connector call, the response under the destination.
-        if ($step['type'] === 'entity_read') {
-            $context[$destination] = $this->readEntity($step['name'], $config);
-
-            return;
-        }
-        if ($step['type'] === 'entity_write') {
-            $context[$destination] = $this->writeEntity($step['name'], $config, $context, $flow, $executionUuid);
-
-            return;
-        }
-        if ($step['type'] === 'invoke') {
-            $context[$destination] = $this->readConnector($step['name'], $config, $context);
-
-            return;
-        }
-        if ($step['type'] === 'sql_query') {
-            $context[$destination] = $this->sqlQuery($step['name'], $config, $context);
-
-            return;
-        }
-
-        // dwl_transform: the WHOLE current context is visible to the script (payload, prior
-        // destinations…).
+    /**
+     * Runs a step's DWL against the context; an engine error becomes the step's failure.
+     *
+     * @param array<string, mixed> $context
+     */
+    private function transformForStep(string $stepName, string $code, array $context): mixed
+    {
         try {
-            $context[$destination] = $this->dwl->transform((string) ($config['code'] ?? ''), $context);
+            return $this->dwl->transform($code, $context);
         } catch (\Throwable $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $step['name'], $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
+    }
+
+    /** A failure naming its step: 'Step "<name>": <detail>'. */
+    private static function stepFailure(string $stepName, string $detail, ?\Throwable $previous = null): FlowExecutionFailure
+    {
+        return new FlowExecutionFailure(sprintf(self::STEP_DETAIL, $stepName, $detail), 0, $previous);
     }
 
     /**
@@ -986,39 +1105,34 @@ class FlowDebugExecutor
     {
         $system = (string) ($config['system'] ?? '');
         $entityName = (string) ($config['entity'] ?? '');
-        $mode = $config['mode'] ?? 'all';
+        $limit = $config['limit'] ?? null;
         try {
-            if ($mode === 'by_id') {
-                return $this->dataApi->read($system, $entityName, (string) ($config['record_id'] ?? ''));
-            }
-            // "By attribute" yields the LIST of matches ([] when none) — an attribute, unlike the
-            // unique id, may match any number of records.
-            if ($mode === 'by_attribute') {
-                return $this->dataApi->queryForFlowByAttribute(
+            return match ($config['mode'] ?? 'all') {
+                'by_id' => $this->dataApi->read($system, $entityName, (string) ($config['record_id'] ?? '')),
+                // "By attribute" yields the LIST of matches ([] when none) — an attribute, unlike
+                // the unique id, may match any number of records.
+                'by_attribute' => $this->dataApi->queryForFlowByAttribute(
                     $system,
                     $entityName,
                     (string) ($config['attribute'] ?? ''),
                     (string) ($config['attr_value'] ?? '')
-                );
-            }
-
-            // Flow reads are NOT page-capped (the API's caps are for outside callers): "all"
-            // really is every record, unless the step configures its own limit / ordering.
-            $limit = $config['limit'] ?? null;
-
-            return $this->dataApi->queryForFlow(
-                $system,
-                $entityName,
-                trim((string) ($config['order_by'] ?? '')) ?: null,
-                strtolower((string) ($config['order_dir'] ?? '')) === 'desc' ? 'DESC' : 'ASC',
-                \is_int($limit) && $limit > 0 ? $limit : null
-            );
+                ),
+                // Flow reads are NOT page-capped (the API's caps are for outside callers): "all"
+                // really is every record, unless the step configures its own limit / ordering.
+                default => $this->dataApi->queryForFlow(
+                    $system,
+                    $entityName,
+                    trim((string) ($config['order_by'] ?? '')) ?: null,
+                    strtolower((string) ($config['order_dir'] ?? '')) === 'desc' ? 'DESC' : 'ASC',
+                    \is_int($limit) && $limit > 0 ? $limit : null
+                ),
+            };
         } catch (OntologyApiException $e) {
             // A missing record is a legitimate outcome for "by id" — the step yields null.
             if ($e->getErrorCode() === 'record_not_found') {
                 return null;
             }
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
     }
 
@@ -1054,7 +1168,7 @@ class FlowDebugExecutor
         } elseif (\is_array($value)) {
             $records = $value; // an array of record objects (validated downstream)
         } else {
-            throw new \RuntimeException(sprintf(
+            throw new FlowExecutionFailure(sprintf(
                 'Step "%s": the content must resolve to an object or an array of objects.',
                 $stepName
             ));
@@ -1065,7 +1179,7 @@ class FlowDebugExecutor
         $entity = $system === null ? null : $this->doctrine->getRepository(OntologyEntity::class)
             ->findOneBy(['system' => $system, 'name' => (string) ($config['entity'] ?? '')]);
         if ($entity === null) {
-            throw new \RuntimeException(sprintf(
+            throw new FlowExecutionFailure(sprintf(
                 'Step "%s": unknown entity "%s" in system "%s".',
                 $stepName,
                 (string) ($config['entity'] ?? ''),
@@ -1079,7 +1193,7 @@ class FlowDebugExecutor
             // reports the write's REAL outcome and the event row completes on the spot.
             $result = $this->dataApi->upsertRecordsSync($entity, $records, $stampFlow, $executionUuid);
         } catch (OntologyApiException $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
 
         return [
@@ -1102,13 +1216,9 @@ class FlowDebugExecutor
      */
     private function fileOperation(string $type, string $stepName, array $config, array $context): mixed
     {
-        /** @var OntologyConnector|null $connector */
-        $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
-        if ($connector === null) {
-            throw new \RuntimeException(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
-        }
+        $connector = $this->connectorOf($stepName, $config);
         if (!$this->files->supports((string) $connector->getType())) {
-            throw new \RuntimeException(sprintf(
+            throw new FlowExecutionFailure(sprintf(
                 'Step "%s": a "%s" connector is not file-based.',
                 $stepName,
                 (string) $connector->getType()
@@ -1118,30 +1228,50 @@ class FlowDebugExecutor
         $path = $this->resolveDwlText($stepName, 'path', (string) ($config['path'] ?? ''), ($config['path_dwl'] ?? false) === true, $context);
 
         try {
-            switch ($type) {
-                case 'file_read':
-                case 'file_list':
-                    return $this->files->read($connector, $path);
-                case 'file_write':
-                    $value = $this->resolveContent($stepName, $config, $context);
-
-                    return $this->files->write($connector, $path, \is_string($value) ? $value : (string) json_encode($value));
-                case 'file_delete':
-                    return $this->files->delete($connector, $path);
-                default: // file_rename
-                    $newName = $this->resolveDwlText(
-                        $stepName,
-                        'new name',
-                        (string) ($config['new_name'] ?? ''),
-                        ($config['new_name_dwl'] ?? false) === true,
-                        $context
-                    );
-
-                    return $this->files->rename($connector, $path, $newName);
-            }
+            return match ($type) {
+                'file_read', 'file_list' => $this->files->read($connector, $path),
+                'file_write' => $this->files->write($connector, $path, $this->contentText($stepName, $config, $context)),
+                'file_delete' => $this->files->delete($connector, $path),
+                default => $this->files->rename($connector, $path, $this->resolveDwlText( // file_rename
+                    $stepName,
+                    'new name',
+                    (string) ($config['new_name'] ?? ''),
+                    ($config['new_name_dwl'] ?? false) === true,
+                    $context
+                )),
+            };
         } catch (\RuntimeException $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s.', $stepName, $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage() . '.', $e);
         }
+    }
+
+    /**
+     * file_write's content as text: strings verbatim, anything else JSON-encoded.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     */
+    private function contentText(string $stepName, array $config, array $context): string
+    {
+        $value = $this->resolveContent($stepName, $config, $context);
+
+        return \is_string($value) ? $value : (string) json_encode($value);
+    }
+
+    /**
+     * The connector a step is configured with — gone connectors fail the step.
+     *
+     * @param array<string, mixed> $config
+     */
+    private function connectorOf(string $stepName, array $config): OntologyConnector
+    {
+        /** @var OntologyConnector|null $connector */
+        $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
+        if ($connector === null) {
+            throw new FlowExecutionFailure(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
+        }
+
+        return $connector;
     }
 
     /**
@@ -1168,10 +1298,10 @@ class FlowDebugExecutor
         $webhook = trim((string) ($config['webhook'] ?? ''));
         $variable = trim((string) ($config['message'] ?? ''));
         if ($webhook === '' || $variable === '' || !str_starts_with(strtolower($webhook), 'https://')) {
-            throw new \RuntimeException(sprintf('Step "%s" is not configured.', $stepName));
+            throw new FlowExecutionFailure(sprintf(self::NOT_CONFIGURED, $stepName));
         }
         if (!\array_key_exists($variable, $context)) {
-            throw new \RuntimeException(sprintf('Step "%s": the variable "%s" is not defined.', $stepName, $variable));
+            throw new FlowExecutionFailure(sprintf(self::VARIABLE_UNDEFINED, $stepName, $variable));
         }
         $value = $context[$variable];
         $text = match (true) {
@@ -1200,10 +1330,10 @@ class FlowDebugExecutor
             $status = $response->getStatusCode();
             $response->getContent(false);
         } catch (\Throwable $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
         if ($status >= 400) {
-            throw new \RuntimeException(sprintf('Step "%s": the webhook responded HTTP %d.', $stepName, $status));
+            throw new FlowExecutionFailure(sprintf('Step "%s": the webhook responded HTTP %d.', $stepName, $status));
         }
     }
 
@@ -1212,13 +1342,9 @@ class FlowDebugExecutor
         if (!$isDwl) {
             return trim($raw);
         }
-        try {
-            $value = $this->dwl->transform($raw, $context);
-        } catch (\Throwable $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
-        }
+        $value = $this->transformForStep($stepName, $raw, $context);
         if (!\is_scalar($value) || trim((string) $value) === '') {
-            throw new \RuntimeException(sprintf(
+            throw new FlowExecutionFailure(sprintf(
                 'Step "%s": the %s expression must produce a non-empty text, got %s.',
                 $stepName,
                 $what,
@@ -1241,14 +1367,10 @@ class FlowDebugExecutor
     {
         $contentSource = trim((string) ($config[$key] ?? ''));
         if (($config[$key . '_dwl'] ?? false) === true) {
-            try {
-                return $this->dwl->transform($contentSource, $context);
-            } catch (\Throwable $e) {
-                throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
-            }
+            return $this->transformForStep($stepName, $contentSource, $context);
         }
         if (!\array_key_exists($contentSource, $context)) {
-            throw new \RuntimeException(sprintf('Step "%s": %s "%s" is not available in the context.', $stepName, $key, $contentSource));
+            throw new FlowExecutionFailure(sprintf('Step "%s": %s "%s" is not available in the context.', $stepName, $key, $contentSource));
         }
 
         return $context[$contentSource];
@@ -1278,7 +1400,7 @@ class FlowDebugExecutor
         try {
             return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, ['trigger' => 'subflow']);
         } catch (\RuntimeException $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         } finally {
             array_pop($this->subflowStack);
             // The nested trail (partial on failure) feeds the editor's subflow visit.
@@ -1301,29 +1423,9 @@ class FlowDebugExecutor
      */
     private function foreachSubflow(string $stepName, array $config, array $context, string $executionUuid): array
     {
-        $arrayVar = trim((string) ($config['array'] ?? ''));
-        $itemVar = trim((string) ($config['item'] ?? ''));
-        if ($arrayVar === '' || $itemVar === '') {
-            throw new \RuntimeException(sprintf('Step "%s" is not configured.', $stepName));
-        }
-        if (!\array_key_exists($arrayVar, $context)) {
-            throw new \RuntimeException(sprintf('Step "%s": the variable "%s" is not defined.', $stepName, $arrayVar));
-        }
-        $list = $context[$arrayVar];
-        if (!\is_array($list) || ($list !== [] && !array_is_list($list))) {
-            throw new \RuntimeException(sprintf(
-                'Step "%s": the variable "%s" must hold an array, got %s.',
-                $stepName,
-                $arrayVar,
-                get_debug_type($list)
-            ));
-        }
+        [$list, $itemVar] = $this->loopItems($stepName, $config, $context);
         [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config);
-
-        $hadItem = \array_key_exists($itemVar, $context);
-        $previousItem = $context[$itemVar] ?? null;
-        $hadIndex = \array_key_exists('index', $context);
-        $previousIndex = $context['index'] ?? null;
+        $scope = self::loopScope($itemVar, $context);
 
         $outerTrail = $this->lastExecutedIds;
         $this->subflowStack[] = $id;
@@ -1334,7 +1436,7 @@ class FlowDebugExecutor
                 try {
                     $context = $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, ['trigger' => 'subflow']);
                 } catch (\RuntimeException $e) {
-                    throw new \RuntimeException(sprintf('Step "%s" (iteration %d): %s', $stepName, $index, $e->getMessage()), 0, $e);
+                    throw new FlowExecutionFailure(sprintf('Step "%s" (iteration %d): %s', $stepName, $index, $e->getMessage()), 0, $e);
                 } finally {
                     $this->recordSubflowTrail($id, (string) $target->getName(), $this->lastExecutedIds);
                 }
@@ -1343,19 +1445,80 @@ class FlowDebugExecutor
             array_pop($this->subflowStack);
             $this->lastExecutedIds = $outerTrail;
         }
+        self::restoreLoopScope($scope, $context);
 
-        if ($hadItem) {
-            $context[$itemVar] = $previousItem;
-        } else {
-            unset($context[$itemVar]);
+        return $context;
+    }
+
+    /**
+     * The array a Foreach Loop iterates and its per-element variable name: both configured, the
+     * array variable defined and holding a LIST.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array{0: array<int, mixed>, 1: string}
+     */
+    private function loopItems(string $stepName, array $config, array $context): array
+    {
+        $arrayVar = trim((string) ($config['array'] ?? ''));
+        $itemVar = trim((string) ($config['item'] ?? ''));
+        if ($arrayVar === '' || $itemVar === '') {
+            throw new FlowExecutionFailure(sprintf(self::NOT_CONFIGURED, $stepName));
         }
-        if ($hadIndex) {
-            $context['index'] = $previousIndex;
+        if (!\array_key_exists($arrayVar, $context)) {
+            throw new FlowExecutionFailure(sprintf(self::VARIABLE_UNDEFINED, $stepName, $arrayVar));
+        }
+        $list = $context[$arrayVar];
+        if (!\is_array($list) || ($list !== [] && !array_is_list($list))) {
+            throw new FlowExecutionFailure(sprintf(
+                'Step "%s": the variable "%s" must hold an array, got %s.',
+                $stepName,
+                $arrayVar,
+                get_debug_type($list)
+            ));
+        }
+
+        return [$list, $itemVar];
+    }
+
+    /**
+     * What the caller held under the loop-scoped names (the item variable and `index`), so the
+     * loop can put it back when it ends.
+     *
+     * @param array<string, mixed> $context
+     *
+     * @return array{itemVar: string, hadItem: bool, prevItem: mixed, hadIndex: bool, prevIndex: mixed}
+     */
+    private static function loopScope(string $itemVar, array $context): array
+    {
+        return [
+            'itemVar' => $itemVar,
+            'hadItem' => \array_key_exists($itemVar, $context),
+            'prevItem' => $context[$itemVar] ?? null,
+            'hadIndex' => \array_key_exists('index', $context),
+            'prevIndex' => $context['index'] ?? null,
+        ];
+    }
+
+    /**
+     * Restores (or removes) the loop-scoped names recorded by {@see loopScope()}.
+     *
+     * @param array{itemVar: string, hadItem: bool, prevItem: mixed, hadIndex: bool, prevIndex: mixed} $scope
+     * @param array<string, mixed>                                                                     $context
+     */
+    private static function restoreLoopScope(array $scope, array &$context): void
+    {
+        if ($scope['hadItem']) {
+            $context[$scope['itemVar']] = $scope['prevItem'];
+        } else {
+            unset($context[$scope['itemVar']]);
+        }
+        if ($scope['hadIndex']) {
+            $context['index'] = $scope['prevIndex'];
         } else {
             unset($context['index']);
         }
-
-        return $context;
     }
 
     /**
@@ -1400,17 +1563,17 @@ class FlowDebugExecutor
         /** @var OntologyFlow|null $target */
         $target = $id > 0 ? $this->doctrine->getRepository(OntologyFlow::class)->find($id) : null;
         if ($target === null) {
-            throw new \RuntimeException(sprintf('Step "%s": the configured subflow no longer exists.', $stepName));
+            throw new FlowExecutionFailure(sprintf('Step "%s": the configured subflow no longer exists.', $stepName));
         }
         if ($target->getType() !== OntologyFlow::TYPE_SUBFLOW) {
-            throw new \RuntimeException(sprintf(
+            throw new FlowExecutionFailure(sprintf(
                 'Step "%s": "%s" is not a subflow (its trigger makes it a regular flow).',
                 $stepName,
                 (string) $target->getName()
             ));
         }
         if (!$target->isEnabled()) {
-            throw new \RuntimeException(sprintf(
+            throw new FlowExecutionFailure(sprintf(
                 'Step "%s": the subflow "%s" is disabled.',
                 $stepName,
                 (string) $target->getName()
@@ -1420,17 +1583,13 @@ class FlowDebugExecutor
         $subSteps = \is_array($design['steps'] ?? null) ? $design['steps'] : null;
         $subLinks = \is_array($design['links'] ?? null) ? $design['links'] : [];
         if ($subSteps === null || $subSteps === []) {
-            throw new \RuntimeException(sprintf('Step "%s": the subflow "%s" has no steps.', $stepName, (string) $target->getName()));
+            throw new FlowExecutionFailure(sprintf('Step "%s": the subflow "%s" has no steps.', $stepName, (string) $target->getName()));
         }
         if (\in_array($id, $this->subflowStack, true)) {
-            throw new \RuntimeException(sprintf(
-                'Step "%s": circular subflow call — "%s" is already running in this execution.',
-                $stepName,
-                (string) $target->getName()
-            ));
+            throw new FlowExecutionFailure(sprintf(self::CIRCULAR, $stepName, (string) $target->getName()));
         }
         if (\count($this->subflowStack) >= 10) {
-            throw new \RuntimeException(sprintf('Step "%s": subflow calls nested deeper than 10 levels.', $stepName));
+            throw new FlowExecutionFailure(sprintf(self::TOO_DEEP, $stepName));
         }
 
         return [$id, $target, $subSteps, $subLinks];
@@ -1447,11 +1606,7 @@ class FlowDebugExecutor
      */
     private function sqlQuery(string $stepName, array $config, array $context): mixed
     {
-        /** @var OntologyConnector|null $connector */
-        $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
-        if ($connector === null) {
-            throw new \RuntimeException(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
-        }
+        $connector = $this->connectorOf($stepName, $config);
 
         $sql = $this->resolveDwlText(
             $stepName,
@@ -1467,7 +1622,7 @@ class FlowDebugExecutor
         try {
             return $this->database->run($connector, $sql, $bindings);
         } catch (\RuntimeException $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s.', $stepName, $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage() . '.', $e);
         }
     }
 
@@ -1477,18 +1632,14 @@ class FlowDebugExecutor
      */
     private function readConnector(string $stepName, array $config, array $context): mixed
     {
-        /** @var OntologyConnector|null $connector */
-        $connector = $this->doctrine->getRepository(OntologyConnector::class)->find((int) ($config['connector'] ?? 0));
-        if ($connector === null) {
-            throw new \RuntimeException(sprintf('Step "%s": the configured connector no longer exists.', $stepName));
-        }
+        $connector = $this->connectorOf($stepName, $config);
         $path = (string) ($config['path'] ?? '');
         if ($this->files->supports((string) $connector->getType())) {
             // Folder → a list of items; file → its content; failure → an isError payload.
             try {
                 return $this->files->read($connector, $path);
             } catch (\RuntimeException $e) {
-                throw new \RuntimeException(sprintf('Step "%s": %s.', $stepName, $e->getMessage()), 0, $e);
+                throw self::stepFailure($stepName, $e->getMessage() . '.', $e);
             }
         }
         if ($connector->getType() !== OntologyConnector::TYPE_REST_API) {
@@ -1510,7 +1661,7 @@ class FlowDebugExecutor
     {
         $base = trim((string) ($connectorConfig['server'] ?? ''));
         if ($base === '') {
-            throw new \RuntimeException(sprintf('Step "%s": the connector has no server configured.', $stepName));
+            throw new FlowExecutionFailure(sprintf('Step "%s": the connector has no server configured.', $stepName));
         }
         if (!preg_match('#^https?://#i', $base)) {
             $base = 'https://' . $base;
@@ -1560,10 +1711,10 @@ class FlowDebugExecutor
             $status = $response->getStatusCode();
             $content = $response->getContent(false);
         } catch (\Throwable $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
         if ($status >= 400) {
-            throw new \RuntimeException(sprintf('Step "%s": the connector responded HTTP %d.', $stepName, $status));
+            throw new FlowExecutionFailure(sprintf('Step "%s": the connector responded HTTP %d.', $stepName, $status));
         }
 
         $decoded = json_decode($content, true);
@@ -1579,11 +1730,7 @@ class FlowDebugExecutor
      */
     private function renderDwl(string $stepName, string $code, array $context): string
     {
-        try {
-            $result = $this->dwl->transform($code, $context);
-        } catch (\Throwable $e) {
-            throw new \RuntimeException(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
-        }
+        $result = $this->transformForStep($stepName, $code, $context);
 
         return \is_string($result) ? $result : (string) json_encode($result);
     }
@@ -1599,7 +1746,7 @@ class FlowDebugExecutor
         $oauth = \is_array($connectorConfig['oauth'] ?? null) ? $connectorConfig['oauth'] : [];
         $path = trim((string) ($oauth['path'] ?? ''));
         if ($path === '') {
-            throw new \RuntimeException(sprintf('Step "%s": the connector has no OAuth token path configured.', $stepName));
+            throw new FlowExecutionFailure(sprintf('Step "%s": the connector has no OAuth token path configured.', $stepName));
         }
 
         try {
@@ -1612,12 +1759,12 @@ class FlowDebugExecutor
             ]);
             $data = json_decode($response->getContent(false), true);
         } catch (\Throwable $e) {
-            throw new \RuntimeException(sprintf('Step "%s": OAuth token request failed — %s', $stepName, $e->getMessage()), 0, $e);
+            throw new FlowExecutionFailure(sprintf('Step "%s": OAuth token request failed — %s', $stepName, $e->getMessage()), 0, $e);
         }
 
         $token = \is_array($data) ? ($data['access_token'] ?? null) : null;
         if (!\is_string($token) || $token === '') {
-            throw new \RuntimeException(sprintf('Step "%s": the OAuth response carries no access_token.', $stepName));
+            throw new FlowExecutionFailure(sprintf('Step "%s": the OAuth response carries no access_token.', $stepName));
         }
         $type = \is_array($data) && \is_string($data['token_type'] ?? null) && $data['token_type'] !== ''
             ? $data['token_type'] : 'Bearer';

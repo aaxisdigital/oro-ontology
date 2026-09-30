@@ -28,6 +28,8 @@ use Symfony\Component\Routing\Attribute\Route;
  */
 class OntologyDataController extends AbstractController
 {
+    private const string RECORD_NOT_FOUND = 'Record not found.';
+
     // expose: the Entities grid links here (?entity=…) via routing.generate() in TypeScript.
     #[Route(path: '/data-view', name: 'aaxis_ontology_data_view', options: ['expose' => true])]
     #[Template('@AaxisOntology/Data/index.html.twig')]
@@ -50,48 +52,15 @@ class OntologyDataController extends AbstractController
         // bucket store (the aaxis_ontology_data rows are a different, inactive backend then).
         $store = $this->container->get(BucketEntityDataStore::class);
         if ($store->isEnabled()) {
-            $rows = [];
-            foreach ($entities as $entity) {
-                if (!($entity->getSystem()?->isExternal() ?? false)) {
-                    continue;
-                }
-                if ($entity->isForceDbStorage()) {
-                    // Per-entity opt-out: this entity's records still live in (and read from) the DB.
-                    foreach ($registry->getRepository(OntologyData::class)->findBy(['entity' => $entity]) as $dbRecord) {
-                        $rows[] = $this->serialize($dbRecord);
-                    }
-
-                    continue;
-                }
-                foreach ($store->listLatest($entity) as $envelope) {
-                    $rows[] = $this->serializeBucketRecord($entity, $envelope);
-                }
-            }
-            usort($rows, static fn (array $a, array $b): int => strcmp((string) $b['updatedAt'], (string) $a['updatedAt']));
-
-            return new JsonResponse([
-                'records' => $rows,
-                'systems' => array_map(
-                    static fn (OntologySystem $s) => ['id' => $s->getId(), 'name' => $s->getName()],
-                    $systems
-                ),
-                'entities' => array_map(
-                    static fn (OntologyEntity $e) => [
-                        'id' => $e->getId(),
-                        'name' => $e->getName(),
-                        'systemId' => $e->getSystem()?->getId(),
-                        'uniqueAttribute' => $e->getUniqueAttribute(),
-                    ],
-                    $entities
-                ),
-            ]);
+            $rows = $this->bucketBackedRows($registry, $store, $entities);
+        } else {
+            /** @var OntologyData[] $records */
+            $records = $registry->getRepository(OntologyData::class)->findBy([], ['updatedAt' => 'DESC']);
+            $rows = array_map($this->serialize(...), $records);
         }
 
-        /** @var OntologyData[] $records */
-        $records = $registry->getRepository(OntologyData::class)->findBy([], ['updatedAt' => 'DESC']);
-
         return new JsonResponse([
-            'records' => array_map($this->serialize(...), $records),
+            'records' => $rows,
             'systems' => array_map(
                 static fn (OntologySystem $s) => ['id' => $s->getId(), 'name' => $s->getName()],
                 $systems
@@ -108,6 +77,38 @@ class OntologyDataController extends AbstractController
         ]);
     }
 
+    /**
+     * The grid rows while the bucket backend is on: every EXTERNAL entity's live records, newest
+     * first — from the bucket, or from the table for an entity that FORCES db storage.
+     *
+     * @param array<int, OntologyEntity> $entities
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function bucketBackedRows(ManagerRegistry $registry, BucketEntityDataStore $store, array $entities): array
+    {
+        $rows = [];
+        foreach ($entities as $entity) {
+            if (!($entity->getSystem()?->isExternal() ?? false)) {
+                continue;
+            }
+            if ($entity->isForceDbStorage()) {
+                // Per-entity opt-out: this entity's records still live in (and read from) the DB.
+                foreach ($registry->getRepository(OntologyData::class)->findBy(['entity' => $entity]) as $dbRecord) {
+                    $rows[] = $this->serialize($dbRecord);
+                }
+
+                continue;
+            }
+            foreach ($store->listLatest($entity) as $envelope) {
+                $rows[] = $this->serializeBucketRecord($entity, $envelope);
+            }
+        }
+        usort($rows, static fn (array $a, array $b): int => strcmp((string) $b['updatedAt'], (string) $a['updatedAt']));
+
+        return $rows;
+    }
+
     #[Route(path: '/data-view/api/{id}/versions', name: 'aaxis_ontology_data_versions', requirements: ['id' => '\d+'], options: ['expose' => true], methods: ['GET'])]
     #[AclAncestor('aaxis_ontology_data_view')]
     public function versionsAction(int $id): JsonResponse
@@ -117,7 +118,7 @@ class OntologyDataController extends AbstractController
         /** @var OntologyData|null $record */
         $record = $registry->getRepository(OntologyData::class)->find($id);
         if ($record === null) {
-            return new JsonResponse(['success' => false, 'message' => 'Record not found.'], 404);
+            return new JsonResponse(['success' => false, 'message' => self::RECORD_NOT_FOUND], 404);
         }
 
         /** @var OntologyDataHistory[] $history */
@@ -275,13 +276,13 @@ class OntologyDataController extends AbstractController
             ? $this->container->get(ManagerRegistry::class)->getRepository(OntologyEntity::class)->find($entityId)
             : null;
         if ($entity === null || $uniqueId === '') {
-            return new JsonResponse(['success' => false, 'message' => 'Record not found.'], 404);
+            return new JsonResponse(['success' => false, 'message' => self::RECORD_NOT_FOUND], 404);
         }
 
         $versions = $this->container->get(BucketEntityDataStore::class)
             ->versions($entity, $uniqueId);
         if ($versions === []) {
-            return new JsonResponse(['success' => false, 'message' => 'Record not found.'], 404);
+            return new JsonResponse(['success' => false, 'message' => self::RECORD_NOT_FOUND], 404);
         }
 
         return new JsonResponse(['versions' => $versions]);
@@ -319,31 +320,16 @@ class OntologyDataController extends AbstractController
     public function createAction(Request $request): JsonResponse
     {
         $payload = json_decode($request->getContent(), true);
-        if (!\is_array($payload)) {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+        $parsed = \is_array($payload)
+            ? $this->parseCreateRequest($payload)
+            : new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+        if ($parsed instanceof JsonResponse) {
+            return $parsed;
         }
+        [$entity, $records] = $parsed;
 
-        $registry = $this->container->get(ManagerRegistry::class);
-
-        $entityId = (int) ($payload['entityId'] ?? 0);
-        $entity = $entityId > 0 ? $registry->getRepository(OntologyEntity::class)->find($entityId) : null;
-        if ($entity === null) {
-            return new JsonResponse(['success' => false, 'message' => 'A valid entity is required.'], 422);
-        }
-
-        $format = (string) ($payload['format'] ?? 'json');
-        $raw = (string) ($payload['payload'] ?? '');
-        try {
-            $decoded = $this->decodePayload($format, $raw);
-        } catch (\Throwable $e) {
-            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
-        }
-
-        // Like the API: a single object is one record, a list (JSON array / CSV rows) is a batch.
         // Each record's unique id is inferred from its payload via the entity's unique attribute,
         // and the upsert is delegated to the shared manager (which validates and queues the message).
-        $records = array_is_list($decoded) ? $decoded : [$decoded];
-
         try {
             $manager = $this->container->get(OntologyDataApiManager::class);
             $flow = $manager->requireEnabledFlow(OntologyFlow::NAME_MANUAL);
@@ -353,6 +339,33 @@ class OntologyDataController extends AbstractController
         }
 
         return new JsonResponse(['success' => true]);
+    }
+
+    /**
+     * The entity and the records of an Add Data request, or the error response to answer with.
+     * Like the API: a single object is one record, a list (JSON array / CSV rows) is a batch.
+     *
+     * @param array<string, mixed> $payload
+     *
+     * @return array{0: OntologyEntity, 1: array<int, array<int|string, mixed>>}|JsonResponse
+     */
+    private function parseCreateRequest(array $payload): array|JsonResponse
+    {
+        $entityId = (int) ($payload['entityId'] ?? 0);
+        $entity = $entityId > 0
+            ? $this->container->get(ManagerRegistry::class)->getRepository(OntologyEntity::class)->find($entityId)
+            : null;
+        if ($entity === null) {
+            return new JsonResponse(['success' => false, 'message' => 'A valid entity is required.'], 422);
+        }
+
+        try {
+            $decoded = $this->decodePayload((string) ($payload['format'] ?? 'json'), (string) ($payload['payload'] ?? ''));
+        } catch (\Throwable $e) {
+            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
+        }
+
+        return [$entity, array_is_list($decoded) ? $decoded : [$decoded]];
     }
 
     /**
@@ -368,21 +381,22 @@ class OntologyDataController extends AbstractController
             return [];
         }
 
-        switch ($format) {
-            case 'json':
-                $data = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        return match ($format) {
+            'json' => $this->decodeJson($raw),
+            'csv' => $this->decodeCsv($raw),
+            'xml' => $this->decodeXml($raw),
+            default => throw new \InvalidArgumentException('Unsupported format.'),
+        };
+    }
 
-                return \is_array($data) ? $data : ['value' => $data];
+    /**
+     * @return array<int|string, mixed>
+     */
+    private function decodeJson(string $raw): array
+    {
+        $data = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
 
-            case 'csv':
-                return $this->decodeCsv($raw);
-
-            case 'xml':
-                return $this->decodeXml($raw);
-
-            default:
-                throw new \InvalidArgumentException('Unsupported format.');
-        }
+        return \is_array($data) ? $data : ['value' => $data];
     }
 
     /**
@@ -396,10 +410,10 @@ class OntologyDataController extends AbstractController
             return [];
         }
 
-        $headers = str_getcsv((string) array_shift($lines));
+        $headers = str_getcsv((string) array_shift($lines), ',', '"', '\\');
         $rows = [];
         foreach ($lines as $line) {
-            $values = str_getcsv($line);
+            $values = str_getcsv($line, ',', '"', '\\');
             $row = [];
             foreach ($headers as $i => $header) {
                 $row[(string) $header] = $values[$i] ?? '';

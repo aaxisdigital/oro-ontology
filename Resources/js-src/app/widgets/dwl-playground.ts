@@ -271,7 +271,7 @@ export default class DwlPlayground {
         if (!this.dialog) {
             return; // closed while the request was in flight
         }
-        if (!data || data.success !== true) {
+        if (data?.success !== true) {
             // A script error IS a result for these inputs: show it in the Result pane (not as a
             // flash message) and stamp the signature, so the message is not also greyed as stale.
             this.showError(data?.error || __('aaxis.ontology.dwl.run_error'), signature);

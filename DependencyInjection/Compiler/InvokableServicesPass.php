@@ -79,36 +79,42 @@ class InvokableServicesPass implements CompilerPassInterface
      */
     private static function hasDanglingRequiredReference(ContainerBuilder $container, mixed $value, int $depth = 0): bool
     {
-        if ($depth > 8) {
-            return false;
-        }
-        // An AbstractArgument means "unusable until further configuration" (e.g. Symfony's
-        // name_based_uuid.factory) — normally pruned as unused, undumpable if kept alive.
-        if ($value instanceof AbstractArgument) {
-            return true;
-        }
-        if ($value instanceof Reference) {
-            if ($value->getInvalidBehavior() !== ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE) {
-                return false;
-            }
-            $id = (string) $value;
-
-            return $id !== 'service_container' && !$container->hasDefinition($id) && !$container->hasAlias($id);
-        }
-        if ($value instanceof Definition) {
-            return self::hasDanglingRequiredReference($container, [
+        return match (true) {
+            $depth > 8 => false,
+            // An AbstractArgument means "unusable until further configuration" (e.g. Symfony's
+            // name_based_uuid.factory) — normally pruned as unused, undumpable if kept alive.
+            $value instanceof AbstractArgument => true,
+            $value instanceof Reference => self::isDanglingRequiredReference($container, $value),
+            $value instanceof Definition => self::hasDanglingRequiredReference($container, [
                 $value->getArguments(),
                 $value->getProperties(),
                 $value->getMethodCalls(),
                 $value->getFactory(),
                 $value->getConfigurator(),
-            ], $depth + 1);
+            ], $depth + 1),
+            \is_array($value) => self::anyDanglingRequiredReference($container, $value, $depth + 1),
+            default => false,
+        };
+    }
+
+    private static function isDanglingRequiredReference(ContainerBuilder $container, Reference $reference): bool
+    {
+        if ($reference->getInvalidBehavior() !== ContainerInterface::EXCEPTION_ON_INVALID_REFERENCE) {
+            return false;
         }
-        if (\is_array($value)) {
-            foreach ($value as $item) {
-                if (self::hasDanglingRequiredReference($container, $item, $depth + 1)) {
-                    return true;
-                }
+        $id = (string) $reference;
+
+        return $id !== 'service_container' && !$container->hasDefinition($id) && !$container->hasAlias($id);
+    }
+
+    /**
+     * @param array<int|string, mixed> $items
+     */
+    private static function anyDanglingRequiredReference(ContainerBuilder $container, array $items, int $depth): bool
+    {
+        foreach ($items as $item) {
+            if (self::hasDanglingRequiredReference($container, $item, $depth)) {
+                return true;
             }
         }
 

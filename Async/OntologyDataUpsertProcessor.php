@@ -54,9 +54,6 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
             return self::REJECT;
         }
 
-        /** @var Connection $connection */
-        $connection = $this->doctrine->getConnection();
-
         $flowId = null;
         $flowName = null;
         $uuid = null;
@@ -72,38 +69,11 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
             $flowName = $flowId !== null
                 ? $this->doctrine->getRepository(OntologyFlow::class)->find($flowId)?->getName()
                 : null;
-
-            // Delegate validation + upsert to the database function — or, while "Use Bucket for
-            // Entity Data" is on, write the batch to the bucket store instead (same semantics:
-            // deep-merge, unchanged skipped, history archived; see BucketEntityDataStore).
-            $entityRef = $entityId !== null
+            $entity = $entityId !== null
                 ? $this->doctrine->getRepository(OntologyEntity::class)->find($entityId)
                 : null;
-            if ($entityRef !== null && $entityRef->getSystem()?->isExternal()
-                && !$entityRef->isForceDbStorage() && $this->bucketStore->isEnabled()) {
-                $outcome = $this->bucketUpsert($body, $entityRef);
-            } else {
-                $outcome = OntologyDataApiManager::parseUpsertResponse($this->callUpsertFunction($connection, $body));
-            }
 
-            if ($outcome['errors'] !== null) {
-                // A rejected batch surfaces as a flow-exception event (and the log).
-                $this->logger->error((string) json_encode(['errors' => $outcome['errors']]));
-                $this->flowEvents->emitRaw($flowId, $flowName, $uuid, 'flow-exception', [
-                    'message' => implode('; ', $outcome['errors']),
-                ]);
-
-                return self::ACK;
-            }
-
-            $entityName = $entityId !== null
-                ? (string) $this->doctrine->getRepository(OntologyEntity::class)->find($entityId)?->getName()
-                : '';
-            $this->flowEvents->emitRaw($flowId, $flowName, $uuid, 'data-upsert', [
-                'entity' => $entityName,
-                'uniqueIds' => \is_array($body['unique_id'] ?? null) ? array_values($body['unique_id']) : [],
-                'changedIds' => $outcome['changed'],
-            ]);
+            $this->report($this->upsert($body, $entity), $body, $entity, $flowId, $flowName, $uuid);
 
             return self::ACK;
         } catch (\Throwable $e) {
@@ -116,6 +86,53 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
 
             return self::REJECT;
         }
+    }
+
+    /**
+     * Delegates validation + upsert to the database function — or, while "Use Bucket for Entity
+     * Data" is on, writes the batch to the bucket store instead (same semantics: deep-merge,
+     * unchanged skipped, history archived; see BucketEntityDataStore).
+     *
+     * @param array<string, mixed> $body
+     *
+     * @return array{errors: array<int, string>|null, changed: array<int, string>}
+     */
+    private function upsert(array $body, ?OntologyEntity $entity): array
+    {
+        if ($entity !== null && $entity->getSystem()?->isExternal()
+            && !$entity->isForceDbStorage() && $this->bucketStore->isEnabled()) {
+            return $this->bucketUpsert($body, $entity);
+        }
+
+        /** @var Connection $connection */
+        $connection = $this->doctrine->getConnection();
+
+        return OntologyDataApiManager::parseUpsertResponse($this->callUpsertFunction($connection, $body));
+    }
+
+    /**
+     * Records the batch's outcome on the flow's event trail: a rejected batch surfaces as a
+     * flow-exception event (and the log), a written one as a data-upsert event.
+     *
+     * @param array{errors: array<int, string>|null, changed: array<int, string>} $outcome
+     * @param array<string, mixed>                                                $body
+     */
+    private function report(array $outcome, array $body, ?OntologyEntity $entity, ?int $flowId, ?string $flowName, ?string $uuid): void
+    {
+        if ($outcome['errors'] !== null) {
+            $this->logger->error((string) json_encode(['errors' => $outcome['errors']]));
+            $this->flowEvents->emitRaw($flowId, $flowName, $uuid, 'flow-exception', [
+                'message' => implode('; ', $outcome['errors']),
+            ]);
+
+            return;
+        }
+
+        $this->flowEvents->emitRaw($flowId, $flowName, $uuid, 'data-upsert', [
+            'entity' => (string) $entity?->getName(),
+            'uniqueIds' => \is_array($body['unique_id'] ?? null) ? array_values($body['unique_id']) : [],
+            'changedIds' => $outcome['changed'],
+        ]);
     }
 
     /**
@@ -150,23 +167,14 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
         $uniqueIds = \is_array($body['unique_id'] ?? null) ? array_values($body['unique_id']) : null;
         $payloads = \is_array($body['payload'] ?? null) ? array_values($body['payload']) : null;
 
-        if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $uuid)) {
-            return ['errors' => ['invalid uuid'], 'changed' => []];
+        $ids = [];
+        $error = $this->batchShapeError($uuid, $uniqueIds, $payloads);
+        if ($error === null) {
+            $ids = array_map(static fn ($id): string => trim((string) $id), $uniqueIds);
+            $error = $this->batchContentError($ids, $payloads);
         }
-        if ($uniqueIds === null || $payloads === null || \count($uniqueIds) !== \count($payloads)) {
-            return ['errors' => ['mismatch between unique_id and payload sizes'], 'changed' => []];
-        }
-        $ids = array_map(static fn ($id): string => trim((string) $id), $uniqueIds);
-        if (\in_array('', $ids, true)) {
-            return ['errors' => ['unique_id value cannot be empty/null'], 'changed' => []];
-        }
-        if (\count($ids) !== \count(array_unique($ids))) {
-            return ['errors' => ['cannot received duplicated unique_ids in a single operation'], 'changed' => []];
-        }
-        foreach ($payloads as $payload) {
-            if (!\is_array($payload)) {
-                return ['errors' => ['invalid payload format'], 'changed' => []];
-            }
+        if ($error !== null) {
+            return ['errors' => [$error], 'changed' => []];
         }
 
         $updatedAt = date_create_immutable((string) ($body['updated_at'] ?? ''), new \DateTimeZone('UTC'))
@@ -176,6 +184,34 @@ class OntologyDataUpsertProcessor implements MessageProcessorInterface, TopicSub
             'errors' => null,
             'changed' => $this->bucketStore->upsertBatch($entity, $uuid, $ids, $payloads, $updatedAt),
         ];
+    }
+
+    /**
+     * @param array<int, mixed>|null $uniqueIds
+     * @param array<int, mixed>|null $payloads
+     */
+    private function batchShapeError(string $uuid, ?array $uniqueIds, ?array $payloads): ?string
+    {
+        return match (true) {
+            !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $uuid) => 'invalid uuid',
+            $uniqueIds === null || $payloads === null || \count($uniqueIds) !== \count($payloads)
+                => 'mismatch between unique_id and payload sizes',
+            default => null,
+        };
+    }
+
+    /**
+     * @param array<int, string> $ids
+     * @param array<int, mixed>  $payloads
+     */
+    private function batchContentError(array $ids, array $payloads): ?string
+    {
+        return match (true) {
+            \in_array('', $ids, true) => 'unique_id value cannot be empty/null',
+            \count($ids) !== \count(array_unique($ids)) => 'cannot received duplicated unique_ids in a single operation',
+            array_filter($payloads, static fn ($payload): bool => !\is_array($payload)) !== [] => 'invalid payload format',
+            default => null,
+        };
     }
 
     /**

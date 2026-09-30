@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Manager;
 
+use Aaxis\Bundle\OntologyBundle\Exception\BucketRequestFailure;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Oro\Bundle\SecurityBundle\Encoder\SymmetricCrypterInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
@@ -72,7 +73,7 @@ class OntologyBucketClient
             return null;
         }
         if ($status >= 400) {
-            throw new \RuntimeException($this->httpMessage('GET', $key, $status));
+            throw new BucketRequestFailure($this->httpMessage('GET', $key, $status));
         }
 
         return $body;
@@ -82,7 +83,7 @@ class OntologyBucketClient
     {
         [$status] = $this->request('PUT', $key, [], $body, ['content-type' => 'application/json']);
         if ($status >= 400) {
-            throw new \RuntimeException($this->httpMessage('PUT', $key, $status));
+            throw new BucketRequestFailure($this->httpMessage('PUT', $key, $status));
         }
     }
 
@@ -91,7 +92,7 @@ class OntologyBucketClient
     {
         [$status] = $this->request('DELETE', $key, []);
         if ($status >= 400 && $status !== 404) {
-            throw new \RuntimeException($this->httpMessage('DELETE', $key, $status));
+            throw new BucketRequestFailure($this->httpMessage('DELETE', $key, $status));
         }
     }
 
@@ -112,7 +113,7 @@ class OntologyBucketClient
             }
             [$status, $body] = $this->request('GET', '', $query);
             if ($status >= 400) {
-                throw new \RuntimeException($this->httpMessage('LIST', $prefix, $status));
+                throw new BucketRequestFailure($this->httpMessage('LIST', $prefix, $status));
             }
 
             $xml = $this->parseXml($body);
@@ -144,7 +145,7 @@ class OntologyBucketClient
             }
             [$status, $body] = $this->request('GET', '', $query);
             if ($status >= 400) {
-                throw new \RuntimeException($this->httpMessage('LIST', $prefix, $status));
+                throw new BucketRequestFailure($this->httpMessage('LIST', $prefix, $status));
             }
 
             $xml = $this->parseXml($body);
@@ -191,7 +192,7 @@ class OntologyBucketClient
 
             return [$response->getStatusCode(), $response->getContent(false)];
         } catch (\Throwable $e) {
-            throw new \RuntimeException('The ontology bucket request failed: ' . $e->getMessage(), 0, $e);
+            throw new BucketRequestFailure('The ontology bucket request failed: ' . $e->getMessage(), 0, $e);
         }
     }
 
@@ -201,7 +202,7 @@ class OntologyBucketClient
         $xml = simplexml_load_string($body);
         libxml_use_internal_errors($previous);
         if ($xml === false) {
-            throw new \RuntimeException('The ontology bucket returned an unreadable listing.');
+            throw new BucketRequestFailure('The ontology bucket returned an unreadable listing.');
         }
 
         return $xml;
@@ -226,7 +227,7 @@ class OntologyBucketClient
         $accessKey = (string) $this->configManager->get('aaxis_ontology.bucket_access_key');
         $secretKey = (string) $this->configManager->get('aaxis_ontology.bucket_secret_key');
         if ($url === '' || $bucket === '' || $accessKey === '' || $secretKey === '') {
-            throw new \RuntimeException('The ontology bucket is not fully configured (endpoint URL, bucket name and keys are required).');
+            throw new BucketRequestFailure('The ontology bucket is not fully configured (endpoint URL, bucket name and keys are required).');
         }
 
         $scheme = 'https';
@@ -244,7 +245,7 @@ class OntologyBucketClient
             }
         }
         if ($host === '') {
-            throw new \RuntimeException('The ontology bucket endpoint URL is not a valid URL.');
+            throw new BucketRequestFailure('The ontology bucket endpoint URL is not a valid URL.');
         }
         $port = $urlPort ?? ($scheme === 'http' ? 80 : 443);
 

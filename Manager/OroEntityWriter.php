@@ -89,42 +89,63 @@ class OroEntityWriter
      */
     private function writeField(EntityManagerInterface $em, ClassMetadata $md, object $row, string $field, mixed $value, string $uid): bool
     {
-        if ($md->hasField($field)) {
-            $new = $this->coerce($value, (string) $md->getTypeOfField($field), $field, $uid);
-            $old = $md->getFieldValue($row, $field);
-            if ($this->unchanged($old, $new)) {
-                return false;
-            }
-            $md->setFieldValue($row, $field, $new);
+        return $md->hasField($field)
+            ? $this->writeColumn($md, $row, $field, $value, $uid)
+            : $this->writeAssociation($em, $md, $row, $field, $value, $uid);
+    }
 
-            return true;
+    private function writeColumn(ClassMetadata $md, object $row, string $field, mixed $value, string $uid): bool
+    {
+        $new = $this->coerce($value, (string) $md->getTypeOfField($field), $field, $uid);
+        $old = $md->getFieldValue($row, $field);
+        if ($this->unchanged($old, $new)) {
+            return false;
         }
+        $md->setFieldValue($row, $field, $new);
 
-        // To-one association: the payload carries the related id (what the reader exports).
+        return true;
+    }
+
+    /**
+     * A to-one association: the payload carries the related id (what the reader exports).
+     */
+    private function writeAssociation(EntityManagerInterface $em, ClassMetadata $md, object $row, string $field, mixed $value, string $uid): bool
+    {
         $targetClass = $md->getAssociationTargetClass($field);
         $targetMd = $em->getClassMetadata($targetClass);
         $old = $md->getFieldValue($row, $field);
-        $oldId = $old === null ? null : (current($targetMd->getIdentifierValues($old)) ?: null);
+        $oldId = $old === null ? null : current($targetMd->getIdentifierValues($old));
+        $oldId = $oldId ?: null;
         $newId = ($value === null || $value === '') ? null : $value;
         if (($oldId === null && $newId === null) || (string) $oldId === (string) $newId) {
             return false;
         }
         if ($newId !== null) {
-            $idType = (string) $targetMd->getTypeOfField($targetMd->getSingleIdentifierFieldName());
-            if (\in_array($idType, ['integer', 'smallint', 'bigint'], true)) {
-                if (!is_numeric((string) $newId)) {
-                    throw OntologyApiException::invalidPayload(sprintf(
-                        'Record "%s": "%s" must be the numeric id of the related record.',
-                        $uid,
-                        $field
-                    ));
-                }
-                $newId = (int) $newId;
-            }
+            $newId = $this->castRelatedId($targetMd, $newId, $field, $uid);
         }
         $md->setFieldValue($row, $field, $newId === null ? null : $em->getReference($targetClass, $newId));
 
         return true;
+    }
+
+    /**
+     * An integer-keyed target takes a numeric id (cast to int); any other key type passes through.
+     */
+    private function castRelatedId(ClassMetadata $targetMd, mixed $id, string $field, string $uid): mixed
+    {
+        $idType = (string) $targetMd->getTypeOfField($targetMd->getSingleIdentifierFieldName());
+        if (!\in_array($idType, ['integer', 'smallint', 'bigint'], true)) {
+            return $id;
+        }
+        if (!is_numeric((string) $id)) {
+            throw OntologyApiException::invalidPayload(sprintf(
+                'Record "%s": "%s" must be the numeric id of the related record.',
+                $uid,
+                $field
+            ));
+        }
+
+        return (int) $id;
     }
 
     /**

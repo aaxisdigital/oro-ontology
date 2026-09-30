@@ -36,6 +36,9 @@ interface RunEventRecord {
     payload: Record<string, any> | null;
 }
 
+/** Boundary events carry the FULL timestamp; every other row shows how long after the previous event it happened. */
+const BOUNDARY_EVENTS = new Set(['flow-start', 'flow-finish', 'flow-exception']);
+
 /**
  * Read-only Events page built on the reusable DataGrid widget: one row per flow RUN (uuid) —
  * name, uuid, started/finished (the flow-start and flow-finish/flow-exception event times),
@@ -201,17 +204,11 @@ class OntologyEventComponent extends BaseComponent {
             .then(r => r.json())
             .then((data: {records?: RunEventRecord[]}) => {
                 $list.empty();
-                // Boundary events carry the FULL timestamp; every other row shows how long after
-                // the PREVIOUS event it happened (micro-precision deltas from `ms`).
-                const boundaries = ['flow-start', 'flow-finish', 'flow-exception'];
+                // Non-boundary rows show the micro-precision delta from the PREVIOUS event's `ms`.
                 let previousMs: number | null = null;
                 (data.records || []).forEach(event => {
                     const $row = $('<div/>', {'class': 'aaxis-event-run__row'});
-                    const timeText = boundaries.includes(event.event)
-                        ? formatDateTime(event.datetime)
-                        : (previousMs !== null && event.ms !== null
-                            ? `+${this.humanizeMs(Math.max(0, Math.round(event.ms - previousMs)))}`
-                            : '');
+                    const timeText = this.eventTimeText(event, previousMs);
                     if (event.ms !== null) {
                         previousMs = event.ms;
                     }
@@ -237,13 +234,25 @@ class OntologyEventComponent extends BaseComponent {
             });
     }
 
+    /** Full time on a boundary event, else "+delta" since the previous event ('' when it cannot be told). */
+    private eventTimeText(event: RunEventRecord, previousMs: number | null): string {
+        if (BOUNDARY_EVENTS.has(event.event)) {
+            return formatDateTime(event.datetime);
+        }
+        if (previousMs === null || event.ms === null) {
+            return '';
+        }
+
+        return `+${this.humanizeMs(Math.max(0, Math.round(event.ms - previousMs)))}`;
+    }
+
     /** The one line that matters per event kind — no raw JSON in the popup. */
     private summarizeEvent(event: RunEventRecord): string {
         const payload = event.payload || {};
         switch (event.event) {
             case 'flow-start':
             case 'subflow-start': {
-                const user = payload.user && payload.user.name ? ` — ${payload.user.name}` : '';
+                const user = payload.user?.name ? ` — ${payload.user.name}` : '';
                 return `${payload.trigger || ''}${user}`;
             }
             case 'data-upsert': {

@@ -27,14 +27,6 @@ use Oro\Component\MessageQueue\Client\MessageProducerInterface;
  */
 class OntologyDataApiManager
 {
-    /** Allowed filter operators mapped to their SQL operator. */
-    private const array COMPARATORS = [
-        'EQ' => '=',
-        'LIKE' => 'LIKE',
-        '<' => '<',
-        '>' => '>',
-    ];
-
     public function __construct(
         private readonly ManagerRegistry $doctrine,
         private readonly MessageProducerInterface $producer,
@@ -403,7 +395,13 @@ class OntologyDataApiManager
         $offset = ($page - 1) * $pageSize;
 
         if ($this->isBucketBacked($entity)) {
-            return $this->queryBucket($entity, $filters, $orderBy, $pageSize, $offset);
+            return PayloadQuery::run(
+                fn (): array => $this->bucketStore->listPayloads($entity),
+                $filters,
+                $orderBy,
+                $pageSize,
+                $offset
+            );
         }
 
         $where = ['entity_id = :entity_id'];
@@ -411,14 +409,14 @@ class OntologyDataApiManager
         $types = ['entity_id' => ParameterType::INTEGER];
 
         foreach (array_values($filters) as $i => $filter) {
-            $this->appendFilter($i, \is_array($filter) ? $filter : [], $where, $params);
+            PayloadQuery::appendSqlFilter($i, $filter, $where, $params);
         }
 
         // page_size/offset are validated integers, inlined to avoid Postgres LIMIT param typing issues.
         $sql = sprintf(
             'SELECT payload FROM aaxis_ontology_data WHERE %s ORDER BY %s LIMIT %d OFFSET %d',
             implode(' AND ', $where),
-            $this->buildOrderBy($orderBy, $params),
+            PayloadQuery::sqlOrderBy($orderBy, $params),
             $pageSize,
             $offset
         );
@@ -454,19 +452,7 @@ class OntologyDataApiManager
         }
 
         if ($this->isBucketBacked($entity)) {
-            $payloads = array_map(
-                static fn (array $envelope): array => $envelope['payload'],
-                $this->bucketStore->listLatest($entity)
-            );
-            $orderBy = trim((string) $orderBy);
-            if ($orderBy !== '') {
-                $desc = strtoupper($direction) === 'DESC';
-                usort($payloads, static function (array $a, array $b) use ($orderBy, $desc): int {
-                    $cmp = self::compareJsonValues($a[$orderBy] ?? null, $b[$orderBy] ?? null);
-
-                    return $desc ? -$cmp : $cmp;
-                });
-            }
+            $payloads = PayloadQuery::orderForFlow($this->bucketStore->listPayloads($entity), $orderBy, $direction);
 
             return $limit !== null && $limit > 0 ? \array_slice($payloads, 0, $limit) : $payloads;
         }
@@ -510,13 +496,7 @@ class OntologyDataApiManager
         }
 
         if ($this->isBucketBacked($entity)) {
-            return array_values(array_filter(
-                array_map(
-                    static fn (array $envelope): array => $envelope['payload'],
-                    $this->bucketStore->listLatest($entity)
-                ),
-                static fn (array $payload): bool => self::jsonTextForm($payload[$attribute] ?? null) === $value
-            ));
+            return PayloadQuery::whereAttributeEquals($this->bucketStore->listPayloads($entity), $attribute, $value);
         }
 
         $rows = $this->connection()->fetchAllAssociative(
@@ -591,230 +571,6 @@ class OntologyDataApiManager
         $em->flush();
 
         return $entity;
-    }
-
-    /**
-     * Validates one filter and appends its SQL fragment + bound parameters.
-     *
-     * @param array<string, mixed> $filter
-     * @param array<int, string>   $where
-     * @param array<string, mixed> $params
-     *
-     * @throws OntologyApiException
-     */
-    /**
-     * The bucket-backed arm of {@see query()}: same filter/orderBy semantics as the SQL path
-     * (values compared by their jsonb TEXT form, </> numerically when both sides are numeric),
-     * applied in PHP over the entity's live records, then paged.
-     *
-     * @param array<int, array{attribute?: mixed, compare?: mixed, value?: mixed}> $filters
-     *
-     * @return array<int, array<int|string, mixed>|null>
-     */
-    private function queryBucket(OntologyEntity $entity, array $filters, ?string $orderBy, int $pageSize, int $offset): array
-    {
-        // Validate filters/orderBy with the same errors the SQL path raises (unknown compare,
-        // non-scalar value, bad direction) — the caller must not notice the backend.
-        $normalized = [];
-        foreach (array_values($filters) as $i => $filter) {
-            $filter = \is_array($filter) ? $filter : [];
-            $attribute = isset($filter['attribute']) ? trim((string) $filter['attribute']) : '';
-            if ($attribute === '') {
-                throw OntologyApiException::invalidQuery('Each filter requires a non-empty "attribute".');
-            }
-            $compare = (string) ($filter['compare'] ?? 'EQ');
-            if (!isset(self::COMPARATORS[$compare])) {
-                throw OntologyApiException::invalidQuery(sprintf('Unsupported filter compare "%s".', $compare));
-            }
-            $value = $filter['value'] ?? null;
-            if ($value !== null && !\is_scalar($value)) {
-                throw OntologyApiException::invalidQuery('Filter "value" must be a scalar.');
-            }
-            $normalized[] = ['attribute' => $attribute, 'compare' => $compare, 'value' => (string) $value];
-        }
-
-        $orderAttr = null;
-        $orderDesc = false;
-        $orderBy = trim((string) $orderBy);
-        if ($orderBy !== '') {
-            $parts = preg_split('/\s+/', $orderBy) ?: [];
-            $orderAttr = trim((string) ($parts[0] ?? ''));
-            $direction = strtoupper(trim((string) ($parts[1] ?? 'ASC')));
-            if ($orderAttr === '') {
-                throw OntologyApiException::invalidQuery('orderBy requires an attribute name.');
-            }
-            if (!\in_array($direction, ['ASC', 'DESC'], true)) {
-                throw OntologyApiException::invalidQuery(sprintf('Unsupported orderBy direction "%s".', $direction));
-            }
-            $orderDesc = $direction === 'DESC';
-        }
-
-        $payloads = array_map(
-            static fn (array $envelope): array => $envelope['payload'],
-            $this->bucketStore->listLatest($entity)
-        );
-        $payloads = array_values(array_filter($payloads, static function (array $payload) use ($normalized): bool {
-            foreach ($normalized as $filter) {
-                if (!self::bucketFilterMatches($payload[$filter['attribute']] ?? null, $filter['compare'], $filter['value'])) {
-                    return false;
-                }
-            }
-
-            return true;
-        }));
-        if ($orderAttr !== null) {
-            usort($payloads, static function (array $a, array $b) use ($orderAttr, $orderDesc): int {
-                $left = self::jsonTextForm($a[$orderAttr] ?? null);
-                $right = self::jsonTextForm($b[$orderAttr] ?? null);
-                // Text ordering like `payload->>attr`; SQL NULLs sort last ASC / first DESC.
-                if ($left === null || $right === null) {
-                    $cmp = ($left === null ? 1 : 0) <=> ($right === null ? 1 : 0);
-                } else {
-                    $cmp = strcmp($left, $right) <=> 0;
-                }
-
-                return $orderDesc ? -$cmp : $cmp;
-            });
-        }
-
-        return \array_slice($payloads, $offset, $pageSize);
-    }
-
-    /** One filter against one payload value — the PHP mirror of {@see appendFilter}'s SQL. */
-    private static function bucketFilterMatches(mixed $raw, string $compare, string $value): bool
-    {
-        $text = self::jsonTextForm($raw);
-        if ($text === null) {
-            return false; // SQL comparisons against NULL never match
-        }
-
-        switch ($compare) {
-            case 'EQ':
-                return $text === $value;
-            case 'LIKE':
-                $regex = str_replace(['\%', '\_'], ['.*', '.'], preg_quote($value, '~'));
-
-                return preg_match('~^' . $regex . '$~s', $text) === 1;
-            case '<':
-            case '>':
-                if (is_numeric($value) && preg_match('/^-?[0-9]+(\.[0-9]+)?$/', $text) === 1) {
-                    $cmp = (float) $text <=> (float) $value;
-                } else {
-                    $cmp = strcmp($text, $value) <=> 0;
-                }
-
-                return $compare === '<' ? $cmp < 0 : $cmp > 0;
-            default:
-                return false;
-        }
-    }
-
-    /**
-     * The `payload ->> attr` text form of a decoded JSON value: null stays null (never matches),
-     * booleans render true/false, structures render as their JSON text, scalars as strings.
-     */
-    private static function jsonTextForm(mixed $value): ?string
-    {
-        if ($value === null) {
-            return null;
-        }
-        if (\is_bool($value)) {
-            return $value ? 'true' : 'false';
-        }
-        if (\is_array($value)) {
-            return (string) json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        }
-
-        return (string) $value;
-    }
-
-    /**
-     * jsonb-flavoured ordering for {@see queryForFlow}: numbers compare numerically, strings
-     * lexically; mixed/other types fall back to their JSON text (an approximation of jsonb's
-     * type-ranked order, fine for the homogeneous attributes flows sort on).
-     */
-    private static function compareJsonValues(mixed $a, mixed $b): int
-    {
-        if (is_numeric($a) && is_numeric($b) && !\is_string($a) && !\is_string($b)) {
-            return $a <=> $b;
-        }
-        if (\is_string($a) && \is_string($b)) {
-            return strcmp($a, $b) <=> 0;
-        }
-        if (is_numeric($a) && is_numeric($b)) {
-            return (float) $a <=> (float) $b;
-        }
-
-        return strcmp((string) json_encode($a), (string) json_encode($b)) <=> 0;
-    }
-
-    private function appendFilter(int $index, array $filter, array &$where, array &$params): void
-    {
-        $attribute = isset($filter['attribute']) ? trim((string) $filter['attribute']) : '';
-        if ($attribute === '') {
-            throw OntologyApiException::invalidQuery('Each filter requires a non-empty "attribute".');
-        }
-
-        $compare = (string) ($filter['compare'] ?? 'EQ');
-        if (!isset(self::COMPARATORS[$compare])) {
-            throw OntologyApiException::invalidQuery(sprintf('Unsupported filter compare "%s".', $compare));
-        }
-
-        $value = $filter['value'] ?? null;
-        if ($value !== null && !\is_scalar($value)) {
-            throw OntologyApiException::invalidQuery('Filter "value" must be a scalar.');
-        }
-
-        $attrKey = 'attr' . $index;
-        $valKey = 'val' . $index;
-        $params[$attrKey] = $attribute;
-
-        if (($compare === '<' || $compare === '>') && is_numeric($value)) {
-            // Compare numerically, but only for rows whose value looks numeric, to avoid cast errors.
-            // The bound value is cast in-SQL so it stays a plain (text) parameter.
-            $where[] = sprintf(
-                "(payload->>:%s ~ '^-?[0-9]+(\\.[0-9]+)?$' AND (payload->>:%s)::numeric %s CAST(:%s AS numeric))",
-                $attrKey,
-                $attrKey,
-                self::COMPARATORS[$compare],
-                $valKey
-            );
-            $params[$valKey] = (string) $value;
-        } else {
-            $where[] = sprintf('payload->>:%s %s :%s', $attrKey, self::COMPARATORS[$compare], $valKey);
-            $params[$valKey] = (string) $value;
-        }
-    }
-
-    /**
-     * Builds the ORDER BY clause. Defaults to "id ASC"; an "<attribute> [ASC|DESC]" string orders by
-     * that payload attribute. The attribute is bound; the direction is whitelisted.
-     *
-     * @param array<string, mixed> $params
-     *
-     * @throws OntologyApiException
-     */
-    private function buildOrderBy(?string $orderBy, array &$params): string
-    {
-        $orderBy = trim((string) $orderBy);
-        if ($orderBy === '') {
-            return 'id ASC';
-        }
-
-        $parts = preg_split('/\s+/', $orderBy) ?: [];
-        $attribute = trim((string) ($parts[0] ?? ''));
-        $direction = strtoupper(trim((string) ($parts[1] ?? 'ASC')));
-
-        if ($attribute === '') {
-            throw OntologyApiException::invalidQuery('orderBy requires an attribute name.');
-        }
-        if (!\in_array($direction, ['ASC', 'DESC'], true)) {
-            throw OntologyApiException::invalidQuery(sprintf('Unsupported orderBy direction "%s".', $direction));
-        }
-
-        $params['orderAttr'] = $attribute;
-
-        return sprintf('payload->>:orderAttr %s', $direction);
     }
 
     /**

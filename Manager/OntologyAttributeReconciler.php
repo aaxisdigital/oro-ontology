@@ -201,11 +201,10 @@ class OntologyAttributeReconciler
             return $values;
         }
         $segment = $segments[0];
-        if (\is_array($current) && \array_key_exists($segment, $current)) {
-            return $this->resolveValues($current[$segment], \array_slice($segments, 1));
-        }
 
-        return [];
+        return \is_array($current) && \array_key_exists($segment, $current)
+            ? $this->resolveValues($current[$segment], \array_slice($segments, 1))
+            : [];
     }
 
     private function valueMatchesType(mixed $value, string $datatype): bool

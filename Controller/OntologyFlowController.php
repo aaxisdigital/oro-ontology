@@ -41,6 +41,13 @@ use Symfony\Contracts\Translation\TranslatorInterface;
  */
 class OntologyFlowController extends AbstractOntologyController
 {
+    private const string INVALID_PAYLOAD = 'Invalid payload.';
+    private const string SESSION_EXPIRED = 'The debug session expired — restart the debug.';
+    private const string SESSION_TIMED_OUT = 'The debug session was terminated by timeout — restart the debug.';
+
+    /** A flow document is small; anything larger is not one. */
+    private const int MAX_IMPORT_BYTES = 2 * 1024 * 1024;
+
     #[Route(path: '/flows', name: 'aaxis_ontology_flows')]
     #[Template('@AaxisOntology/Flow/index.html.twig')]
     #[Acl(id: 'aaxis_ontology_flow_view', type: 'entity', class: OntologyFlow::class, permission: 'VIEW')]
@@ -279,31 +286,12 @@ class OntologyFlowController extends AbstractOntologyController
     #[CsrfProtection]
     public function importAction(Request $request): JsonResponse
     {
-        $invalid = fn (): JsonResponse => new JsonResponse([
-            'success' => false,
-            'errors' => [$this->trans('aaxis.ontology.flow_portability.invalid_format')],
-        ], 422);
-
-        $payload = json_decode($request->getContent(), true);
-        $raw = \is_array($payload) ? ($payload['document'] ?? null) : null;
-        if (!\is_string($raw) || trim($raw) === '') {
-            return $invalid();
-        }
-        // A flow document is small; anything larger is not one, and refusing it here beats letting
-        // the web server answer with an HTML error page the client cannot parse.
-        if (\strlen($raw) > 2 * 1024 * 1024) {
+        [$document, $error] = $this->parseImportRequest($request);
+        if ($error !== null) {
             return new JsonResponse([
                 'success' => false,
-                'errors' => [$this->trans('aaxis.ontology.flow_portability.too_large')],
+                'errors' => [$this->trans('aaxis.ontology.flow_portability.' . $error)],
             ], 422);
-        }
-
-        // Decoded here (not by the client) so a malformed or absurdly nested file is rejected the
-        // same way as any other bad document.
-        try {
-            $document = json_decode($raw, true, 64, JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            return $invalid();
         }
 
         try {
@@ -313,6 +301,36 @@ class OntologyFlowController extends AbstractOntologyController
         }
 
         return new JsonResponse(['success' => true, 'flow' => $this->serialize($flow)]);
+    }
+
+    /**
+     * The decoded flow document of an import request, or the translation key (under
+     * aaxis.ontology.flow_portability.) of what is wrong with it.
+     *
+     * @return array{0: mixed, 1: string|null}
+     */
+    private function parseImportRequest(Request $request): array
+    {
+        $payload = json_decode($request->getContent(), true);
+        $raw = \is_array($payload) ? ($payload['document'] ?? null) : null;
+        $error = match (true) {
+            !\is_string($raw) || trim($raw) === '' => 'invalid_format',
+            // Refusing an oversized document here beats letting the web server answer with an
+            // HTML error page the client cannot parse.
+            \strlen($raw) > self::MAX_IMPORT_BYTES => 'too_large',
+            default => null,
+        };
+        if ($error !== null) {
+            return [null, $error];
+        }
+
+        // Decoded here (not by the client) so a malformed or absurdly nested file is rejected the
+        // same way as any other bad document.
+        try {
+            return [json_decode($raw, true, 64, JSON_THROW_ON_ERROR), null];
+        } catch (\JsonException) {
+            return [null, 'invalid_format'];
+        }
     }
 
     /** A filesystem-friendly file name for an exported flow. */
@@ -333,11 +351,7 @@ class OntologyFlowController extends AbstractOntologyController
     #[CsrfProtection]
     public function debugAction(Request $request): JsonResponse
     {
-        $payload = json_decode($request->getContent(), true);
-        if (!\is_array($payload)) {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
-        }
-        $parsed = $this->parseDebugDefinition($payload);
+        $parsed = $this->parseDebugPayload(json_decode($request->getContent(), true));
         if ($parsed instanceof JsonResponse) {
             return $parsed;
         }
@@ -346,16 +360,8 @@ class OntologyFlowController extends AbstractOntologyController
         $executor = $this->container->get(FlowDebugExecutor::class);
         try {
             $output = $executor->execute($steps, $links, $input, $flow, null, null, $this->debugRunInfo());
-        } catch (FlowStepFailure $e) {
-            // The editor paints the trail: executed tiles amber, the failing one red.
-            return new JsonResponse([
-                'success' => false,
-                'message' => $e->getMessage(),
-                'failedStepId' => $e->stepId,
-                'executedIds' => $e->executedIds,
-            ], 422);
         } catch (\RuntimeException $e) {
-            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
+            return $this->debugFailure($e);
         }
 
         // The final context is stored too, so the debugger sidebar's evaluator works after a run.
@@ -382,63 +388,11 @@ class OntologyFlowController extends AbstractOntologyController
     public function debugStepAction(Request $request): JsonResponse
     {
         $payload = json_decode($request->getContent(), true);
-        if (!\is_array($payload)) {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+        $prepared = $this->prepareDebugStep($payload);
+        if ($prepared instanceof JsonResponse) {
+            return $prepared;
         }
-        $parsed = $this->parseDebugDefinition($payload);
-        if ($parsed instanceof JsonResponse) {
-            return $parsed;
-        }
-        [$steps, $links, $input, $flow] = $parsed;
-
-        // The walk state (context + the frame STACK — step-into descends into subflows) lives
-        // server-side; the client only round-trips the key. No key = a fresh session.
-        $blob = null;
-        $contextKey = $payload['contextKey'] ?? null;
-        if (\is_string($contextKey) && $contextKey !== '') {
-            $stored = $this->loadDebugContext($contextKey);
-            if ($stored === null) {
-                return new JsonResponse([
-                    'success' => false,
-                    'message' => 'The debug session expired — restart the debug.',
-                ], 422);
-            }
-            // The blob is {context, frames, done}; a legacy plain context cannot resume a walk.
-            $blob = \is_array($stored['frames'] ?? null) ? $stored : null;
-            if ($blob === null) {
-                return new JsonResponse([
-                    'success' => false,
-                    'message' => 'The debug session expired — restart the debug.',
-                ], 422);
-            }
-            // Inactivity timeout: a session idle longer than the configured minutes is DEAD —
-            // the run was (or now is) closed with a flow-exception "debug-timeout" event, and
-            // stepping it further is refused.
-            if (($blob['terminated'] ?? null) !== null) {
-                return new JsonResponse([
-                    'success' => false,
-                    'message' => 'The debug session was terminated by timeout — restart the debug.',
-                ], 422);
-            }
-            $timeoutMinutes = max(0, (int) $this->container->get(ConfigManager::class)->get('aaxis_ontology.flow_debug_timeout_minutes'));
-            if ($timeoutMinutes > 0 && isset($blob['lastTickAt']) && time() - (int) $blob['lastTickAt'] > $timeoutMinutes * 60) {
-                $root = $blob['frames'][0] ?? [];
-                $this->container->get(OntologyFlowEventEmitter::class)->emitRaw(
-                    isset($root['flowId']) ? (int) $root['flowId'] : null,
-                    $root['flowName'] ?? null,
-                    (string) ($blob['context']['flowUuid'] ?? '') ?: null,
-                    'flow-exception',
-                    ['message' => 'debug-timeout']
-                );
-                $blob['terminated'] = 'debug-timeout';
-                $this->storeDebugContext($blob);
-
-                return new JsonResponse([
-                    'success' => false,
-                    'message' => 'The debug session was terminated by timeout — restart the debug.',
-                ], 422);
-            }
-        }
+        [$steps, $links, $input, $flow, $blob] = $prepared;
 
         $executor = $this->container->get(FlowDebugExecutor::class);
         try {
@@ -453,16 +407,8 @@ class OntologyFlowController extends AbstractOntologyController
                 ($payload['stepInto'] ?? false) === true,
                 ($payload['stepOut'] ?? false) === true
             );
-        } catch (FlowStepFailure $e) {
-            return new JsonResponse([
-                'success' => false,
-                'message' => $e->getMessage(),
-                'failedStepId' => $e->stepId,
-                'executedIds' => $e->executedIds,
-                'subflowTrails' => $executor->subflowTrails(),
-            ], 422);
         } catch (\RuntimeException $e) {
-            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
+            return $this->debugFailure($e, $executor->subflowTrails(...));
         }
 
         // Every tick refreshes the inactivity clock.
@@ -472,6 +418,103 @@ class OntologyFlowController extends AbstractOntologyController
             'success' => true,
             'contextKey' => $this->storeDebugContext($result['blob']),
         ] + $result['response']);
+    }
+
+    /**
+     * The definition, trigger input, flow and — when the request resumes a session — the stored
+     * walk state of a step-debug call, or the error response to answer with.
+     *
+     * @return array{0: array<int, array<string, mixed>>, 1: array<int, array<string, mixed>>, 2: array<string, mixed>, 3: OntologyFlow|null, 4: array<string, mixed>|null}|JsonResponse
+     */
+    private function prepareDebugStep(mixed $payload): array|JsonResponse
+    {
+        $parsed = $this->parseDebugPayload($payload);
+        if ($parsed instanceof JsonResponse) {
+            return $parsed;
+        }
+
+        // The walk state (context + the frame STACK — step-into descends into subflows) lives
+        // server-side; the client only round-trips the key. No key = a fresh session.
+        $contextKey = $payload['contextKey'] ?? null;
+        $session = \is_string($contextKey) && $contextKey !== '' ? $this->resumeSession($contextKey) : null;
+
+        return $session instanceof JsonResponse ? $session : [...$parsed, $session];
+    }
+
+    /**
+     * The stored walk state of a session, or the 422 explaining why it cannot be resumed: expired
+     * (missing, or a legacy plain context that cannot resume a walk), already terminated, or idle
+     * for longer than the configured inactivity timeout — a session past it is DEAD: the run is
+     * closed with a flow-exception "debug-timeout" event and stepping it further is refused.
+     *
+     * @return array<string, mixed>|JsonResponse
+     */
+    private function resumeSession(string $contextKey): array|JsonResponse
+    {
+        $stored = $this->loadDebugContext($contextKey);
+        // The blob is {context, frames, done}.
+        $blob = \is_array($stored['frames'] ?? null) ? $stored : null;
+
+        $refusal = match (true) {
+            $blob === null => new JsonResponse(['success' => false, 'message' => self::SESSION_EXPIRED], 422),
+            ($blob['terminated'] ?? null) !== null => new JsonResponse(['success' => false, 'message' => self::SESSION_TIMED_OUT], 422),
+            $this->isIdle($blob) => $this->terminateSession($blob),
+            default => null,
+        };
+
+        return $refusal ?? $blob;
+    }
+
+    /**
+     * @param array<string, mixed> $blob
+     */
+    private function isIdle(array $blob): bool
+    {
+        $timeoutMinutes = max(0, (int) $this->container->get(ConfigManager::class)->get('aaxis_ontology.flow_debug_timeout_minutes'));
+
+        return $timeoutMinutes > 0 && isset($blob['lastTickAt']) && time() - (int) $blob['lastTickAt'] > $timeoutMinutes * 60;
+    }
+
+    /**
+     * Closes an idle session's run with a "debug-timeout" flow-exception event and marks the
+     * stored walk terminated, so the next call is refused without a second event.
+     *
+     * @param array<string, mixed> $blob
+     */
+    private function terminateSession(array $blob): JsonResponse
+    {
+        $root = $blob['frames'][0] ?? [];
+        $this->container->get(OntologyFlowEventEmitter::class)->emitRaw(
+            isset($root['flowId']) ? (int) $root['flowId'] : null,
+            $root['flowName'] ?? null,
+            (string) ($blob['context']['flowUuid'] ?? '') ?: null,
+            'flow-exception',
+            ['message' => 'debug-timeout']
+        );
+        $blob['terminated'] = 'debug-timeout';
+        $this->storeDebugContext($blob);
+
+        return new JsonResponse(['success' => false, 'message' => self::SESSION_TIMED_OUT], 422);
+    }
+
+    /**
+     * The 422 for a failed run: the editor paints the trail — executed tiles amber, the failing
+     * one red — so a step failure carries the step id and the executed ids (and, for the step
+     * debugger, the subflow trails).
+     *
+     * @param (callable(): array<string, mixed>)|null $subflowTrails
+     */
+    private function debugFailure(\RuntimeException $e, ?callable $subflowTrails = null): JsonResponse
+    {
+        $body = ['success' => false, 'message' => $e->getMessage()];
+        if ($e instanceof FlowStepFailure) {
+            $body += ['failedStepId' => $e->stepId, 'executedIds' => $e->executedIds];
+            if ($subflowTrails !== null) {
+                $body['subflowTrails'] = $subflowTrails();
+            }
+        }
+
+        return new JsonResponse($body, 422);
     }
 
     /**
@@ -485,17 +528,17 @@ class OntologyFlowController extends AbstractOntologyController
     {
         $payload = json_decode($request->getContent(), true);
         $expression = \is_array($payload) && \is_string($payload['expression'] ?? null) ? trim($payload['expression']) : '';
-        if ($expression === '') {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
-        }
         $stored = $this->loadDebugContext(\is_array($payload) ? ($payload['contextKey'] ?? null) : null);
         // The stored blob wraps the context since the step-into debugger ({context, frames, done}).
         $context = \is_array($stored['frames'] ?? null) ? ($stored['context'] ?? null) : $stored;
-        if ($context === null) {
-            return new JsonResponse([
-                'success' => false,
-                'message' => 'The debug session expired — restart the debug.',
-            ], 422);
+
+        $rejection = match (true) {
+            $expression === '' => new JsonResponse(['success' => false, 'message' => self::INVALID_PAYLOAD], 400),
+            $context === null => new JsonResponse(['success' => false, 'message' => self::SESSION_EXPIRED], 422),
+            default => null,
+        };
+        if ($rejection !== null) {
+            return $rejection;
         }
 
         try {
@@ -545,6 +588,19 @@ class OntologyFlowController extends AbstractOntologyController
     }
 
     /**
+     * Validates/normalizes the shared debug payload of both debug endpoints, or answers with the
+     * error response directly when it is not even an object.
+     *
+     * @return array{0: array<int, array<string, mixed>>, 1: array<int, array<string, mixed>>, 2: array<string, mixed>, 3: OntologyFlow|null}|JsonResponse
+     */
+    private function parseDebugPayload(mixed $payload): array|JsonResponse
+    {
+        return \is_array($payload)
+            ? $this->parseDebugDefinition($payload)
+            : new JsonResponse(['success' => false, 'message' => self::INVALID_PAYLOAD], 400);
+    }
+
+    /**
      * Validates/normalizes the shared debug payload (steps, links, trigger input, flowId) used by
      * both debug endpoints. Returns the error response directly when something is malformed.
      *
@@ -554,52 +610,89 @@ class OntologyFlowController extends AbstractOntologyController
      */
     private function parseDebugDefinition(array $payload): array|JsonResponse
     {
-        $steps = [];
-        $ids = [];
-        foreach (\is_array($payload['steps'] ?? null) ? $payload['steps'] : [] as $step) {
-            $id = \is_string($step['id'] ?? null) ? $step['id'] : '';
-            $config = $step['config'] ?? null;
-            if (!\is_array($step) || $id === '' || isset($ids[$id])
-                || !\in_array($step['type'] ?? null, OntologyFlow::STEP_TYPES, true)
-                || !\is_string($step['name'] ?? null)
-                || ($config !== null && (!\is_array($config) || array_is_list($config)))
-            ) {
-                return new JsonResponse(['success' => false, 'message' => 'Invalid debug steps.'], 400);
-            }
-            $ids[$id] = true;
-            $steps[] = ['id' => $id, 'type' => $step['type'], 'name' => $step['name'], 'config' => $config];
-        }
-        $links = [];
-        foreach (\is_array($payload['links'] ?? null) ? $payload['links'] : [] as $link) {
-            if (!\is_array($link) || !isset($ids[$link['from'] ?? null]) || !isset($ids[$link['to'] ?? null])
-                || !\is_int($link['fromPort'] ?? null)
-            ) {
-                return new JsonResponse(['success' => false, 'message' => 'Invalid debug links.'], 400);
-            }
-            $links[] = ['from' => $link['from'], 'fromPort' => $link['fromPort'], 'to' => $link['to']];
-        }
+        $steps = $this->debugSteps($payload['steps'] ?? null);
+        $links = $steps === null ? null : $this->debugLinks($payload['links'] ?? null, $steps);
         $input = \is_array($payload['input'] ?? null) && !array_is_list($payload['input']) ? $payload['input'] : [];
 
         // Writers stamp their upserts with the flow being debugged; a never-saved flow has no id
         // yet (flowId null) and the executor falls back to the built-in Manual flow.
-        $flow = null;
-        if (($payload['flowId'] ?? null) !== null) {
-            $flow = \is_int($payload['flowId'])
-                ? $this->container->get(ManagerRegistry::class)->getRepository(OntologyFlow::class)->find($payload['flowId'])
-                : null;
-            if ($flow === null) {
-                return new JsonResponse(['success' => false, 'message' => 'The flow being debugged no longer exists.'], 422);
-            }
-        }
+        $flowId = $payload['flowId'] ?? null;
+        $flow = $links !== null && \is_int($flowId)
+            ? $this->container->get(ManagerRegistry::class)->getRepository(OntologyFlow::class)->find($flowId)
+            : null;
 
-        return [$steps, $links, $input, $flow];
+        $error = match (true) {
+            $steps === null => [400, 'Invalid debug steps.'],
+            $links === null => [400, 'Invalid debug links.'],
+            $flowId !== null && $flow === null => [422, 'The flow being debugged no longer exists.'],
+            default => null,
+        };
+
+        return $error !== null
+            ? new JsonResponse(['success' => false, 'message' => $error[1]], $error[0])
+            : [$steps, $links, $input, $flow];
     }
 
     /**
-     * Creates/updates a flow from a JSON body ({name, enabled, steps}). The type is deliberately
-     * never read from the payload — it is recomputed from the steps on every save (native flows
-     * never reach this method).
+     * @return array<int, array<string, mixed>>|null the normalized steps, null when any is malformed
      */
+    private function debugSteps(mixed $raw): ?array
+    {
+        $steps = [];
+        $ids = [];
+        foreach (\is_array($raw) ? $raw : [] as $step) {
+            if (!$this->isValidDebugStep($step, $ids)) {
+                return null;
+            }
+            $ids[$step['id']] = true;
+            $steps[] = ['id' => $step['id'], 'type' => $step['type'], 'name' => $step['name'], 'config' => $step['config'] ?? null];
+        }
+
+        return $steps;
+    }
+
+    /**
+     * A debug step: an object with a unique non-empty string id, a known type, a string name and
+     * a config that is absent or an object.
+     *
+     * @param array<string, bool> $ids the ids of the steps accepted so far
+     */
+    private function isValidDebugStep(mixed $step, array $ids): bool
+    {
+        if (!\is_array($step)) {
+            return false;
+        }
+        $id = \is_string($step['id'] ?? null) ? $step['id'] : '';
+        $config = $step['config'] ?? null;
+
+        return $id !== ''
+            && !isset($ids[$id])
+            && \in_array($step['type'] ?? null, OntologyFlow::STEP_TYPES, true)
+            && \is_string($step['name'] ?? null)
+            && ($config === null || (\is_array($config) && !array_is_list($config)));
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $steps the (valid) debug steps the links must connect
+     *
+     * @return array<int, array<string, mixed>>|null the normalized links, null when any is malformed
+     */
+    private function debugLinks(mixed $raw, array $steps): ?array
+    {
+        $ids = array_flip(array_column($steps, 'id'));
+        $links = [];
+        foreach (\is_array($raw) ? $raw : [] as $link) {
+            if (!\is_array($link) || !isset($ids[$link['from'] ?? null]) || !isset($ids[$link['to'] ?? null])
+                || !\is_int($link['fromPort'] ?? null)
+            ) {
+                return null;
+            }
+            $links[] = ['from' => $link['from'], 'fromPort' => $link['fromPort'], 'to' => $link['to']];
+        }
+
+        return $links;
+    }
+
     /**
      * The flow-start event bits for editor-driven runs: trigger "debug" plus the acting
      * back-office user's name/email.
@@ -626,11 +719,16 @@ class OntologyFlowController extends AbstractOntologyController
         return $info;
     }
 
+    /**
+     * Creates/updates a flow from a JSON body ({name, enabled, steps}). The type is deliberately
+     * never read from the payload — it is recomputed from the steps on every save (native flows
+     * never reach this method).
+     */
     private function save(OntologyFlow $entity, Request $request): JsonResponse
     {
         $payload = json_decode($request->getContent(), true);
         if (!\is_array($payload)) {
-            return new JsonResponse(['success' => false, 'message' => 'Invalid payload.'], 400);
+            return new JsonResponse(['success' => false, 'message' => self::INVALID_PAYLOAD], 400);
         }
 
         // Snapshot the STORED definition before the payload mutates the entity — the archiver
@@ -639,41 +737,13 @@ class OntologyFlowController extends AbstractOntologyController
         $previousSteps = $entity->getSteps();
         $previousDesign = $entity->getDesign();
 
-        if (\array_key_exists('design', $payload)) {
-            // The design is the editor's own (versioned) canvas representation — stored opaquely;
-            // the editor validates it on load and treats unreadable values as corrupted.
-            if ($payload['design'] !== null && !\is_array($payload['design'])) {
-                return new JsonResponse(['success' => false, 'message' => 'Invalid design.'], 400);
-            }
-            $entity->setDesign($payload['design']);
-        }
-
-        if (\array_key_exists('steps', $payload)) {
-            // The same rules an IMPORTED flow must clear — see Manager/FlowStepValidator.
-            $validator = $this->container->get(FlowStepValidator::class);
-            $steps = $validator->normalize($payload['steps']);
-            if ($steps === null) {
-                return new JsonResponse(['success' => false, 'message' => 'Invalid steps.'], 400);
-            }
-            // Only STRUCTURAL problems block a save (duplicate names): incomplete/invalid step
-            // configs are storable — the editor marks them red and the flow cannot RUN until
-            // they are fixed (the executor re-checks the FULL bar).
-            $structural = $validator->structuralErrors($steps);
-            if ($structural !== []) {
-                return new JsonResponse(['success' => false, 'message' => $structural[0]], 422);
-            }
-            $entity->setSteps($steps === [] ? null : $steps);
-        }
-
         // The flow's NAME is the TRIGGER STEP's name (the top-bar input is gone) — a triggerless
         // canvas keeps the stored name, and a brand new one gets a generated placeholder.
-        $name = $this->deriveFlowName($entity);
-        $existing = $this->registry()->getRepository(OntologyFlow::class)->findOneBy(['name' => $name]);
-        if ($existing !== null && $existing->getId() !== $entity->getId()) {
-            return new JsonResponse([
-                'success' => false,
-                'message' => $this->trans('aaxis.ontology.flow_manager.name_unique'),
-            ], 422);
+        $rejection = $this->applyDefinition($entity, $payload);
+        $name = $rejection === null ? $this->deriveFlowName($entity) : '';
+        $rejection ??= $this->nameRejection($entity, $name);
+        if ($rejection !== null) {
+            return $rejection;
         }
 
         $entity->setName($name);
@@ -705,6 +775,58 @@ class OntologyFlowController extends AbstractOntologyController
         $em->flush();
 
         return new JsonResponse(['success' => true, 'flow' => $this->serialize($entity)]);
+    }
+
+    /**
+     * Applies the payload's `design` and `steps` (each only when present) to the entity, or
+     * returns the error response for an unusable one.
+     *
+     * @param array<string, mixed> $payload
+     */
+    private function applyDefinition(OntologyFlow $entity, array $payload): ?JsonResponse
+    {
+        if (\array_key_exists('design', $payload)) {
+            // The design is the editor's own (versioned) canvas representation — stored opaquely;
+            // the editor validates it on load and treats unreadable values as corrupted.
+            if ($payload['design'] !== null && !\is_array($payload['design'])) {
+                return new JsonResponse(['success' => false, 'message' => 'Invalid design.'], 400);
+            }
+            $entity->setDesign($payload['design']);
+        }
+        if (!\array_key_exists('steps', $payload)) {
+            return null;
+        }
+
+        // The same rules an IMPORTED flow must clear — see Manager/FlowStepValidator.
+        $validator = $this->container->get(FlowStepValidator::class);
+        $steps = $validator->normalize($payload['steps']);
+        // Only STRUCTURAL problems block a save (duplicate names): incomplete/invalid step
+        // configs are storable — the editor marks them red and the flow cannot RUN until they are
+        // fixed (the executor re-checks the FULL bar).
+        $structural = $steps === null ? [] : $validator->structuralErrors($steps);
+        $rejection = match (true) {
+            $steps === null => new JsonResponse(['success' => false, 'message' => 'Invalid steps.'], 400),
+            $structural !== [] => new JsonResponse(['success' => false, 'message' => $structural[0]], 422),
+            default => null,
+        };
+        if ($rejection === null) {
+            $entity->setSteps($steps === [] ? null : $steps);
+        }
+
+        return $rejection;
+    }
+
+    /** The 422 for a flow name another flow already carries (names are unique), null when free. */
+    private function nameRejection(OntologyFlow $entity, string $name): ?JsonResponse
+    {
+        $existing = $this->registry()->getRepository(OntologyFlow::class)->findOneBy(['name' => $name]);
+
+        return $existing !== null && $existing->getId() !== $entity->getId()
+            ? new JsonResponse([
+                'success' => false,
+                'message' => $this->trans('aaxis.ontology.flow_manager.name_unique'),
+            ], 422)
+            : null;
     }
 
     /** Trigger step name → flow name; else the stored name; else a generated placeholder. */

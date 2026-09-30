@@ -90,11 +90,14 @@ class ConnectorConfigSecrets
             return false;
         }
         $normalized = strtolower(str_replace(['-', ' '], '_', $key));
-        if (\in_array($normalized, self::SECRET_KEYS, true)) {
-            return true;
-        }
+
+        return \in_array($normalized, self::SECRET_KEYS, true) || $this->hasSecretSuffix($normalized);
+    }
+
+    private function hasSecretSuffix(string $normalizedKey): bool
+    {
         foreach (self::SECRET_SUFFIXES as $suffix) {
-            if (str_ends_with($normalized, $suffix)) {
+            if (str_ends_with($normalizedKey, $suffix)) {
                 return true;
             }
         }

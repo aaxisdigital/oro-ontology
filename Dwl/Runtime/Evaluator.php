@@ -31,6 +31,7 @@ use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\Node;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\NsDirective;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\NullLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\NumberLiteral;
+use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\ObjectEntry;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\ObjectLiteral;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\OutputDirective;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Ast\RangeExpression;
@@ -46,6 +47,15 @@ use Aaxis\Bundle\OntologyBundle\Dwl\Language\Exception\RuntimeException;
 
 class Evaluator
 {
+    /** Java-style (DataWeave) date pattern letters => PHP date() format characters. */
+    private const JAVA_DATE_FORMAT = [
+        'yyyy' => 'Y', 'yy' => 'y', 'MMMM' => 'F', 'MMM' => 'M', 'MM' => 'm', 'M' => 'n',
+        'dd' => 'd', 'd' => 'j', 'EEEE' => 'l', 'EEE' => 'D',
+        'HH' => 'H', 'H' => 'G', 'hh' => 'h', 'h' => 'g', 'mm' => 'i', 'ss' => 's',
+        'SSSSSS' => 'u', 'SSS' => 'v', 'a' => 'A',
+        'XXX' => 'P', 'X' => 'P', 'Z' => 'O', 'z' => 'T',
+    ];
+
     private Environment $env;
     private ?string $outputMimeType = null;
     private array $outputOptions = [];
@@ -195,36 +205,50 @@ class Evaluator
         foreach ($node->entries as $entry) {
             if ($entry->conditional) {
                 // Dynamic/spread entry: (expr)
-                $val = $this->eval($entry->key);
-                if ($val->type === ValueType::Object) {
-                    foreach ($val->data as $pair) {
-                        $entries[] = $pair;
-                    }
-                } elseif ($val->type === ValueType::Array) {
-                    foreach ($val->data as $item) {
-                        if ($item->type === ValueType::Object) {
-                            foreach ($item->data as $pair) {
-                                $entries[] = $pair;
-                            }
-                        }
-                    }
+                foreach ($this->spreadEntries($this->eval($entry->key)) as $pair) {
+                    $entries[] = $pair;
                 }
                 continue;
             }
 
-            // Identifier keys in objects are treated as string literal keys, not variable references
-            // But dynamic keys (from parenthesized expressions) are evaluated as expressions
-            if ($entry->dynamicKey) {
-                $key = $this->eval($entry->key);
-            } elseif ($entry->key instanceof Identifier) {
-                $key = Value::string($entry->key->name);
-            } else {
-                $key = $this->eval($entry->key);
-            }
+            $key = $this->evalObjectKey($entry);
             $value = $this->eval($entry->value);
             $entries[] = [$key, $value];
         }
         return Value::object($entries);
+    }
+
+    /**
+     * The pairs a spread entry contributes: an object's own pairs, the pairs of every object in an
+     * array; anything else contributes nothing.
+     *
+     * @return array<int, array{0: Value, 1: Value}>
+     */
+    private function spreadEntries(Value $val): array
+    {
+        if ($val->type === ValueType::Object) {
+            return $val->data;
+        }
+        $pairs = [];
+        foreach ($val->type === ValueType::Array ? $val->data : [] as $item) {
+            if ($item->type === ValueType::Object) {
+                foreach ($item->data as $pair) {
+                    $pairs[] = $pair;
+                }
+            }
+        }
+        return $pairs;
+    }
+
+    /**
+     * Identifier keys in objects are treated as string literal keys, not variable references —
+     * but dynamic keys (from parenthesized expressions) are evaluated as expressions.
+     */
+    private function evalObjectKey(ObjectEntry $entry): Value
+    {
+        return !$entry->dynamicKey && $entry->key instanceof Identifier
+            ? Value::string($entry->key->name)
+            : $this->eval($entry->key);
     }
 
     private function evalIdentifier(Identifier $node): Value
@@ -298,13 +322,15 @@ class Evaluator
      */
     private function isSimilar(Value $left, Value $right): bool
     {
-        if ($this->isEqual($left, $right)) {
-            return true;
-        }
         $structural = [ValueType::Array, ValueType::Object, ValueType::Function, ValueType::Null];
-        if (in_array($left->type, $structural, true) || in_array($right->type, $structural, true)) {
-            return false;
-        }
+
+        return $this->isEqual($left, $right)
+            || (!in_array($left->type, $structural, true) && !in_array($right->type, $structural, true)
+                && $this->isSimilarScalar($left, $right));
+    }
+
+    private function isSimilarScalar(Value $left, Value $right): bool
+    {
         if ($left->type === ValueType::Number || $right->type === ValueType::Number) {
             $l = trim($this->toString($left));
             $r = trim($this->toString($right));
@@ -317,27 +343,23 @@ class Evaluator
 
     private function subtract(Value $left, Value $right): Value
     {
-        // Object - "key": a new object without every pair of that key (objects are pair lists and
-        // may carry duplicate keys). `obj - 'k' ++ {k: v}` is the DataWeave way to replace a key.
-        if ($left->type === ValueType::Object && $right->type === ValueType::String) {
-            return Value::object(array_values(array_filter(
+        return match (true) {
+            // Object - "key": a new object without every pair of that key (objects are pair lists
+            // and may carry duplicate keys). `obj - 'k' ++ {k: v}` is the DataWeave way to replace
+            // a key.
+            $left->type === ValueType::Object && $right->type === ValueType::String => Value::object(array_values(array_filter(
                 $left->data,
                 fn(array $pair) => $this->toString($pair[0]) !== $right->data
-            )));
-        }
-        // Array - item: a new array without every occurrence of the item (equality, not identity —
-        // same matching as `--`).
-        if ($left->type === ValueType::Array) {
-            return Value::array(array_values(array_filter(
+            ))),
+            // Array - item: a new array without every occurrence of the item (equality, not
+            // identity — same matching as `--`).
+            $left->type === ValueType::Array => Value::array(array_values(array_filter(
                 $left->data,
                 fn(Value $item) => !$this->isEqual($item, $right)
-            )));
-        }
-        $shifted = $this->shiftByPeriod($left, $right, true);
-        if ($shifted !== null) {
-            return $shifted;
-        }
-        return Value::number($this->toNumber($left) - $this->toNumber($right));
+            ))),
+            default => $this->shiftByPeriod($left, $right, true)
+                ?? Value::number($this->toNumber($left) - $this->toNumber($right)),
+        };
     }
 
     /**
@@ -350,12 +372,16 @@ class Evaluator
         if ($period->type !== ValueType::Period) {
             return null;
         }
-        if ($temporal->type === ValueType::Null) {
-            return Value::null();
-        }
-        if ($temporal->type !== ValueType::DateTime && $temporal->type !== ValueType::Date) {
-            return null;
-        }
+
+        return match ($temporal->type) {
+            ValueType::Null => Value::null(),
+            ValueType::DateTime, ValueType::Date => $this->applyPeriod($temporal, $period, $subtract),
+            default => null,
+        };
+    }
+
+    private function applyPeriod(Value $temporal, Value $period, bool $subtract): Value
+    {
         /** @var \DateTimeImmutable $dateTime */
         $dateTime = $temporal->data;
         /** @var \DateInterval $interval */
@@ -372,22 +398,14 @@ class Evaluator
 
     private function concat(Value $left, Value $right): Value
     {
-        if ($left->type === ValueType::String && $right->type === ValueType::String) {
-            return Value::string($left->data . $right->data);
-        }
-        if ($left->type === ValueType::Array && $right->type === ValueType::Array) {
-            return Value::array(array_merge($left->data, $right->data));
-        }
-        if ($left->type === ValueType::Object && $right->type === ValueType::Object) {
-            return Value::object(array_merge($left->data, $right->data));
-        }
-        if ($left->type === ValueType::Array) {
-            return Value::array(array_merge($left->data, [$right]));
-        }
-        if ($right->type === ValueType::Array) {
-            return Value::array(array_merge([$left], $right->data));
-        }
-        return Value::string($this->toString($left) . $this->toString($right));
+        return match (true) {
+            $left->type === ValueType::String && $right->type === ValueType::String => Value::string($left->data . $right->data),
+            $left->type === ValueType::Array && $right->type === ValueType::Array => Value::array(array_merge($left->data, $right->data)),
+            $left->type === ValueType::Object && $right->type === ValueType::Object => Value::object(array_merge($left->data, $right->data)),
+            $left->type === ValueType::Array => Value::array(array_merge($left->data, [$right])),
+            $right->type === ValueType::Array => Value::array(array_merge([$left], $right->data)),
+            default => Value::string($this->toString($left) . $this->toString($right)),
+        };
     }
 
     private function removeAll(Value $left, Value $right): Value
@@ -430,36 +448,50 @@ class Evaluator
 
     private function isEqual(Value $a, Value $b): bool
     {
-        if ($a->type === ValueType::Null && $b->type === ValueType::Null) {
-            return true;
-        }
-        if ($a->type !== $b->type) {
+        return match (true) {
+            $a->type === ValueType::Null && $b->type === ValueType::Null => true,
+            $a->type !== $b->type => false,
+            $a->type === ValueType::Array => $this->arraysEqual($a->data, $b->data),
+            $a->type === ValueType::Object => $this->objectsEqual($a->data, $b->data),
+            default => $a->data === $b->data,
+        };
+    }
+
+    /**
+     * @param Value[] $a
+     * @param Value[] $b
+     */
+    private function arraysEqual(array $a, array $b): bool
+    {
+        if (count($a) !== count($b)) {
             return false;
         }
-        if ($a->type === ValueType::Array) {
-            if (count($a->data) !== count($b->data)) {
+        foreach ($a as $i => $v) {
+            if (!$this->isEqual($v, $b[$i])) {
                 return false;
             }
-            foreach ($a->data as $i => $v) {
-                if (!$this->isEqual($v, $b->data[$i])) {
-                    return false;
-                }
-            }
-            return true;
         }
-        if ($a->type === ValueType::Object) {
-            if (count($a->data) !== count($b->data)) {
+        return true;
+    }
+
+    /**
+     * Pairwise and in order: objects are pair lists, so {a:1, b:2} and {b:2, a:1} differ.
+     *
+     * @param array<int, array{0: Value, 1: Value}> $a
+     * @param array<int, array{0: Value, 1: Value}> $b
+     */
+    private function objectsEqual(array $a, array $b): bool
+    {
+        if (count($a) !== count($b)) {
+            return false;
+        }
+        foreach ($a as $i => [$ka, $va]) {
+            [$kb, $vb] = $b[$i];
+            if (!$this->isEqual($ka, $kb) || !$this->isEqual($va, $vb)) {
                 return false;
             }
-            foreach ($a->data as $i => [$ka, $va]) {
-                [$kb, $vb] = $b->data[$i];
-                if (!$this->isEqual($ka, $kb) || !$this->isEqual($va, $vb)) {
-                    return false;
-                }
-            }
-            return true;
         }
-        return $a->data === $b->data;
+        return true;
     }
 
     private function evalIsType(Value $left, Value $right): Value
@@ -608,8 +640,6 @@ class Evaluator
         }
 
         // Check if the lambda/expression has a default accumulator value
-        $startIdx = 0;
-        $acc = $items[0];
         if ($right instanceof LambdaExpression && count($right->params) >= 2 && $right->params[1]->defaultValue !== null) {
             // Use the default value as initial accumulator, iterate from index 0
             $acc = $this->eval($right->params[1]->defaultValue);
@@ -775,8 +805,7 @@ class Evaluator
     {
         if ($right instanceof MatchExpression || ($right instanceof ObjectLiteral)) {
             // Evaluate match cases
-            $rightVal = $this->eval($right);
-            return $rightVal;
+            return $this->eval($right);
         }
         $rightVal = $this->eval($right);
         if ($rightVal->type === ValueType::Regex) {
@@ -895,20 +924,26 @@ class Evaluator
             return $obj->getKey($prop) ?? Value::null();
         }
         if ($obj->type === ValueType::Array) {
-            // Array of objects: select property from each
-            $results = [];
-            foreach ($obj->data as $item) {
-                if ($item->type === ValueType::Object) {
-                    foreach ($item->data as [$key, $value]) {
-                        if ($this->toString($key) === $node->property) {
-                            $results[] = $value;
-                        }
-                    }
-                }
-            }
-            return Value::array($results);
+            return $this->selectFromEach($obj, $prop);
         }
         return Value::null();
+    }
+
+    /** Array of objects: the property of each object element (every pair with that key). */
+    private function selectFromEach(Value $array, string $property): Value
+    {
+        $results = [];
+        foreach ($array->data as $item) {
+            if ($item->type !== ValueType::Object) {
+                continue;
+            }
+            foreach ($item->data as [$key, $value]) {
+                if ($this->toString($key) === $property) {
+                    $results[] = $value;
+                }
+            }
+        }
+        return Value::array($results);
     }
 
     private function evalIndexAccess(IndexAccess $node): Value
@@ -916,25 +951,33 @@ class Evaluator
         $obj = $this->eval($node->object);
         $index = $this->eval($node->index);
 
-        if ($obj->type === ValueType::Array) {
-            $i = (int) $this->toNumber($index);
-            if ($i < 0) {
-                $i = count($obj->data) + $i;
-            }
-            return $obj->data[$i] ?? Value::null();
+        return match ($obj->type) {
+            ValueType::Array => $this->elementAt($obj, $index),
+            ValueType::Object => $obj->getKey($index->type === ValueType::String ? $index->data : $this->toString($index))
+                ?? Value::null(),
+            ValueType::String => $this->characterAt($obj, $index),
+            default => Value::null(),
+        };
+    }
+
+    /** A negative index counts from the end; out of range is null. */
+    private function elementAt(Value $array, Value $index): Value
+    {
+        $i = (int) $this->toNumber($index);
+        if ($i < 0) {
+            $i = count($array->data) + $i;
         }
-        if ($obj->type === ValueType::Object) {
-            $key = $index->type === ValueType::String ? $index->data : $this->toString($index);
-            return $obj->getKey($key) ?? Value::null();
+        return $array->data[$i] ?? Value::null();
+    }
+
+    /** A negative index counts from the end; out of range is the empty string. */
+    private function characterAt(Value $string, Value $index): Value
+    {
+        $i = (int) $this->toNumber($index);
+        if ($i < 0) {
+            $i = strlen($string->data) + $i;
         }
-        if ($obj->type === ValueType::String) {
-            $i = (int) $this->toNumber($index);
-            if ($i < 0) {
-                $i = strlen($obj->data) + $i;
-            }
-            return Value::string($obj->data[$i] ?? '');
-        }
-        return Value::null();
+        return Value::string($string->data[$i] ?? '');
     }
 
     private function evalMultiValueSelector(MultiValueSelector $node): Value
@@ -1118,10 +1161,19 @@ class Evaluator
             throw new RuntimeException("Invalid date/time '|$text|' at line $line");
         }
         // Without an explicit target the text's own shape decides the flavor.
-        $kind ??= !str_contains($text, ':') ? 'date'
-            : (preg_match('/(Z|[+-]\d{2}:?\d{2})$/i', $text) ? 'datetime' : 'local_datetime');
+        $kind ??= self::temporalKindOf($text);
 
         return Value::dateTime($dateTime, $kind);
+    }
+
+    /** No time part is a date; a time with a zone/offset a datetime; one without a local datetime. */
+    private static function temporalKindOf(string $text): string
+    {
+        return match (true) {
+            !str_contains($text, ':') => 'date',
+            preg_match('/(Z|[+-]\d{2}:?\d{2})$/i', $text) === 1 => 'datetime',
+            default => 'local_datetime',
+        };
     }
 
     /**
@@ -1131,49 +1183,59 @@ class Evaluator
      */
     private static function javaDateFormatToPhp(string $format): string
     {
-        $map = [
-            'yyyy' => 'Y', 'yy' => 'y', 'MMMM' => 'F', 'MMM' => 'M', 'MM' => 'm', 'M' => 'n',
-            'dd' => 'd', 'd' => 'j', 'EEEE' => 'l', 'EEE' => 'D',
-            'HH' => 'H', 'H' => 'G', 'hh' => 'h', 'h' => 'g', 'mm' => 'i', 'ss' => 's',
-            'SSSSSS' => 'u', 'SSS' => 'v', 'a' => 'A',
-            'XXX' => 'P', 'X' => 'P', 'Z' => 'O', 'z' => 'T',
-        ];
         $out = '';
         $i = 0;
         $len = \strlen($format);
         while ($i < $len) {
             $ch = $format[$i];
             if ($ch === "'") {
+                [$piece, $i] = self::quotedFormatLiteral($format, $i + 1);
+            } elseif (!ctype_alpha($ch)) {
+                $piece = $ch;
                 $i++;
-                while ($i < $len && $format[$i] !== "'") {
-                    $out .= '\\' . $format[$i];
-                    $i++;
-                }
-                $i++; // closing quote ('' renders one literal quote as an escaped nothing)
-                continue;
+            } else {
+                $run = str_repeat($ch, strspn($format, $ch, $i));
+                $i += \strlen($run);
+                $piece = self::formatLetterRun($run);
             }
-            if (!ctype_alpha($ch)) {
-                $out .= $ch;
-                $i++;
-                continue;
+            $out .= $piece;
+        }
+        return $out;
+    }
+
+    /**
+     * The escaped text of a quoted literal starting at $start (just past its opening quote), and
+     * the position after its closing quote ('' renders one literal quote as an escaped nothing).
+     *
+     * @return array{0: string, 1: int}
+     */
+    private static function quotedFormatLiteral(string $format, int $start): array
+    {
+        $out = '';
+        $i = $start;
+        $len = \strlen($format);
+        while ($i < $len && $format[$i] !== "'") {
+            $out .= '\\' . $format[$i];
+            $i++;
+        }
+        return [$out, $i + 1];
+    }
+
+    /** A run of one pattern letter, mapped by its longest known prefix; unmapped letters are escaped. */
+    private static function formatLetterRun(string $run): string
+    {
+        $out = '';
+        while ($run !== '') {
+            $piece = $run;
+            while ($piece !== '' && !isset(self::JAVA_DATE_FORMAT[$piece])) {
+                $piece = substr($piece, 0, -1);
             }
-            $run = $ch;
-            while ($i + \strlen($run) < $len && $format[$i + \strlen($run)] === $ch) {
-                $run .= $ch;
-            }
-            $i += \strlen($run);
-            while ($run !== '') {
-                $piece = $run;
-                while ($piece !== '' && !isset($map[$piece])) {
-                    $piece = substr($piece, 0, -1);
-                }
-                if ($piece === '') {
-                    $out .= '\\' . $run[0];
-                    $run = substr($run, 1);
-                } else {
-                    $out .= $map[$piece];
-                    $run = substr($run, \strlen($piece));
-                }
+            if ($piece === '') {
+                $out .= '\\' . $run[0];
+                $run = substr($run, 1);
+            } else {
+                $out .= self::JAVA_DATE_FORMAT[$piece];
+                $run = substr($run, \strlen($piece));
             }
         }
         return $out;
@@ -1261,11 +1323,20 @@ class Evaluator
     {
         return match ($value->type) {
             ValueType::Number => $value->data,
-            ValueType::String => is_numeric($value->data) ? (str_contains($value->data, '.') ? (float) $value->data : (int) $value->data) : 0,
+            ValueType::String => $this->stringToNumber($value->data),
             ValueType::Boolean => $value->data ? 1 : 0,
             ValueType::Null => 0,
             default => 0,
         };
+    }
+
+    /** A numeric string becomes an int, or a float when it carries a decimal point; anything else 0. */
+    private function stringToNumber(string $text): float|int
+    {
+        if (!is_numeric($text)) {
+            return 0;
+        }
+        return str_contains($text, '.') ? (float) $text : (int) $text;
     }
 
     private function assertType(Value $value, ValueType $expected, string $context): void
