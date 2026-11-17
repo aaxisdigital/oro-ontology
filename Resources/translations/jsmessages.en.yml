@@ -326,6 +326,7 @@ aaxis:
             loading: 'Loading…'
             choose_placeholder: 'Choose...'
             catalog_load_error: 'Could not load the options.'
+            connector_refresh: 'Reload connectors'
             config_system_label: 'System'
             config_entity_label: 'Entity'
             config_system_entity_required: 'Please select a system and an entity.'

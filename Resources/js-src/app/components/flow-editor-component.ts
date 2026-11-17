@@ -3011,6 +3011,63 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
+     * A connector select limited to `types`, with a refresh button beside it. The connector
+     * catalog is a page-load snapshot ({@see connectorCatalog}), so a connector created or renamed
+     * in another tab only shows up after the button DROPS the cache and re-fetches it — which also
+     * refreshes every panel opened afterwards. The current selection survives a refresh while that
+     * connector still exists; a failed refresh keeps the options already shown (and flashes the
+     * usual catalog error). `ready` settles once the first fill is done, success or not.
+     */
+    private connectorPicker(types: string[], initialId: string): {$select: any; $el: any; ready: Promise<any>} {
+        const $select = $('<select/>', {'class': 'form-control', disabled: true});
+        $select.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        const refreshLabel = __('aaxis.ontology.flow_editor.connector_refresh');
+        const $refresh = $('<button/>', {
+            type: 'button',
+            'class': 'aaxis-flow-editor__connector-refresh',
+            'data-role': 'connector-refresh',
+            title: refreshLabel,
+            'aria-label': refreshLabel,
+            disabled: true
+        }).append($('<i/>', {'class': 'fa fa-refresh', 'aria-hidden': 'true'}));
+        let loaded = false;
+
+        const fill = (current: string): Promise<any> => this.connectorCatalog()
+            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
+                $select.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
+                (data.records || []).filter(c => types.includes(c.type)).forEach(c => {
+                    $select.append($('<option/>', {
+                        value: String(c.id),
+                        text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
+                        selected: String(c.id) === current
+                    }));
+                });
+                loaded = true;
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')))
+            .finally(() => {
+                $select.prop('disabled', !loaded);
+                $refresh.prop('disabled', false).find('i').removeClass('fa-spin');
+            });
+
+        $refresh.on('click', () => {
+            // Before the first successful load the select holds only "Loading…" — keep the
+            // step's stored connector as the one to reselect.
+            const current = loaded ? String($select.val() || '') : initialId;
+            this.catalogConnectors = null;
+            $select.prop('disabled', true);
+            $refresh.prop('disabled', true).find('i').addClass('fa-spin');
+            fill(current);
+        });
+
+        return {
+            $select,
+            $el: $('<div/>', {'class': 'aaxis-flow-editor__connector-picker'}).append($select, $refresh),
+            ready: fill(initialId)
+        };
+    }
+
+    /**
      * System + Entity pair (entity options follow the chosen system), fed by ONE
      * aaxis_ontology_entity_list fetch. Both values are required. `inline` renders the two
      * selects side by side on one row instead of stacked. `onChange` fires whenever the selected
@@ -3354,15 +3411,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * selection is not Empty.
      */
     private httpRequestSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        const $connector = $('<select/>', {'class': 'form-control', disabled: true});
-        $connector.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        // rest_api connectors only — this step IS an HTTP call.
+        const connectors = this.connectorPicker(['rest_api'], String(initial.connector || ''));
+        const $connector = connectors.$select;
         const $destination = $('<input/>', {
             type: 'text', 'class': 'form-control', maxlength: 128,
             value: String(initial.destination || 'payload')
         });
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
-            this.settingsCol('connector_label', $connector, 1.4),
+            this.settingsCol('connector_label', connectors.$el, 1.4),
             this.settingsCol('destination_label', $destination)
         ));
 
@@ -3392,22 +3450,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         $body.append(bodyContent.$el);
         panel.classList.add('is-wide');
-
-        // rest_api connectors only — this step IS an HTTP call.
-        const connectorsReady = this.connectorCatalog()
-            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
-                const current = String(initial.connector || '');
-                $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-                (data.records || []).filter(c => c.type === 'rest_api').forEach(c => {
-                    $connector.append($('<option/>', {
-                        value: String(c.id),
-                        text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
-                        selected: String(c.id) === current
-                    }));
-                });
-                $connector.prop('disabled', false);
-            })
-            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
 
         // The Body content stays in place whatever the Body selection — it is merely disabled
         // (dimmed, textarea + DWL switch inert) while the request carries no body.
@@ -3446,7 +3488,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
                 return merged;
             },
-            ready: connectorsReady
+            ready: connectors.ready
         };
     }
 
@@ -3458,33 +3500,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * ARRAY = the query runs once per element).
      */
     private sqlQuerySection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        const $connector = $('<select/>', {'class': 'form-control', disabled: true});
-        $connector.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        // Database connectors only — this step IS a SQL call.
+        const connectors = this.connectorPicker(['database'], String(initial.connector || ''));
+        const $connector = connectors.$select;
         const $destination = $('<input/>', {
             type: 'text', 'class': 'form-control', maxlength: 128,
             value: String(initial.destination || 'payload')
         });
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
-            this.settingsCol('connector_label', $connector, 1.4),
+            this.settingsCol('connector_label', connectors.$el, 1.4),
             this.settingsCol('destination_label', $destination)
         ));
-
-        // Database connectors only — this step IS a SQL call.
-        const connectorsReady = this.connectorCatalog()
-            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
-                const current = String(initial.connector || '');
-                $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-                (data.records || []).filter(c => c.type === 'database').forEach(c => {
-                    $connector.append($('<option/>', {
-                        value: String(c.id),
-                        text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
-                        selected: String(c.id) === current
-                    }));
-                });
-                $connector.prop('disabled', false);
-            })
-            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
 
         const sql = createDwlField({
             label: __('aaxis.ontology.flow_editor.sql_label'),
@@ -3530,7 +3557,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
                 return merged;
             },
-            ready: connectorsReady
+            ready: connectors.ready
         };
     }
 
@@ -3630,35 +3657,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * Destination; row 2: the Path field; row 3 (write/rename only): the extra field.
      */
     private fileOpSection(type: string, $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        const $connector = $('<select/>', {'class': 'form-control', disabled: true});
-        $connector.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        // File-based connectors only — these steps talk to a storage.
+        const connectors = this.connectorPicker(['file_system', 'sftp', 'bucket'], String(initial.connector || ''));
+        const $connector = connectors.$select;
         const $destination = $('<input/>', {
             type: 'text', 'class': 'form-control', maxlength: 128,
             value: String(initial.destination || 'payload')
         });
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
-            this.settingsCol('connector_label', $connector, 1.4),
+            this.settingsCol('connector_label', connectors.$el, 1.4),
             this.settingsCol('destination_label', $destination)
         ));
-
-        // File-based connectors only — these steps talk to a storage.
-        const connectorsReady = this.connectorCatalog()
-            .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
-                const current = String(initial.connector || '');
-                $connector.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-                (data.records || [])
-                    .filter(c => ['file_system', 'sftp', 'bucket'].includes(c.type))
-                    .forEach(c => {
-                        $connector.append($('<option/>', {
-                            value: String(c.id),
-                            text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
-                            selected: String(c.id) === current
-                        }));
-                    });
-                $connector.prop('disabled', false);
-            })
-            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
 
         const path = createDwlField({
             label: __('aaxis.ontology.flow_editor.file_path_label'),
@@ -3725,7 +3735,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 }
                 return merged;
             },
-            ready: connectorsReady
+            ready: connectors.ready
         };
     }
 

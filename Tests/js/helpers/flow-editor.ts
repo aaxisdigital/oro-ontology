@@ -478,8 +478,11 @@ export function confirmSettings(): void {
 
 /** The control right after the label with this key suffix (…flow_editor.<key>). */
 export function field(key: string): any {
-    return $('label').filter((_i: number, el: HTMLElement) =>
+    const $next = $('label').filter((_i: number, el: HTMLElement) =>
         el.textContent === `aaxis.ontology.flow_editor.${key}`).first().next();
+
+    // The connector select sits in a wrapper next to its refresh button.
+    return $next.is('.aaxis-flow-editor__connector-picker') ? $next.find('select') : $next;
 }
 
 /** A DWL field's textarea by its label key suffix. */

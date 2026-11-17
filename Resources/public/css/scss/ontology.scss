@@ -2339,6 +2339,40 @@
         min-width: 0;
     }
 
+    // Connector select + the button that re-fetches the (page-load cached) connector catalog.
+    &__connector-picker {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+
+        .form-control {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+    }
+
+    &__connector-refresh {
+        flex: 0 0 34px;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        border: 1px solid #d6dde4;
+        border-radius: 4px;
+        background: #fff;
+        color: #3d6a96;
+        cursor: pointer;
+
+        &:hover:not(:disabled) {
+            background: #f0f6ff;
+        }
+
+        &:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+    }
+
     // Activity indicator inside the Save button while the request is in flight.
     &__save-spinner {
         margin-right: 6px;

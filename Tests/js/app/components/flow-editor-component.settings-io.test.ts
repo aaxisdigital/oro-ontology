@@ -3,8 +3,8 @@ import {describe, expect, it, vi} from 'vitest';
 import messenger from 'oroui/js/messenger';
 import FlowEditorComponent from '../../../../Resources/js-src/app/components/flow-editor-component';
 import {
-    configOf, confirmSettings, createEditor, dwlTextarea, field, flowRecord, flush, mockFetch, openSettings, st, tile,
-    useFlowEditorEnv
+    CONNECTOR_CATALOG, configOf, confirmSettings, createEditor, dwlTextarea, field, flowRecord, flush, mockFetch,
+    openSettings, routes, st, tile, useFlowEditorEnv
 } from '../../helpers/flow-editor';
 
 vi.mock('aaxiscommon/js/app/widgets/dialog', async () => (await import('../../helpers/flow-editor')).dialogModule());
@@ -306,6 +306,93 @@ describe('OntologyFlowEditorComponent — connector-backed settings', () => {
         await open(st('x', type, 'step', 300, 0));
 
         expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', KEY('catalog_load_error'));
+    });
+
+    function $refresh(): any {
+        return $('[data-role="connector-refresh"]');
+    }
+
+    function connectorFetches(spy: any): number {
+        return spy.mock.calls.filter((c: any[]) => String(c[0]).startsWith('/aaxis_ontology_connector_list')).length;
+    }
+
+    it('re-fetches the connector catalog on refresh, keeping the current selection', async () => {
+        const spy = mockFetch();
+        await open(st('h', 'invoke', 'call', 300, 0, {connector: '1', path: '/x', operation: 'get', body: 'empty'}));
+        expect(connectorFetches(spy)).toBe(1);
+        expect($refresh().prop('disabled')).toBe(false);
+
+        routes.aaxis_ontology_connector_list = {body: {records: [
+            ...CONNECTOR_CATALOG.records,
+            {id: 9, name: 'fresh', type: 'rest_api'}
+        ]}};
+        $refresh().trigger('click');
+        expect($refresh().prop('disabled')).toBe(true);
+        expect($refresh().find('i').hasClass('fa-spin')).toBe(true);
+        expect(field('connector_label').prop('disabled')).toBe(true);
+        await flush();
+
+        expect(connectorFetches(spy)).toBe(2);
+        expect(options(field('connector_label'), 'text')).toEqual([KEY('choose_placeholder'), 'api (rest_api · crm)', 'fresh (rest_api)']);
+        expect(field('connector_label').val()).toBe('1');
+        expect(field('connector_label').prop('disabled')).toBe(false);
+        expect($refresh().prop('disabled')).toBe(false);
+        expect($refresh().find('i').hasClass('fa-spin')).toBe(false);
+    });
+
+    it('keeps a choice made before refreshing, and the refreshed catalog serves later panels', async () => {
+        const spy = mockFetch();
+        const editor = await open(st('q', 'sql_query', 'query', 300, 0, {sql: 'select 1'}));
+        routes.aaxis_ontology_connector_list = {body: {records: [
+            {id: 2, name: 'pg', type: 'database'},
+            {id: 7, name: 'pg2', type: 'database'}
+        ]}};
+        field('connector_label').val('2');
+        $refresh().trigger('click');
+        await flush();
+
+        expect(field('connector_label').val()).toBe('2');
+        field('connector_label').val('7');
+        confirmSettings();
+        await flush();
+        expect(configOf(editor, 'query').connector).toBe('7');
+
+        openSettings('query');
+        await flush();
+        expect(connectorFetches(spy)).toBe(2);
+        expect(options(field('connector_label'), 'text')).toEqual([KEY('choose_placeholder'), 'pg (database)', 'pg2 (database)']);
+    });
+
+    it('drops a connector that no longer exists and keeps the old options when a refresh fails', async () => {
+        mockFetch();
+        await open(st('f', 'file_read', 'read file', 300, 0, {connector: '3', path: 'a'}));
+
+        routes.aaxis_ontology_connector_list = new Error('down');
+        $refresh().trigger('click');
+        await flush();
+        expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', KEY('catalog_load_error'));
+        expect(options(field('connector_label'))).toEqual(['', '3', '4']);
+        expect(field('connector_label').val()).toBe('3');
+        expect(field('connector_label').prop('disabled')).toBe(false);
+
+        routes.aaxis_ontology_connector_list = {body: {records: [{id: 4, name: 'box', type: 'sftp'}]}};
+        $refresh().trigger('click');
+        await flush();
+        expect(options(field('connector_label'))).toEqual(['', '4']);
+        expect(field('connector_label').val()).toBe('');
+    });
+
+    it('retries with the stored connector when the first load failed', async () => {
+        mockFetch({aaxis_ontology_connector_list: new Error('down')});
+        await open(st('h', 'invoke', 'call', 300, 0, {connector: '1', path: '/x', operation: 'get', body: 'empty'}));
+        expect(field('connector_label').prop('disabled')).toBe(true);
+        expect($refresh().prop('disabled')).toBe(false);
+
+        routes.aaxis_ontology_connector_list = {body: CONNECTOR_CATALOG};
+        $refresh().trigger('click');
+        await flush();
+        expect(field('connector_label').val()).toBe('1');
+        expect(field('connector_label').prop('disabled')).toBe(false);
     });
 });
 

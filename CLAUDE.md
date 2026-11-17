@@ -696,9 +696,16 @@ by `prefetchCatalogs()` at the end of `initialize()`). The reader/writer panel u
 `aaxis_ontology_entity_list` + `aaxis_ontology_connector_list` on EVERY open, and in dev a round trip
 is ~1.5s of kernel boot (measured; the queries themselves are trivial) — so opening step properties
 took seconds, every time. Consequences to keep in mind: a **failed** fetch is deliberately NOT cached
-(the field resets so the next open retries), and the catalogs are a **page-load snapshot** — a
-connector/entity created in another tab won't appear until the editor page is reloaded. Add new
-panel data sources through the same accessors rather than a bare `fetch`.
+(the field resets so the next open retries), and the catalogs are a **page-load snapshot** — an
+entity/subflow created in another tab won't appear until the editor page is reloaded. CONNECTORS
+have an escape hatch: every connector select (HTTP Request, SQL Query, File Operations) is built by
+`connectorPicker(types, initialId)`, which pairs it with a refresh button
+(`data-role="connector-refresh"`, fa-refresh, `connector_refresh` jsmessage) that nulls
+`catalogConnectors` and re-fetches — so later panels get the fresh list too. The selection survives
+the refresh while the connector still exists (before a first successful load, the step's stored id
+is the one reselected); a failed refresh keeps the options already shown. Add new connector selects
+through `connectorPicker`, and new panel data sources through the same accessors rather than a
+bare `fetch`.
 
 **Flow links**: every tile has an "×" output port on its right edge (vertically centered; `choice`
 has two, at 1/3 and 2/3 height — port 0 GREEN "when the expression matches", port 1 RED "when it
