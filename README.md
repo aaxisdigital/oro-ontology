@@ -152,6 +152,30 @@ past snapshot by walking the history diffs in reverse.
 
 ---
 
+## Async HTTP requests (fire and forget)
+
+An **HTTP Request** flow step normally waits for the response and stores it under its
+destination. Turn its **Async** switch on and the step instead queues the request and lets the flow
+continue straight away. Use this for large batches (e.g. a Foreach Loop pushing thousands of
+records to an API) where the flow does not need the answers.
+
+- The **Destination** is emptied and disabled while Async is on: the response is discarded and
+  nothing is stored. Config: `async: true`, no `destination`.
+- The step resolves everything that needs the flow when it runs. The connector must exist, be
+  `rest_api` and have a server, and a DWL body is evaluated against the current context. A broken
+  definition therefore fails the run before anything is queued.
+- The message (topic **`aaxis_ontology_http_request`**) carries the connector **id**, never its
+  credentials. **`Async/OntologyHttpRequestProcessor`** reads the connector and sends the request
+  with the same transport as a synchronous step (`Manager/RestConnectorClient`: headers, auth, OAuth
+  token reuse, the 401 retry).
+- A failed request (HTTP >= 400, transport error, connector gone) cannot fail the run, which has
+  already moved on. It is logged as an error and recorded as a `log-message` event of that run, and
+  it is **not retried**, because re-sending a POST could duplicate its effect.
+- Requests are sent only while message consumers are running, and with several consumers they may
+  arrive **out of order and in parallel**. Mind the target API's rate limits.
+
+---
+
 ## Moving flows between environments
 
 A flow row's **Export** action downloads it as a self-contained JSON file, and the **Import Flow**

@@ -32,7 +32,8 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
             $this->logger,
             $this->php,
             $this->emitter,
-            $this->createMock(\Aaxis\Bundle\OntologyBundle\Manager\OAuthTokenProvider::class)
+            $this->createMock(\Aaxis\Bundle\OntologyBundle\Manager\RestConnectorClient::class),
+            $this->producer
         );
         $this->em->expects(self::never())->method('flush');
 
@@ -804,14 +805,14 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
      *
      * @param array<int, MockResponse> $responses
      */
-    public function testHttpRequestFailures(?array $connectorConfig, array $responses, string $message, string $type = 'rest_api'): void
+    public function testHttpRequestFailures(?array $connectorConfig, array $responses, string $message, string $type = 'rest_api', array $step = []): void
     {
         $this->connector(7, $type, $connectorConfig);
         $this->responses = $responses;
         $this->files->method('read')->willThrowException(new \RuntimeException('unreachable'));
         $this->expectExceptionMessage($message);
 
-        $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x', 'body' => 'json', 'body_content' => 'nope', 'body_dwl' => true]);
+        $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x'] + $step);
     }
 
     public static function brokenHttpRequests(): array
@@ -824,7 +825,7 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
             'token request fails' => [$oauth(['path' => 't']), [new MockResponse('', ['error' => 'refused'])], 'Step "Step": OAuth token request failed — refused'],
             'no access token' => [$oauth(['path' => 't']), [new MockResponse('{"token_type":"x"}')], 'Step "Step": the OAuth response carries no access_token.'],
             'non-json token' => [$oauth(['path' => 't']), [new MockResponse('nope')], 'Step "Step": the OAuth response carries no access_token.'],
-            'body dwl fails' => [['server' => 'h'], [], "Step \"Step\": Undefined variable: 'nope'"],
+            'body dwl fails' => [['server' => 'h'], [], "Step \"Step\": Undefined variable: 'nope'", 'rest_api', ['body' => 'json', 'body_content' => 'nope', 'body_dwl' => true]],
             'file connector failure' => [null, [], 'Step "Step": unreachable.', 'file_system'],
         ];
     }
@@ -865,6 +866,83 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
         $this->expectExceptionMessage('Step "Step": the configured connector no longer exists.');
 
         $this->runStep('invoke', ['destination' => 'r', 'connector' => 1]);
+    }
+
+    // --- async HTTP request (fire and forget) ---------------------------------------------------
+
+    public function testAsyncHttpRequestIsQueuedAndKeepsNothing(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'https://api', 'auth' => 'oauth', 'oauth' => ['path' => 'token']]);
+        $flow = $this->savedFlow(4, 'Batch');
+
+        $context = $this->runStep('invoke', [
+            'async' => true, 'destination' => 'leftover', 'connector' => 7, 'path' => '/orders',
+            'operation' => 'post', 'body' => 'json', 'body_content' => '{id: payload.id}', 'body_dwl' => true,
+        ], ['id' => 3], $flow);
+
+        // Nothing is sent inline (not even the OAuth token request) and nothing is stored — a
+        // destination left in the config is ignored.
+        self::assertSame([], $this->requests);
+        self::assertSame(['flowUuid', 'payload'], array_keys($context));
+        self::assertSame([[
+            'aaxis_ontology_http_request',
+            [
+                'connector_id' => 7, 'method' => 'POST', 'path' => '/orders', 'body' => '{"id":3}', 'body_type' => 'json',
+                'step' => 'Step', 'flow_id' => 4, 'flow_name' => 'Batch', 'flow_uuid' => 'run-uuid',
+            ],
+        ]], $this->queued);
+        self::assertSame(['flow-start', 'step', 'step', 'flow-finish'], $this->eventKinds());
+    }
+
+    public function testAsyncHttpRequestWithoutBodyQueuesNone(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'h']);
+
+        $this->runStep('invoke', ['async' => true, 'connector' => 7, 'path' => 'x', 'body' => 'json', 'body_content' => '']);
+
+        self::assertSame(
+            ['connector_id' => 7, 'method' => 'GET', 'path' => 'x', 'body' => null, 'body_type' => 'json', 'step' => 'Step', 'flow_id' => null, 'flow_name' => null, 'flow_uuid' => 'run-uuid'],
+            $this->queued[0][1]
+        );
+    }
+
+    /**
+     * A broken definition fails the run BEFORE anything is queued — not once per queued call.
+     *
+     * @dataProvider brokenAsyncRequests
+     */
+    public function testAsyncHttpRequestFailuresAreRaisedBeforeQueueing(string $type, ?array $connectorConfig, array $step, string $message): void
+    {
+        $this->connector(7, $type, $connectorConfig);
+
+        try {
+            $this->runStep('invoke', $step + ['async' => true, 'connector' => 7, 'path' => 'x']);
+            self::fail('Expected a failure.');
+        } catch (FlowStepFailure $e) {
+            self::assertStringStartsWith($message, $e->getMessage());
+        }
+        self::assertSame([], $this->queued);
+        self::assertSame([], $this->requests);
+    }
+
+    public static function brokenAsyncRequests(): array
+    {
+        return [
+            'missing connector' => ['rest_api', ['server' => 'h'], ['connector' => 99], 'Step "Step": the configured connector no longer exists.'],
+            'not rest_api' => ['file_system', null, [], 'Step "Step": async requests need a rest_api connector, not "file_system".'],
+            'no server' => ['rest_api', null, [], 'Step "Step": the connector has no server configured.'],
+            'body dwl fails' => ['rest_api', ['server' => 'h'], ['body' => 'json', 'body_content' => 'nope', 'body_dwl' => true], "Step \"Step\": Undefined variable: 'nope'"],
+        ];
+    }
+
+    public function testAsyncHttpRequestThatCannotBeQueuedFailsTheStep(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'h']);
+        $this->queueFailure = new \RuntimeException('broker down');
+        $this->expectException(FlowStepFailure::class);
+        $this->expectExceptionMessage('Step "Step": the request could not be queued — broker down');
+
+        $this->runStep('invoke', ['async' => true, 'connector' => 7, 'path' => 'x']);
     }
 
     // --- subflows ------------------------------------------------------------------------------

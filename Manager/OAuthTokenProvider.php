@@ -13,7 +13,7 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  * REUSED, instead of one token request per HTTP Request step (a 500-element foreach used to make
  * 500 token calls, and token endpoints commonly rate-limit).
  *
- * - A token whose response carries `expires_in` goes to the shared cache (cache.app) until shortly
+ * - A token whose response carries `expires_in` goes to the shared cache (aaxis_ontology.cache) until shortly
  *   before it expires (10% of its lifetime, at most 60s, earlier), so every run, process and user
  *   of the connector shares it.
  * - A token WITHOUT `expires_in` has no known lifetime: it is kept in memory for the run that

@@ -8,12 +8,14 @@ use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
+use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyHttpRequestTopic;
+use Aaxis\Bundle\OntologyBundle\Exception\ConnectorRequestFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowExecutionFailure;
-use Aaxis\Bundle\OntologyBundle\Exception\OAuthTokenFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
 use Doctrine\Persistence\ManagerRegistry;
+use Oro\Component\MessageQueue\Client\MessageProducerInterface;
 use Symfony\Contracts\HttpClient\HttpClientInterface;
 use Psr\Log\LoggerInterface;
 
@@ -32,10 +34,12 @@ use Psr\Log\LoggerInterface;
  *    config; `by_id` = one record's payload — a MISSING record yields null, not an error;
  *    `by_attribute` = the LIST of records whose attribute equals the value, [] when none match).
  *    Internal-system entities read from the OroCommerce entity itself ({@see OroEntityReader});
- *  - invoke ("HTTP Request"): the rest_api connector call executes for real (URL from the
- *    connector's server/port + the step's path; connector headers + auth headers; auth=oauth
- *    attaches an access_token from the token path, REUSED across calls while valid — see
- *    {@see OAuthTokenProvider}; the step's operation/body are honoured);
+ *  - invoke ("HTTP Request"): the rest_api connector call executes for real through
+ *    {@see RestConnectorClient} (URL from the connector's server/port + the step's path;
+ *    connector headers + auth headers; auth=oauth attaches an access_token from the token path,
+ *    REUSED across calls while valid; the step's operation/body are honoured). With `async: true`
+ *    the step has NO destination: the request is queued ({@see OntologyHttpRequestTopic}) and the
+ *    flow moves on at once — the consumer sends it and discards the response;
  *  - dwl_transform: runs the step's DataWeave script with the whole context as variables (also
  *    reachable as one `context` object, e.g. context["flowUuid"]);
  *  - entity_write: performs the real upsert SYNCHRONOUSLY (same validation and PG function as
@@ -95,7 +99,8 @@ class FlowDebugExecutor
         private readonly LoggerInterface $logger,
         private readonly PhpMethodInvoker $phpInvoker,
         private readonly OntologyFlowEventEmitter $flowEvents,
-        private readonly OAuthTokenProvider $oauthTokens,
+        private readonly RestConnectorClient $rest,
+        private readonly MessageProducerInterface $producer,
     ) {
     }
 
@@ -971,7 +976,7 @@ class FlowDebugExecutor
         if (!\is_array($config)) {
             throw new FlowExecutionFailure(sprintf(self::NOT_CONFIGURED, $step['name']));
         }
-        if (\in_array($step['type'], self::DESTINATIONLESS_STEP_TYPES, true)) {
+        if (\in_array($step['type'], self::DESTINATIONLESS_STEP_TYPES, true) || self::isAsyncRequest($step['type'], $config)) {
             $this->executeDestinationlessStep($step, $config, $context, $flow, $executionUuid);
         } else {
             $destination = trim((string) ($config['destination'] ?? ''));
@@ -980,6 +985,17 @@ class FlowDebugExecutor
             }
             $context[$destination] = $this->stepResult($step, $config, $context, $flow, $executionUuid);
         }
+    }
+
+    /**
+     * An ASYNC "HTTP Request" (fire and forget): it has no destination — nothing of its response
+     * is kept — so it runs among the destinationless steps.
+     *
+     * @param array<string, mixed> $config
+     */
+    private static function isAsyncRequest(string $type, array $config): bool
+    {
+        return $type === 'invoke' && ($config['async'] ?? false) === true;
     }
 
     /**
@@ -1022,6 +1038,9 @@ class FlowDebugExecutor
             // Event queues a log-message flow event with the resolved value as the message.
             $text = $this->messageText($step['name'], $config, 'value', $context);
             $this->flowEvents->emit($flow, $executionUuid, 'log-message', ['message' => $text]);
+        } elseif ($step['type'] === 'invoke') {
+            // An ASYNC HTTP Request: queued for the HTTP-request consumer, response discarded.
+            $this->queueRestRequest($step['name'], $config, $context, $flow, $executionUuid);
         } else {
             // MS Teams fires the configured Power Automate webhook with the current payload as a
             // Teams message and the flow simply continues.
@@ -1652,82 +1671,100 @@ class FlowDebugExecutor
     }
 
     /**
-     * Performs the REST call a rest_api connector reader describes. Secrets are stored in clear
-     * in the connector config (masking is a render-time concern), so they can be used directly.
-     *
-     * OAuth connectors reuse their access token ({@see OAuthTokenProvider}); when the API answers
-     * 401 to a REUSED token (revoked, or expired before its announced lifetime), it is dropped and
-     * the call is retried ONCE with a freshly fetched one. A fresh token's 401 is final.
+     * Performs the REST call a synchronous HTTP Request step describes (the transport, auth and
+     * OAuth-token reuse live in {@see RestConnectorClient}); the response is the step's result.
      *
      * @param array<string, mixed> $stepConfig
-     * @param array<string, mixed> $context available to a DWL-toggled body (body_dwl)
+     * @param array<string, mixed> $context    available to a DWL-toggled body (body_dwl)
      */
     private function executeRestRead(string $stepName, OntologyConnector $connector, array $stepConfig, array $context): mixed
     {
-        $connectorConfig = $connector->getConfig() ?? [];
-        $base = trim((string) ($connectorConfig['server'] ?? ''));
-        if ($base === '') {
-            throw new FlowExecutionFailure(sprintf('Step "%s": the connector has no server configured.', $stepName));
-        }
-        if (!preg_match('#^https?://#i', $base)) {
-            $base = 'https://' . $base;
-        }
-        $base = rtrim($base, '/');
-        $port = (int) ($connectorConfig['port'] ?? 0);
-        if ($port > 0 && parse_url($base, PHP_URL_PORT) === null) {
-            $base .= ':' . $port;
-        }
-        $url = $base . '/' . ltrim((string) ($stepConfig['path'] ?? ''), '/');
+        $request = $this->restRequest($stepName, $stepConfig, $context);
 
-        $headers = $this->stringMap($connectorConfig['headers'] ?? null);
-        $auth = (string) ($connectorConfig['auth'] ?? 'none');
-        if ($auth === 'headers') {
-            $headers = array_merge($headers, $this->stringMap($connectorConfig['auth_headers'] ?? null));
+        try {
+            return $this->rest->send($connector, $request['method'], $request['path'], $request['body'], $request['body_type'], self::runId($context));
+        } catch (ConnectorRequestFailure $e) {
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
-        $oauth = null;
-        if ($auth === 'oauth') {
-            $oauth = $this->oauthAuthorization($stepName, $connector, $base, $context);
-            $headers['Authorization'] = $oauth['authorization'];
+    }
+
+    /**
+     * An ASYNC HTTP Request step: everything that needs the flow is resolved NOW — the connector
+     * (must exist, be rest_api and have a server, so a broken definition fails the run instead of
+     * every queued call) and the body (a DWL body is evaluated against the current context) — then
+     * the request is queued and the flow moves on. The consumer
+     * ({@see \Aaxis\Bundle\OntologyBundle\Async\OntologyHttpRequestProcessor}) sends it and
+     * DISCARDS the response; its failures surface as log-message events of this run.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     */
+    private function queueRestRequest(string $stepName, array $config, array $context, ?OntologyFlow $flow, string $executionUuid): void
+    {
+        $connector = $this->connectorOf($stepName, $config);
+        if ($connector->getType() !== OntologyConnector::TYPE_REST_API) {
+            throw self::stepFailure($stepName, sprintf('async requests need a rest_api connector, not "%s".', (string) $connector->getType()));
+        }
+        try {
+            $this->rest->baseUrl($connector);
+        } catch (ConnectorRequestFailure $e) {
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
+        }
+        $request = $this->restRequest($stepName, $config, $context);
+
+        try {
+            $this->producer->send(OntologyHttpRequestTopic::getName(), [
+                'connector_id' => $connector->getId(),
+                'method' => $request['method'],
+                'path' => $request['path'],
+                'body' => $request['body'],
+                'body_type' => $request['body_type'],
+                'step' => $stepName,
+                'flow_id' => $flow?->getId(),
+                'flow_name' => $flow?->getName(),
+                'flow_uuid' => $executionUuid,
+            ]);
+        } catch (\Throwable $e) {
+            throw self::stepFailure($stepName, 'the request could not be queued — ' . $e->getMessage(), $e);
+        }
+    }
+
+    /**
+     * The request an HTTP Request step's config describes. The body is present only when the Body
+     * type is not "empty" and the content is filled; the DWL toggle turns it into an expression
+     * over the context — a string result is sent verbatim, anything else as its JSON form.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array{method: string, path: string, body: string|null, body_type: string}
+     */
+    private function restRequest(string $stepName, array $config, array $context): array
+    {
+        $bodyType = (string) ($config['body'] ?? 'empty');
+        $body = (string) ($config['body_content'] ?? '');
+        if ($bodyType === 'empty' || $body === '') {
+            $body = null;
+        } elseif (($config['body_dwl'] ?? false) === true) {
+            $body = $this->renderDwl($stepName, $body, $context);
         }
 
-        $options = [
-            'headers' => $headers,
-            'timeout' => self::TIMEOUT,
-            'max_redirects' => 5,
-            // Internal endpoints commonly run self-signed certs — same policy as the toolbox proxy.
-            'verify_peer' => false,
-            'verify_host' => false,
+        return [
+            'method' => strtoupper((string) ($config['operation'] ?? 'get')) ?: 'GET',
+            'path' => (string) ($config['path'] ?? ''),
+            'body' => $body,
+            'body_type' => $bodyType,
         ];
-        $bodyType = (string) ($stepConfig['body'] ?? 'empty');
-        $bodyContent = (string) ($stepConfig['body_content'] ?? '');
-        if ($bodyType !== 'empty' && $bodyContent !== '') {
-            // The DWL toggle turns the body into an expression over the context; a string result
-            // is sent verbatim, anything else as its JSON representation.
-            if (($stepConfig['body_dwl'] ?? false) === true) {
-                $bodyContent = $this->renderDwl($stepName, $bodyContent, $context);
-            }
-            $options['body'] = $bodyContent;
-            $options['headers']['Content-Type'] = match ($bodyType) {
-                'json' => 'application/json',
-                'xml' => 'application/xml',
-                default => 'text/plain',
-            };
-        }
-        $method = strtoupper((string) ($stepConfig['operation'] ?? 'get')) ?: 'GET';
+    }
 
-        [$status, $content] = $this->sendRestRequest($stepName, $method, $url, $options);
-        if ($status === 401 && $oauth !== null && $oauth['cached']) {
-            $this->oauthTokens->invalidate($connector->getId());
-            $options['headers']['Authorization'] = $this->oauthAuthorization($stepName, $connector, $base, $context)['authorization'];
-            [$status, $content] = $this->sendRestRequest($stepName, $method, $url, $options);
-        }
-        if ($status >= 400) {
-            throw new FlowExecutionFailure(sprintf('Step "%s": the connector responded HTTP %d.', $stepName, $status));
-        }
-
-        $decoded = json_decode($content, true);
-
-        return json_last_error() === JSON_ERROR_NONE ? $decoded : $content;
+    /**
+     * The run's flowUuid — scopes OAuth tokens of unknown lifetime to the run.
+     *
+     * @param array<string, mixed> $context
+     */
+    private static function runId(array $context): ?string
+    {
+        return \is_string($context['flowUuid'] ?? null) && $context['flowUuid'] !== '' ? $context['flowUuid'] : null;
     }
 
     /**
@@ -1741,60 +1778,5 @@ class FlowDebugExecutor
         $result = $this->transformForStep($stepName, $code, $context);
 
         return \is_string($result) ? $result : (string) json_encode($result);
-    }
-
-    /**
-     * @param array<string, mixed> $options
-     *
-     * @return array{0: int, 1: string} status code + body
-     */
-    private function sendRestRequest(string $stepName, string $method, string $url, array $options): array
-    {
-        try {
-            $response = $this->httpClient->request($method, $url, $options);
-
-            return [$response->getStatusCode(), $response->getContent(false)];
-        } catch (\Throwable $e) {
-            throw self::stepFailure($stepName, $e->getMessage(), $e);
-        }
-    }
-
-    /**
-     * The connector's OAuth Authorization header value (reused while valid — see
-     * {@see OAuthTokenProvider}); a token that cannot be obtained fails the step.
-     *
-     * @param array<string, mixed> $context its flowUuid scopes tokens of unknown lifetime to the run
-     *
-     * @return array{authorization: string, cached: bool}
-     */
-    private function oauthAuthorization(string $stepName, OntologyConnector $connector, string $base, array $context): array
-    {
-        $config = $connector->getConfig() ?? [];
-        $oauth = \is_array($config['oauth'] ?? null) ? $config['oauth'] : [];
-        $runId = \is_string($context['flowUuid'] ?? null) && $context['flowUuid'] !== '' ? $context['flowUuid'] : null;
-
-        try {
-            return $this->oauthTokens->authorization($connector->getId(), $base, $oauth, $runId);
-        } catch (OAuthTokenFailure $e) {
-            throw new FlowExecutionFailure(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
-        }
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    private function stringMap(mixed $value): array
-    {
-        if (!\is_array($value)) {
-            return [];
-        }
-        $map = [];
-        foreach ($value as $key => $item) {
-            if (\is_string($key) && $key !== '' && is_scalar($item)) {
-                $map[$key] = (string) $item;
-            }
-        }
-
-        return $map;
     }
 }

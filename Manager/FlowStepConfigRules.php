@@ -52,8 +52,10 @@ final class FlowStepConfigRules
             'entity_read' => self::destinationOk($config) && self::entityReadOk($config),
             'entity_write' => self::destinationOk($config) && self::entityWriteOk($config),
             // "HTTP Request": a rest_api connector call — connector/operation/path/body shape, the
-            // response stored under the destination.
-            'invoke' => self::destinationOk($config) && self::connectorOk($config),
+            // response stored under the destination. An ASYNC one (fire and forget) keeps nothing,
+            // so it needs no destination (one left in the config is ignored).
+            'invoke' => (($config['async'] ?? false) === true || self::destinationOk($config))
+                && self::boolOk($config, 'async') && self::connectorOk($config),
             'file_read', 'file_list', 'file_delete' => self::destinationOk($config) && self::fileOpOk($config),
             'file_write' => self::destinationOk($config) && self::fileOpOk($config)
                 && self::filled($config, 'content') && self::boolOk($config, 'content_dwl'),

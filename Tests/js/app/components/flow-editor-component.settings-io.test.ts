@@ -219,6 +219,47 @@ describe('OntologyFlowEditorComponent — connector-backed settings', () => {
         expect(tile('call').classList.contains('is-config-invalid')).toBe(true);
     });
 
+    it('makes an HTTP request async: the destination empties, goes inert and leaves the config', async () => {
+        const editor = await open(st('h', 'invoke', 'call', 300, 0, {connector: '1', path: '/x', operation: 'post', body: 'empty', destination: 'resp'}));
+        const $async = field('http_async_label').find('input');
+        const $destination = field('destination_label');
+
+        expect($async.prop('checked')).toBe(false);
+        expect($destination.prop('disabled')).toBe(false);
+        $async.prop('checked', true).trigger('change');
+        expect($destination.val()).toBe('');
+        expect($destination.prop('disabled')).toBe(true);
+        expect($destination.attr('placeholder')).toBe(KEY('http_async_destination_placeholder'));
+        confirmSettings();
+
+        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/x', body: 'empty', async: true});
+        expect(tile('call').classList.contains('is-config-invalid')).toBe(false);
+
+        // Reopened: still async and empty; switching it off brings a destination back (the
+        // `payload` default — an async step keeps none in its config).
+        openSettings('call');
+        await flush();
+        expect(field('http_async_label').find('input').prop('checked')).toBe(true);
+        expect(field('destination_label').val()).toBe('');
+        expect(field('destination_label').prop('disabled')).toBe(true);
+        field('http_async_label').find('input').prop('checked', false).trigger('change');
+        expect(field('destination_label').prop('disabled')).toBe(false);
+        expect(field('destination_label').attr('placeholder')).toBe('');
+        confirmSettings();
+        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/x', body: 'empty', destination: 'payload'});
+    });
+
+    it('gives back the destination typed before Async was switched on', async () => {
+        await open(st('h', 'invoke', 'call', 300, 0, {connector: '1', path: '/x', operation: 'get', body: 'empty', destination: 'resp'}));
+        const $async = field('http_async_label').find('input');
+
+        field('destination_label').val('orders');
+        $async.prop('checked', true).trigger('change');
+        $async.prop('checked', false).trigger('change');
+
+        expect(field('destination_label').val()).toBe('orders');
+    });
+
     it('configures a SQL query against a database connector with optional bindings', async () => {
         const editor = await open(st('q', 'sql_query', 'query', 300, 0, {connector: '2', sql: 'select 1'}));
 

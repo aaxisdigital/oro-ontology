@@ -6,3 +6,13 @@
 oro_security:
     access_control:
         - { path: '^/api/aaxis/ontology/flow/', roles: 'PUBLIC_ACCESS' }
+
+# State that must be visible to EVERY node (web nodes behind the load balancer, the job node):
+# debug sessions between steps and reused OAuth tokens. Symfony's cache.app is node-local files
+# unless the application reconfigures it; Oro's persistent adapter is Redis wherever Redis is
+# configured (OroCloud) and files otherwise (single-node/local installs).
+framework:
+    cache:
+        pools:
+            aaxis_ontology.cache:
+                adapter: oro.cache.adapter.persistent

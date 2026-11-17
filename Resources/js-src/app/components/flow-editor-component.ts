@@ -3406,9 +3406,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     /**
      * HTTP Request (type `invoke`): a rest_api connector call, the response stored under the
-     * destination. Row 1: Name | Connector (rest_api only) | Destination; row 2: Operation | Path
-     * | Body; row 3: the Body content DWL field — always visible, enabled only while the Body
-     * selection is not Empty.
+     * destination. Row 1: Name | Connector (rest_api only) | Destination | Async; row 2: Operation
+     * | Path | Body; row 3: the Body content DWL field — always visible, enabled only while the
+     * Body selection is not Empty. Async (`async: true`) = fire and forget: the request is queued
+     * and the flow moves on without its response, so the Destination is emptied and disabled while
+     * the switch is on (and left out of the config).
      */
     private httpRequestSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
         // rest_api connectors only — this step IS an HTTP call.
@@ -3418,11 +3420,33 @@ class OntologyFlowEditorComponent extends BaseComponent {
             type: 'text', 'class': 'form-control', maxlength: 128,
             value: String(initial.destination || 'payload')
         });
+        const async = this.plainSwitch(initial.async === true, 'http_async_hint');
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
             this.settingsCol('connector_label', connectors.$el, 1.4),
-            this.settingsCol('destination_label', $destination)
+            this.settingsCol('destination_label', $destination),
+            this.settingsCol('http_async_label', async.$switch, 0.4)
         ));
+
+        // While Async is on the Destination is empty and inert; the name it held comes back when
+        // the switch goes off again (or the `payload` default, for a step saved as async).
+        let keptDestination = String(initial.destination || 'payload');
+        const syncDestination = (): void => {
+            const isAsync = async.isOn();
+            if (isAsync) {
+                const typed = String($destination.val() || '').trim();
+                if (typed !== '') {
+                    keptDestination = typed;
+                }
+                $destination.val('');
+            } else if (String($destination.val() || '').trim() === '') {
+                $destination.val(keptDestination);
+            }
+            $destination.prop('disabled', isAsync)
+                .attr('placeholder', isAsync ? __('aaxis.ontology.flow_editor.http_async_destination_placeholder') : '');
+        };
+        async.$switch.find('input').on('change', syncDestination);
+        syncDestination();
 
         const $operation = $('<select/>', {'class': 'form-control'});
         ['get', 'put', 'post', 'patch', 'delete'].forEach(op => $operation.append($('<option/>', {
@@ -3471,7 +3495,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (String($path.val() || '').trim() === '') {
                     return __('aaxis.ontology.flow_editor.reader_path_required');
                 }
-                return this.destinationError($destination);
+                return async.isOn() ? '' : this.destinationError($destination);
             },
             merge: config => {
                 const merged: Record<string, any> = {
@@ -3479,9 +3503,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     connector: String($connector.val()),
                     operation: String($operation.val()),
                     path: String($path.val() || '').trim(),
-                    body: String($bodyType.val()),
-                    destination: String($destination.val() || '').trim()
+                    body: String($bodyType.val())
                 };
+                if (async.isOn()) {
+                    merged.async = true;
+                } else {
+                    merged.destination = String($destination.val() || '').trim();
+                }
                 if (merged.body !== 'empty') {
                     merged.body_content = bodyContent.value();
                     merged.body_dwl = bodyContent.isDwl();

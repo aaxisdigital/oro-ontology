@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Exception;
 
 use Aaxis\Bundle\OntologyBundle\Exception\BucketRequestFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\ConnectorConfigurationException;
+use Aaxis\Bundle\OntologyBundle\Exception\ConnectorRequestFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\ConnectorTransferFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\DatabaseQueryFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\EndpointResponseFailure;
@@ -42,6 +43,7 @@ class ExceptionsTest extends TestCase
         return [
             'bucket request' => [BucketRequestFailure::class],
             'connector configuration' => [ConnectorConfigurationException::class],
+            'connector request' => [ConnectorRequestFailure::class],
             'database query' => [DatabaseQueryFailure::class],
             'connector transfer' => [ConnectorTransferFailure::class],
             'endpoint response' => [EndpointResponseFailure::class],

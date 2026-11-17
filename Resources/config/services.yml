@@ -74,14 +74,23 @@ services:
             - '@aaxis_ontology.flow_logger'
             - '@Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\RestConnectorClient'
+            - '@oro_message_queue.client.message_producer'
+
+    # Sends ONE request through a rest_api connector (URL, headers, auth, OAuth-token reuse) — the
+    # HTTP Request step's transport, shared by the executor (sync) and the async consumer.
+    Aaxis\Bundle\OntologyBundle\Manager\RestConnectorClient:
+        arguments:
+            - '@http_client'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OAuthTokenProvider'
 
-    # OAuth access tokens of rest_api connectors, reused while valid (cache.app, keyed by
-    # connector id) instead of one token request per HTTP Request step.
+    # OAuth access tokens of rest_api connectors, reused while valid (the shared
+    # aaxis_ontology.cache pool, keyed by connector id) instead of one token request per HTTP
+    # Request step.
     Aaxis\Bundle\OntologyBundle\Manager\OAuthTokenProvider:
         arguments:
             - '@http_client'
-            - '@cache.app'
+            - '@aaxis_ontology.cache'
 
     # The "Invoke PHP" step's engine. The first argument is a placeholder: InvokableServicesPass
     # replaces it with a class-keyed service locator over EVERY container service; the System
@@ -124,7 +133,7 @@ services:
             - '@logger'
             - '@oro_config.global'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
-            - '@cache.app'
+            - '@aaxis_ontology.cache'
             - '@Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore'
 
     # Resolves + runs the flow whose Endpoint trigger matches an incoming API request
@@ -252,5 +261,19 @@ services:
             - '@doctrine'
             - '@logger'
             - '@Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore'
+        tags:
+            - { name: oro_message_queue.client.message_processor }
+
+    # Message queue: ASYNC "HTTP Request" flow steps (fire and forget — responses are discarded).
+    Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyHttpRequestTopic:
+        tags:
+            - { name: oro_message_queue.topic }
+
+    Aaxis\Bundle\OntologyBundle\Async\OntologyHttpRequestProcessor:
+        arguments:
+            - '@doctrine'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\RestConnectorClient'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
+            - '@logger'
         tags:
             - { name: oro_message_queue.client.message_processor }

@@ -17,9 +17,11 @@ use Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter;
 use Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker;
+use Aaxis\Bundle\OntologyBundle\Manager\RestConnectorClient;
 use Doctrine\Persistence\ManagerRegistry;
 use Doctrine\Persistence\ObjectManager;
 use Doctrine\Persistence\ObjectRepository;
+use Oro\Component\MessageQueue\Client\MessageProducerInterface;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
@@ -29,8 +31,8 @@ use Symfony\Component\HttpClient\Response\MockResponse;
 
 /**
  * Shared harness for the FlowDebugExecutor tests: every collaborator is a mock, the HTTP client a
- * MockHttpClient fed from $responses, and every emitted flow event is recorded in $events as
- * [event, flow name, payload].
+ * MockHttpClient fed from $responses, every emitted flow event is recorded in $events as
+ * [event, flow name, payload] and every queued message in $queued as [topic, body].
  */
 abstract class FlowDebugExecutorTestCase extends TestCase
 {
@@ -43,9 +45,10 @@ abstract class FlowDebugExecutorTestCase extends TestCase
     protected LoggerInterface&MockObject $logger;
     protected PhpMethodInvoker&MockObject $php;
     protected OntologyFlowEventEmitter&MockObject $emitter;
+    protected MessageProducerInterface&MockObject $producer;
     protected FlowDebugExecutor $executor;
 
-    /** The OAuth token cache (cache.app in the app) — real, so token reuse is exercised. */
+    /** The OAuth token cache (aaxis_ontology.cache in the app) — real, so token reuse is exercised. */
     protected ArrayAdapter $oauthCache;
 
     /** @var array<int, MockResponse> */
@@ -56,6 +59,12 @@ abstract class FlowDebugExecutorTestCase extends TestCase
 
     /** @var array<int, array{0: string, 1: string|null, 2: array<string, mixed>}> */
     protected array $events = [];
+
+    /** @var array<int, array{0: string, 1: mixed}> messages sent to the queue: [topic, body] */
+    protected array $queued = [];
+
+    /** When set, the message producer throws it instead of queueing. */
+    protected ?\Throwable $queueFailure = null;
 
     /** @var array<int, OntologyFlow> */
     protected array $flows = [];
@@ -90,6 +99,13 @@ abstract class FlowDebugExecutorTestCase extends TestCase
         $this->emitter->method('emitRaw')->willReturnCallback(function (?int $id, ?string $name, ?string $uuid, string $event, array $payload = []): void {
             $this->events[] = [$event, $name, $payload];
         });
+        $this->producer = $this->createMock(MessageProducerInterface::class);
+        $this->producer->method('send')->willReturnCallback(function (string $topic, mixed $body): void {
+            if ($this->queueFailure !== null) {
+                throw $this->queueFailure;
+            }
+            $this->queued[] = [$topic, $body];
+        });
         $http = new MockHttpClient(function (string $method, string $url, array $options): MockResponse {
             $this->requests[] = ['method' => $method, 'url' => $url, 'options' => $options];
 
@@ -107,7 +123,8 @@ abstract class FlowDebugExecutorTestCase extends TestCase
             $this->logger,
             $this->php,
             $this->emitter,
-            new OAuthTokenProvider($http, $this->oauthCache = new ArrayAdapter())
+            new RestConnectorClient($http, new OAuthTokenProvider($http, $this->oauthCache = new ArrayAdapter())),
+            $this->producer
         );
     }
 

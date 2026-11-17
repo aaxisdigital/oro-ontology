@@ -790,7 +790,22 @@ rest_api reader): row 1 `Name | Connector (rest_api only — the catalog is filt
 Destination`, row 2 `Operation | Path | Body`, row 3 the Body-content DWL field ALWAYS visible but
 disabled (`.aaxis-dwl-field--disabled` + textarea/switch inert) while Body = Empty. The TYPE key
 stays `invoke` (only the label changed) so stored designs keep validating; validator arm:
-`destinationOk && connectorOk`, body_content DWL-checked via `stepDwlSnippets`.
+`(async || destinationOk) && boolOk(async) && connectorOk`, body_content DWL-checked via `stepDwlSnippets`.
+**ASYNC** (2026-11-17, for large batches): row 1 ends with an `Async` switch (`plainSwitch`, config
+`async: true`). While it is on, the Destination is EMPTIED and DISABLED, and `merge()` leaves
+`destination` out (a value typed before comes back if the switch goes off again). The validator
+ignores a leftover destination on an async step. Executor: `isAsyncRequest()` routes the step
+through `executeDestinationlessStep` → `queueRestRequest()`. That checks the connector (exists,
+rest_api, has a server) and renders the DWL body against the CURRENT context, then sends ONE message
+on topic `aaxis_ontology_http_request` (`{connector_id, method, path, body (rendered|null),
+body_type, step, flow_id, flow_name, flow_uuid}`; the connector travels by ID, never its secrets)
+and the flow continues. `Async/OntologyHttpRequestProcessor` loads the connector and sends the
+request through the SAME `Manager/RestConnectorClient` as the sync path, then DISCARDS the response.
+On failure it logs an error and emits a `log-message` event on the queuing run (`Step "<name>" (async
+HTTP request): …`), then REJECTS the message with no retry (re-sending a POST could duplicate its
+effect). OAuth tokens without `expires_in` stay scoped by the message's flow_uuid, so one consumer
+process reuses them across a run's queued calls. New processor = RESTART THE CONSUMERS after
+deploying.
 **sql_query** ("SQL Query", `sqlQuerySection`) runs SQL against a DATABASE connector
 (`Manager/DatabaseQueryRunner` — PostgreSQL via PDO, same connection rules as the connector Test;
 executor arm `sqlQuery()`): row 1 `Name | Connector (database only) | Destination`, row 2 the SQL
@@ -1041,7 +1056,13 @@ invoker's own tick (transition null → the editor's visit animation) or a Step-
 (merged silently into that canvas's marks). Plain in-frame ticks carry NO trails — attaching the
 walk bookkeeping to them made the editor bounce home after every inner step. `stepOut: true` in
 the request loops ticks (stepping OVER nested invokers) until the current frame pops. The blob
-is held SERVER-SIDE between calls (cache.app, key aaxis_ontology_debug_ctx.<uuid>, TTL 1h —
+is held SERVER-SIDE between calls (the `aaxis_ontology.cache` pool, key aaxis_ontology_debug_ctx.<uuid>, TTL 1h.
+⚠️ NOT `cache.app`: that is node-local files, so on OroCloud the next step — served by another
+node behind the load balancer — answered "The debug session expired" (fixed 2026-11-17). The pool
+is declared in `Resources/config/oro/app.yml` on `oro.cache.adapter.persistent` = Redis wherever
+Oro's Redis config is active, files otherwise; the controller gets it through a
+`container.service_subscriber` tag keyed `Psr\Cache\CacheItemPoolInterface`, and the scheduler's
+stale-session sweep + OAuthTokenProvider use the same pool —
 storeDebugContext/loadDebugContext; debug-eval unwraps `blob['context']`): the client round-trips
 only `contextKey`, because shipping a large context in the request body blew past nginx's
 client_max_body_size; an expired key 422s with 'restart the debug'; the full-run endpoint stores
@@ -1093,9 +1114,11 @@ not an error; `by_attribute` = the LIST of records whose attribute equals the va
 OroCommerce entity itself — see `Manager/OroEntityReader` under "Data HTTP API") and **invoke
 ("HTTP Request")** (URL = connector server[:port] + step path; connector headers; auth=headers
 merges auth_headers; auth=oauth POSTs the token path — form-encoded oauth.body + oauth.headers —
-and attaches `access_token` as a bearer, REUSING the token via `Manager/OAuthTokenProvider`
+and attaches `access_token` as a bearer — the transport lives in `Manager/RestConnectorClient`
+(shared with the async consumer; it throws step-agnostic `ConnectorRequestFailure`s the executor
+prefixes with the step name) — REUSING the token via `Manager/OAuthTokenProvider`
 (before 2026-11-17 every call fetched a new one: a foreach doubled its HTTP calls and could trip
-token-endpoint rate limits): a token with `expires_in` lives in cache.app under
+token-endpoint rate limits): a token with `expires_in` lives in the `aaxis_ontology.cache` pool under
 `aaxis_ontology_oauth_token.<connector id>` until 10% of its lifetime (max 60s) before expiry,
 shared by every run/process; a token WITHOUT `expires_in` is reused only within the run that
 fetched it (memory, keyed by flowUuid). A fingerprint of server + oauth settings is stored WITH

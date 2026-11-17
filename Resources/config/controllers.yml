@@ -56,6 +56,9 @@ services:
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker, key: Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver, key: Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter, key: Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter }
+            # Debug sessions live in the SHARED pool (not node-local cache.app): the next debug
+            # step may be served by another node behind the load balancer.
+            - { name: container.service_subscriber, id: aaxis_ontology.cache, key: Psr\Cache\CacheItemPoolInterface }
 
     Aaxis\Bundle\OntologyBundle\Api\OntologyFlowApiController:
         calls:

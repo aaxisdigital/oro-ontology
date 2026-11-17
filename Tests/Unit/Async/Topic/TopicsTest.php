@@ -6,8 +6,11 @@ namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Async\Topic;
 
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyDataUpsertTopic;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowEventTopic;
+use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyHttpRequestTopic;
 use Oro\Component\MessageQueue\Topic\AbstractTopic;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\OptionsResolver\Exception\InvalidOptionsException;
+use Symfony\Component\OptionsResolver\Exception\MissingOptionsException;
 use Symfony\Component\OptionsResolver\Exception\UndefinedOptionsException;
 use Symfony\Component\OptionsResolver\OptionsResolver;
 
@@ -50,6 +53,34 @@ class TopicsTest extends TestCase
             self::resolve(new OntologyFlowEventTopic(), [])
         );
         self::assertSame('flow-start', self::resolve(new OntologyFlowEventTopic(), ['event' => 'flow-start'])['event']);
+    }
+
+    public function testTheHttpRequestTopic(): void
+    {
+        self::assertSame('aaxis_ontology_http_request', OntologyHttpRequestTopic::getName());
+        self::assertSame('Sends one async Ontology HTTP Request step (fire and forget).', OntologyHttpRequestTopic::getDescription());
+
+        self::assertEquals(
+            [
+                'connector_id' => 7, 'method' => 'GET', 'path' => 'x', 'step' => 'S',
+                'body' => null, 'body_type' => 'text', 'flow_id' => null, 'flow_name' => null, 'flow_uuid' => null,
+            ],
+            self::resolve(new OntologyHttpRequestTopic(), ['connector_id' => 7, 'method' => 'GET', 'path' => 'x', 'step' => 'S'])
+        );
+    }
+
+    public function testTheHttpRequestTopicNeedsTheRequest(): void
+    {
+        $this->expectException(MissingOptionsException::class);
+
+        self::resolve(new OntologyHttpRequestTopic(), ['connector_id' => 7, 'method' => 'GET', 'step' => 'S']);
+    }
+
+    public function testTheHttpRequestTopicIsTyped(): void
+    {
+        $this->expectException(InvalidOptionsException::class);
+
+        self::resolve(new OntologyHttpRequestTopic(), ['connector_id' => '7', 'method' => 'GET', 'path' => 'x', 'step' => 'S']);
     }
 
     public function testUnknownBodyKeysAreRefused(): void
