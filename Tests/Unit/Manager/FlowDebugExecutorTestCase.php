@@ -12,6 +12,7 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Manager\DatabaseQueryRunner;
 use Aaxis\Bundle\OntologyBundle\Manager\FileConnectorTransfer;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
+use Aaxis\Bundle\OntologyBundle\Manager\OAuthTokenProvider;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowStepValidator;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter;
@@ -22,6 +23,7 @@ use Doctrine\Persistence\ObjectRepository;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\HttpClient\MockHttpClient;
 use Symfony\Component\HttpClient\Response\MockResponse;
 
@@ -42,6 +44,9 @@ abstract class FlowDebugExecutorTestCase extends TestCase
     protected PhpMethodInvoker&MockObject $php;
     protected OntologyFlowEventEmitter&MockObject $emitter;
     protected FlowDebugExecutor $executor;
+
+    /** The OAuth token cache (cache.app in the app) — real, so token reuse is exercised. */
+    protected ArrayAdapter $oauthCache;
 
     /** @var array<int, MockResponse> */
     protected array $responses = [];
@@ -101,7 +106,8 @@ abstract class FlowDebugExecutorTestCase extends TestCase
             $this->database,
             $this->logger,
             $this->php,
-            $this->emitter
+            $this->emitter,
+            new OAuthTokenProvider($http, $this->oauthCache = new ArrayAdapter())
         );
     }
 

@@ -1093,7 +1093,16 @@ not an error; `by_attribute` = the LIST of records whose attribute equals the va
 OroCommerce entity itself — see `Manager/OroEntityReader` under "Data HTTP API") and **invoke
 ("HTTP Request")** (URL = connector server[:port] + step path; connector headers; auth=headers
 merges auth_headers; auth=oauth POSTs the token path — form-encoded oauth.body + oauth.headers —
-and attaches `access_token` as a bearer; the step's operation/body/body_content are honoured;
+and attaches `access_token` as a bearer, REUSING the token via `Manager/OAuthTokenProvider`
+(before 2026-11-17 every call fetched a new one: a foreach doubled its HTTP calls and could trip
+token-endpoint rate limits): a token with `expires_in` lives in cache.app under
+`aaxis_ontology_oauth_token.<connector id>` until 10% of its lifetime (max 60s) before expiry,
+shared by every run/process; a token WITHOUT `expires_in` is reused only within the run that
+fetched it (memory, keyed by flowUuid). A fingerprint of server + oauth settings is stored WITH
+the token (never in the key, which would derive from the secret), so editing the connector
+retires it. A 401 to a REUSED token invalidates it and retries the call ONCE with a fresh token;
+a fresh token's 401 is final. The connector Test button (`ConnectorTester`) deliberately bypasses
+the cache — it exists to prove the credentials. The step's operation/body/body_content are honoured;
 TLS verification off like the toolbox proxy; JSON responses decoded, others returned raw;
 HTTP ≥ 400 aborts naming the step). **The File Operations steps run for real** via
 `Manager/FileConnectorTransfer` (see "File-based connector transfers" below); **dwl_transform** steps execute their DWL script via `Dwl/DwlTransformer` with

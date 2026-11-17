@@ -31,7 +31,8 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
             $this->database,
             $this->logger,
             $this->php,
-            $this->emitter
+            $this->emitter,
+            $this->createMock(\Aaxis\Bundle\OntologyBundle\Manager\OAuthTokenProvider::class)
         );
         $this->em->expects(self::never())->method('flush');
 
@@ -692,6 +693,110 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
         $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x']);
 
         self::assertContains('Authorization: Bearer abc', $this->requests[1]['options']['headers']);
+    }
+
+    /** Runs a trigger followed by two HTTP Request steps against connector 7. */
+    private function runTwoOAuthCalls(): array
+    {
+        $call = static fn (string $path): array => ['destination' => $path, 'connector' => 7, 'path' => $path];
+
+        return $this->executor->execute(
+            [self::step('t', 'entity_change'), self::step('a', 'invoke', $call('one'), 'A'), self::step('b', 'invoke', $call('two'), 'B')],
+            [self::link('t', 'a'), self::link('a', 'b')],
+            ['payload' => []]
+        );
+    }
+
+    /** @return list<string> "METHOD url" per request sent, in order */
+    private function sentRequests(): array
+    {
+        return array_map(static fn (array $r): string => $r['method'] . ' ' . $r['url'], $this->requests);
+    }
+
+    public function testOAuthTokenIsReusedAcrossCallsAndRuns(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'https://api', 'auth' => 'oauth', 'oauth' => ['path' => 'token']]);
+        $this->responses = [
+            new MockResponse('{"access_token":"abc","expires_in":3600}'),
+            new MockResponse('[1]'),
+            new MockResponse('[2]'),
+            new MockResponse('[3]'),
+            new MockResponse('[4]'),
+        ];
+
+        $first = $this->runTwoOAuthCalls();
+        $second = $this->runTwoOAuthCalls();
+
+        self::assertSame([[1], [2], [3], [4]], [$first['one'], $first['two'], $second['one'], $second['two']]);
+        self::assertSame(
+            ['POST https://api/token', 'GET https://api/one', 'GET https://api/two', 'GET https://api/one', 'GET https://api/two'],
+            $this->sentRequests()
+        );
+        foreach (\array_slice($this->requests, 1) as $request) {
+            self::assertContains('Authorization: Bearer abc', $request['options']['headers']);
+        }
+    }
+
+    public function testOAuthTokenWithoutLifetimeIsOnlyReusedWithinTheRun(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'https://api', 'auth' => 'oauth', 'oauth' => ['path' => 'token']]);
+        $this->responses = [new MockResponse('{"access_token":"abc"}'), new MockResponse('[1]'), new MockResponse('[2]')];
+
+        $this->runTwoOAuthCalls();
+
+        self::assertSame(['POST https://api/token', 'GET https://api/one', 'GET https://api/two'], $this->sentRequests());
+        self::assertFalse($this->oauthCache->hasItem('aaxis_ontology_oauth_token.7'));
+    }
+
+    public function testRejectedReusedTokenIsRefreshedAndTheCallRetriedOnce(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'https://api', 'auth' => 'oauth', 'oauth' => ['path' => 'token']]);
+        $this->responses = [new MockResponse('{"access_token":"old","expires_in":3600}'), new MockResponse('[1]')];
+        $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x']);
+
+        $this->requests = [];
+        $this->responses = [
+            new MockResponse('expired', ['http_code' => 401]),
+            new MockResponse('{"access_token":"new","expires_in":3600}'),
+            new MockResponse('[2]'),
+        ];
+        $context = $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x']);
+
+        self::assertSame([2], $context['resp']);
+        self::assertSame(['GET https://api/x', 'POST https://api/token', 'GET https://api/x'], $this->sentRequests());
+        self::assertContains('Authorization: Bearer old', $this->requests[0]['options']['headers']);
+        self::assertContains('Authorization: Bearer new', $this->requests[2]['options']['headers']);
+    }
+
+    public function testRejectedFreshTokenFailsWithoutRetrying(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'https://api', 'auth' => 'oauth', 'oauth' => ['path' => 'token']]);
+        $this->responses = [new MockResponse('{"access_token":"abc","expires_in":3600}'), new MockResponse('no', ['http_code' => 401])];
+
+        try {
+            $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x']);
+            self::fail('Expected a failure.');
+        } catch (FlowStepFailure $e) {
+            self::assertSame('Step "Step": the connector responded HTTP 401.', $e->getMessage());
+        }
+        self::assertSame(['POST https://api/token', 'GET https://api/x'], $this->sentRequests());
+    }
+
+    public function testEditingTheConnectorRetiresItsToken(): void
+    {
+        $connector = $this->connector(7, 'rest_api', ['server' => 'https://api', 'auth' => 'oauth', 'oauth' => ['path' => 'token', 'body' => ['client_secret' => 'a']]]);
+        $this->responses = [new MockResponse('{"access_token":"abc","expires_in":3600}'), new MockResponse('[1]')];
+        $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x']);
+
+        $connector->setConfig(['server' => 'https://api', 'auth' => 'oauth', 'oauth' => ['path' => 'token', 'body' => ['client_secret' => 'b']]]);
+        $this->responses = [new MockResponse('{"access_token":"def","expires_in":3600}'), new MockResponse('[2]')];
+        $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'x']);
+
+        self::assertSame(
+            ['POST https://api/token', 'GET https://api/x', 'POST https://api/token', 'GET https://api/x'],
+            $this->sentRequests()
+        );
+        self::assertContains('Authorization: Bearer def', $this->requests[3]['options']['headers']);
     }
 
     /**

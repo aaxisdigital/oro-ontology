@@ -9,6 +9,7 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowExecutionFailure;
+use Aaxis\Bundle\OntologyBundle\Exception\OAuthTokenFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
@@ -33,8 +34,8 @@ use Psr\Log\LoggerInterface;
  *    Internal-system entities read from the OroCommerce entity itself ({@see OroEntityReader});
  *  - invoke ("HTTP Request"): the rest_api connector call executes for real (URL from the
  *    connector's server/port + the step's path; connector headers + auth headers; auth=oauth
- *    first POSTs the token path and attaches the returned access_token; the step's
- *    operation/body are honoured);
+ *    attaches an access_token from the token path, REUSED across calls while valid — see
+ *    {@see OAuthTokenProvider}; the step's operation/body are honoured);
  *  - dwl_transform: runs the step's DataWeave script with the whole context as variables (also
  *    reachable as one `context` object, e.g. context["flowUuid"]);
  *  - entity_write: performs the real upsert SYNCHRONOUSLY (same validation and PG function as
@@ -94,6 +95,7 @@ class FlowDebugExecutor
         private readonly LoggerInterface $logger,
         private readonly PhpMethodInvoker $phpInvoker,
         private readonly OntologyFlowEventEmitter $flowEvents,
+        private readonly OAuthTokenProvider $oauthTokens,
     ) {
     }
 
@@ -1646,19 +1648,23 @@ class FlowDebugExecutor
             return ['_debug' => sprintf('"%s" connectors are not executed in debug yet.', (string) $connector->getType())];
         }
 
-        return $this->executeRestRead($stepName, $connector->getConfig() ?? [], $config, $context);
+        return $this->executeRestRead($stepName, $connector, $config, $context);
     }
 
     /**
      * Performs the REST call a rest_api connector reader describes. Secrets are stored in clear
      * in the connector config (masking is a render-time concern), so they can be used directly.
      *
-     * @param array<string, mixed> $connectorConfig
+     * OAuth connectors reuse their access token ({@see OAuthTokenProvider}); when the API answers
+     * 401 to a REUSED token (revoked, or expired before its announced lifetime), it is dropped and
+     * the call is retried ONCE with a freshly fetched one. A fresh token's 401 is final.
+     *
      * @param array<string, mixed> $stepConfig
      * @param array<string, mixed> $context available to a DWL-toggled body (body_dwl)
      */
-    private function executeRestRead(string $stepName, array $connectorConfig, array $stepConfig, array $context): mixed
+    private function executeRestRead(string $stepName, OntologyConnector $connector, array $stepConfig, array $context): mixed
     {
+        $connectorConfig = $connector->getConfig() ?? [];
         $base = trim((string) ($connectorConfig['server'] ?? ''));
         if ($base === '') {
             throw new FlowExecutionFailure(sprintf('Step "%s": the connector has no server configured.', $stepName));
@@ -1677,8 +1683,11 @@ class FlowDebugExecutor
         $auth = (string) ($connectorConfig['auth'] ?? 'none');
         if ($auth === 'headers') {
             $headers = array_merge($headers, $this->stringMap($connectorConfig['auth_headers'] ?? null));
-        } elseif ($auth === 'oauth') {
-            $headers['Authorization'] = $this->fetchOAuthToken($stepName, $connectorConfig, $base);
+        }
+        $oauth = null;
+        if ($auth === 'oauth') {
+            $oauth = $this->oauthAuthorization($stepName, $connector, $base, $context);
+            $headers['Authorization'] = $oauth['authorization'];
         }
 
         $options = [
@@ -1706,12 +1715,11 @@ class FlowDebugExecutor
         }
         $method = strtoupper((string) ($stepConfig['operation'] ?? 'get')) ?: 'GET';
 
-        try {
-            $response = $this->httpClient->request($method, $url, $options);
-            $status = $response->getStatusCode();
-            $content = $response->getContent(false);
-        } catch (\Throwable $e) {
-            throw self::stepFailure($stepName, $e->getMessage(), $e);
+        [$status, $content] = $this->sendRestRequest($stepName, $method, $url, $options);
+        if ($status === 401 && $oauth !== null && $oauth['cached']) {
+            $this->oauthTokens->invalidate($connector->getId());
+            $options['headers']['Authorization'] = $this->oauthAuthorization($stepName, $connector, $base, $context)['authorization'];
+            [$status, $content] = $this->sendRestRequest($stepName, $method, $url, $options);
         }
         if ($status >= 400) {
             throw new FlowExecutionFailure(sprintf('Step "%s": the connector responded HTTP %d.', $stepName, $status));
@@ -1736,40 +1744,40 @@ class FlowDebugExecutor
     }
 
     /**
-     * OAuth (as modelled by the connector config): POST the token path with the configured
-     * headers + form-encoded body and use the returned access_token as a bearer credential.
+     * @param array<string, mixed> $options
      *
-     * @param array<string, mixed> $connectorConfig
+     * @return array{0: int, 1: string} status code + body
      */
-    private function fetchOAuthToken(string $stepName, array $connectorConfig, string $base): string
+    private function sendRestRequest(string $stepName, string $method, string $url, array $options): array
     {
-        $oauth = \is_array($connectorConfig['oauth'] ?? null) ? $connectorConfig['oauth'] : [];
-        $path = trim((string) ($oauth['path'] ?? ''));
-        if ($path === '') {
-            throw new FlowExecutionFailure(sprintf('Step "%s": the connector has no OAuth token path configured.', $stepName));
+        try {
+            $response = $this->httpClient->request($method, $url, $options);
+
+            return [$response->getStatusCode(), $response->getContent(false)];
+        } catch (\Throwable $e) {
+            throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
+    }
+
+    /**
+     * The connector's OAuth Authorization header value (reused while valid — see
+     * {@see OAuthTokenProvider}); a token that cannot be obtained fails the step.
+     *
+     * @param array<string, mixed> $context its flowUuid scopes tokens of unknown lifetime to the run
+     *
+     * @return array{authorization: string, cached: bool}
+     */
+    private function oauthAuthorization(string $stepName, OntologyConnector $connector, string $base, array $context): array
+    {
+        $config = $connector->getConfig() ?? [];
+        $oauth = \is_array($config['oauth'] ?? null) ? $config['oauth'] : [];
+        $runId = \is_string($context['flowUuid'] ?? null) && $context['flowUuid'] !== '' ? $context['flowUuid'] : null;
 
         try {
-            $response = $this->httpClient->request('POST', $base . '/' . ltrim($path, '/'), [
-                'headers' => $this->stringMap($oauth['headers'] ?? null),
-                'body' => $this->stringMap($oauth['body'] ?? null),
-                'timeout' => self::TIMEOUT,
-                'verify_peer' => false,
-                'verify_host' => false,
-            ]);
-            $data = json_decode($response->getContent(false), true);
-        } catch (\Throwable $e) {
-            throw new FlowExecutionFailure(sprintf('Step "%s": OAuth token request failed — %s', $stepName, $e->getMessage()), 0, $e);
+            return $this->oauthTokens->authorization($connector->getId(), $base, $oauth, $runId);
+        } catch (OAuthTokenFailure $e) {
+            throw new FlowExecutionFailure(sprintf('Step "%s": %s', $stepName, $e->getMessage()), 0, $e);
         }
-
-        $token = \is_array($data) ? ($data['access_token'] ?? null) : null;
-        if (!\is_string($token) || $token === '') {
-            throw new FlowExecutionFailure(sprintf('Step "%s": the OAuth response carries no access_token.', $stepName));
-        }
-        $type = \is_array($data) && \is_string($data['token_type'] ?? null) && $data['token_type'] !== ''
-            ? $data['token_type'] : 'Bearer';
-
-        return $type . ' ' . $token;
     }
 
     /**

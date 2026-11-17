@@ -74,6 +74,14 @@ services:
             - '@aaxis_ontology.flow_logger'
             - '@Aaxis\Bundle\OntologyBundle\Manager\PhpMethodInvoker'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\OAuthTokenProvider'
+
+    # OAuth access tokens of rest_api connectors, reused while valid (cache.app, keyed by
+    # connector id) instead of one token request per HTTP Request step.
+    Aaxis\Bundle\OntologyBundle\Manager\OAuthTokenProvider:
+        arguments:
+            - '@http_client'
+            - '@cache.app'
 
     # The "Invoke PHP" step's engine. The first argument is a placeholder: InvokableServicesPass
     # replaces it with a class-keyed service locator over EVERY container service; the System
