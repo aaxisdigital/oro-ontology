@@ -289,8 +289,9 @@ class DwlTransformerTest extends TestCase
             'isDecimal' => ['isDecimal(1.5)', true],
             'isEven' => ['isEven(2)', true],
             'isOdd' => ['isOdd(3)', true],
-            'read passthrough' => ['read(1)', 1],
-            'write passthrough' => ['write(2)', 2],
+            'read json' => ["read('{\"a\": 1}', 'application/json').a", 1],
+            'read defaults to dw' => ["read(\"{a: 'x'}\").a", 'x'],
+            'write defaults to dw' => ['write({a: 1})', "{\n  a: 1\n}"],
             'uuid shape' => ['sizeOf(uuid())', 36],
             'random in range' => ['random() < 1', true],
         ];

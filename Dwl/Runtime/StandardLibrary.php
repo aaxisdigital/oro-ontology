@@ -93,8 +93,18 @@ final class StandardLibrary
             fwrite(STDERR, self::valueToString($args[0]) . "\n");
             return $args[0];
         }));
-        $env->define('read', Value::func(fn(array $args) => $args[0])); // Simplified
-        $env->define('write', Value::func(fn(array $args) => $args[0])); // Simplified
+        // read(text, contentType = "application/dw", readerProperties = {}) parses text into a value;
+        // write(value, contentType = "application/dw", writerProperties = {}) renders it as text.
+        $env->define('read', Value::func(fn(array $args) => DataFormats::read(
+            $args[0] ?? Value::null(),
+            $args[1] ?? null,
+            $args[2] ?? null,
+        )));
+        $env->define('write', Value::func(fn(array $args) => Value::string(DataFormats::write(
+            $args[0] ?? Value::null(),
+            $args[1] ?? null,
+            $args[2] ?? null,
+        ))));
         $env->define('uuid', Value::func(fn(array $args) => Value::string(self::generateUuid())));
         $env->define('random', Value::func(fn(array $args) => Value::number(mt_rand() / mt_getrandmax())));
     }

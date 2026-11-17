@@ -415,6 +415,9 @@ without `putenv()`, so only PHP build vars are visible there — **do not rely o
   Result pane like any other script error.
 - The rest of the standard library was audited and is pure data manipulation — `getenv()` is its only
   such sink, which is why denying one member is sufficient. **Re-audit if `Dwl/` gains modules.**
+  `read(text)` (default application/dw) PARSES text but never evaluates it — non-literal input is
+  refused (`Codec/DwCodec`) — so a `props()` call hidden in a string or a record cannot bypass the
+  guard. Keep it that way.
 - The flow-editor's DWL path is NOT screened: it sits behind an EDIT-level capability, a different
   trust level. Optional future hardening: give the playground its own action ACL (`acls.yml` +
   an admin-grant data migration + gating the badge in twig) so script execution is a capability
@@ -1264,10 +1267,21 @@ DateTime ± Period arithmetic (null temporal propagates null so `default` catche
 `as Date/Time/LocalTime/DateTime/LocalDateTime {format: …}` and `as String {format: …}` coercions
 (Java-style patterns translated by `javaDateFormatToPhp()` — yyyy-MM-dd HH:mm:ss.SSSSSS →
 Y-m-d H:i:s.u; parsing uses `!`-reset createFromFormat), fractional-second periods via
-DateInterval->f, and `now()` returning a real DateTime. NULL passes through every coercion. The `%dw` header/`---` separator are
+DateInterval->f, and `now()` returning a real DateTime. NULL passes through every coercion.
+**`read()`/`write()`** (2026-11-17 — until then both were identity stubs, so
+`read('{"a":1}', "application/json").a` silently selected on a String and gave null):
+`Dwl/Runtime/DataFormats` dispatches on the content type to one codec per format under
+`Dwl/Runtime/Codec/` — application/json (STRICT: `{key: 'v'}` is NOT JSON and errors with a hint),
+application/xml (repeated elements = repeated keys, text stays String, `nullValueOn` reader prop,
+attributes NOT read), application/csv (header row → keys, `header`/`separator`/`quote`/`escape`),
+text/plain, and application/dw — DataWeave's DEFAULT for both functions, LITERALS ONLY: the reader
+parses the text and refuses any non-literal node instead of evaluating it, because evaluating data
+would run code DwlScriptGuard never screened. `+json`/`+xml` suffixes and `;charset=` params are
+accepted; unknown content types throw. The `%dw` header/`---` separator are
 optional (bare expressions work). Scripts are parse-validated on SAVE
 (422 `flow_manager.invalid_dwl` with the parser message). The Format/Cli parts of php-dw were
-deliberately NOT imported (unused). Errors (unconfigured step, unknown
+deliberately NOT imported — upstream's `Format/` layer serves its CLI's I/O; read()/write() use the
+mirrored `Runtime/DataFormats` + `Runtime/Codec/` (also copied upstream). Errors (unconfigured step, unknown
 system/entity, missing connector, failed request) abort with a 422 naming the step.
 Gotcha fixed here once: a textarea's initial value must be set via jQuery `.val()` — a `value`
 key in the `$('<textarea/>', {...})` creation map is silently ignored.
@@ -1317,7 +1331,8 @@ that answers "is this connector file-based".
   as `type: folder`). Consequence: a listed folder's `path` KEEPS its trailing slash so it can be
   fed straight back into the next step; file_system/sftp tolerate the slash.
 - **File content is NOT JSON-decoded** (again unlike the rest_api reader): a file's type is not
-  knowable from the transport, so the raw string is handed over and a DWL step parses if it wants.
+  knowable from the transport, so the raw string is handed over and a DWL step parses it with
+  `read(content, "application/json" | "application/csv" | "application/xml")`.
 - ⚠️ **file_system reads/writes are confined to the connector's `base_path`** (`localTarget()`):
   a flow author types the path, so without the containment check a step could read `/etc/passwd`
   through a connector scoped to an import folder. Paths that do not exist yet (every write target)
