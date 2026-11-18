@@ -56,7 +56,6 @@ describe('OntologyFlowEditorComponent — saving', () => {
         expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('success', KEY('saved'));
         expect($save.find('.fa-spinner')).toHaveLength(0);
         expect($save.prop('disabled')).toBe(true);
-        expect(root(editor).find('[data-role="cancel-label"]').text()).toBe(KEY('close'));
         expect(tile('logger-1').classList.contains('is-config-invalid')).toBe(true);
         expect(window.location.pathname + window.location.search).toBe('/aaxis_ontology_flow_editor?id=12');
         expect(root(editor).find('[data-role="flow-history"]').prop('disabled')).toBe(false);
@@ -138,11 +137,13 @@ describe('OntologyFlowEditorComponent — saving', () => {
         expect(sentTo(spy, 'aaxis_ontology_flow_api_update')).toEqual([]);
 
         dropFromToolbox('logger', 540, 440);
+        root(editor).find('[data-role="tab-add"]').trigger('click'); // Save all is for flows out of focus
         root(editor).find('[data-role="save-all"]').trigger('click');
         await flush();
 
         expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', `nightly: ${KEY('save_error')}`);
         expect(messenger.notificationFlashMessage).not.toHaveBeenCalledWith('success', expect.anything());
+        $('[data-role="tab"]').eq(0).trigger('click');
         expect(root(editor).find('[data-role="save"]').prop('disabled')).toBe(false);
     });
 
@@ -150,6 +151,7 @@ describe('OntologyFlowEditorComponent — saving', () => {
         mockFetch({aaxis_ontology_flow_api_update: new Error('offline')});
         const editor = createEditor({flow: simpleFlow()});
         dropFromToolbox('logger', 540, 440);
+        root(editor).find('[data-role="tab-add"]').trigger('click');
 
         root(editor).find('[data-role="save-all"]').trigger('click');
         await flush();

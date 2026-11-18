@@ -7,6 +7,7 @@ import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FieldChangeContext, FormField, SelectOption} from 'aaxiscommon/js/app/widgets/record-form-modal';
 import DwlPlayground from '../widgets/dwl-playground';
+import EraseRecordsDialog from '../widgets/erase-records';
 import {apiFetch, bindGridToolbar, setRefreshBusy} from './component-support';
 
 interface OntologyEntityOptions {
@@ -84,13 +85,14 @@ class OntologyEntityComponent extends BaseComponent {
             actions.push({key: 'edit', label: __('aaxis.common.grid.edit'), icon: 'fa-pencil'});
         }
         if (options.canDelete) {
-            // Erasing records keeps the entity — sits between edit and delete, and is disabled when
-            // there is nothing to erase.
+            // Erasing records keeps the entity — sits between edit and delete. Disabled when there is
+            // nothing stored to erase: no records, or an OroCommerce (internal-system) entity, whose
+            // data is its own table (its record count is that table's size).
             actions.push(
                 {
                     key: 'purge', label: __('aaxis.ontology.entity_manager.purge_title'), icon: 'fa-eraser',
                     variant: 'danger',
-                    disabled: (row: EntityRecord) => !row.recordCount,
+                    disabled: (row: EntityRecord) => !row.recordCount || this.isInternal(String(row.systemId ?? '')),
                     disabledTitle: __('aaxis.ontology.entity_manager.purge_empty')
                 },
                 {key: 'delete', label: __('aaxis.common.grid.delete'), icon: 'fa-trash-o', variant: 'danger'}
@@ -180,71 +182,24 @@ class OntologyEntityComponent extends BaseComponent {
         } else if (action === 'data') {
             this.openDataView(row, event);
         } else if (action === 'purge') {
-            this.confirmPurge(row);
+            this.openErase(row);
         }
     }
 
     /**
-     * Confirms erasing every stored record of an entity. Deliberately worded like the delete-entity
-     * confirmation — it is equally irreversible — while making clear the ENTITY itself stays.
+     * "Erase": all of the entity's stored records, or those matching one attribute comparison,
+     * counted and previewable before anything goes ({@see EraseRecordsDialog}). The filter offers
+     * the unique attribute first, then the configured attributes alphabetically.
      */
-    private confirmPurge(entity: EntityRecord): void {
-        const dialog = new Dialog({title: __('aaxis.ontology.entity_manager.purge_title'), width: '520px'});
-        const $content = dialog.open();
-
-        const $body = $('<div/>', {'class': 'aaxis-ontology-confirm'});
-        $body.append($('<p/>', {
-            'class': 'aaxis-ontology-confirm__q',
-            text: __('aaxis.ontology.entity_manager.confirm_purge', {
-                name: entity.displayName || entity.name
-            })
-        }));
-        $body.append($('<p/>', {
-            'class': 'aaxis-ontology-confirm__danger',
-            text: __('aaxis.ontology.entity_manager.purge_data_warning', {
-                count: String(entity.recordCount || 0)
-            })
-        }));
-        $body.append($('<p/>', {text: __('aaxis.ontology.entity_manager.purge_keeps_entity')}));
-
-        const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
-        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('Cancel')});
-        const $confirm = $('<button/>', {
-            type: 'button', 'class': 'btn aaxis-ontology-confirm__delete',
-            text: __('aaxis.ontology.entity_manager.purge_confirm')
-        });
-        $actions.append($cancel, $confirm);
-        $body.append($actions);
-        $content.append($body);
-
-        $cancel.on('click', () => dialog.close());
-        $confirm.on('click', () => {
-            $confirm.prop('disabled', true);
-            this.doPurge(entity, () => dialog.close());
-        });
-    }
-
-    private doPurge(entity: EntityRecord, done: () => void): void {
-        this.setBusy(true);
-        apiFetch(routing.generate('aaxis_ontology_entity_purge_records', {id: entity.id}), 'DELETE')
-            .then(res => {
-                if (!res.ok || res.data?.success !== true) {
-                    messenger.notificationFlashMessage(
-                        'error',
-                        res.data?.message || __('aaxis.ontology.entity_manager.purge_error')
-                    );
-                    return;
-                }
-                messenger.notificationFlashMessage('success', __('aaxis.ontology.entity_manager.purged', {
-                    count: String(res.data.deleted ?? 0)
-                }));
-                this.load();
-            })
-            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.entity_manager.purge_error')))
-            .finally(() => {
-                this.setBusy(false);
-                done();
-            });
+    private openErase(entity: EntityRecord): void {
+        const names = (entity.attributes || []).map(a => a.name).filter(Boolean).sort((a, b) => a.localeCompare(b));
+        const unique = entity.uniqueAttribute || '';
+        new EraseRecordsDialog({
+            entityId: entity.id,
+            entityLabel: entity.displayName || entity.name,
+            attributes: unique ? [unique, ...names.filter(n => n !== unique)] : names,
+            onErased: () => this.load()
+        }).open();
     }
 
     /**
@@ -319,12 +274,12 @@ class OntologyEntityComponent extends BaseComponent {
         const nameField: FormField = internal
             ? {
                 key: 'name', label: __('aaxis.ontology.entity.name.label'), type: 'select',
-                required: true, options: this.entityOptions(entityName), row: 'main', width: '45%'
+                required: true, options: this.entityOptions(entityName), row: 'identity', width: '50%'
             }
             : {
                 key: 'name', label: __('aaxis.ontology.entity.name.label'), type: 'text',
                 required: true, placeholder: __('aaxis.ontology.entity_manager.name_placeholder'),
-                row: 'main', width: '45%'
+                row: 'identity', width: '50%'
             };
 
         const attrNameField: FormField = internal
@@ -334,26 +289,31 @@ class OntologyEntityComponent extends BaseComponent {
             }
             : {key: 'name', label: __('aaxis.ontology.entity_attribute.name.label'), type: 'text', required: true};
 
+        // Row 1: System | Name (50/50). Row 2: Unique attribute | Enabled | Force DB storage
+        // (50/15/35 — the force switch's hint reads to its right, and the switches center on the
+        // input's line). Then the attributes, whose ROWS alone scroll (`fill`): everything above,
+        // the "Attributes" title and the Add attribute button stay in view.
         return [
             {
                 key: 'systemId', label: __('aaxis.ontology.entity.system.label'), type: 'select',
-                required: true, options: this.systems, row: 'system', width: '70%'
-            },
-            {
-                key: 'forceDbStorage', label: __('aaxis.ontology.entity.force_db_storage.label'), type: 'boolean',
-                hint: __('aaxis.ontology.entity.force_db_storage.hint'), row: 'system', width: '30%'
+                required: true, options: this.systems, row: 'identity', width: '50%'
             },
             nameField,
             {
                 key: 'uniqueAttribute', label: __('aaxis.ontology.entity.unique_attribute.label'), type: 'text',
                 required: true, placeholder: __('aaxis.ontology.entity_manager.unique_attribute_placeholder'),
-                row: 'main', width: '45%'
+                row: 'settings', width: '50%'
             },
-            {key: 'enabled', label: __('aaxis.ontology.entity.enabled.label'), type: 'boolean', row: 'main', width: '10%'},
+            {key: 'enabled', label: __('aaxis.ontology.entity.enabled.label'), type: 'boolean', row: 'settings', width: '15%'},
+            {
+                key: 'forceDbStorage', label: __('aaxis.ontology.entity.force_db_storage.label'), type: 'boolean',
+                hint: __('aaxis.ontology.entity.force_db_storage.hint'), row: 'settings', width: '35%'
+            },
             {
                 key: 'attributes',
                 label: __('aaxis.ontology.entity_attribute.entity_plural_label'),
                 type: 'collection',
+                fill: true,
                 addLabel: __('aaxis.ontology.entity_manager.add_attribute'),
                 fields: [
                     attrNameField,

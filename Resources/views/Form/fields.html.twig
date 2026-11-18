@@ -35,7 +35,12 @@
 
 {% block aaxis_ontology_flow_runs_index_widget %}
     <div class="aaxis-config-run-index"
-         data-page-component-module="aaxisontology/js/app/components/flow-runs-index-component">
+         data-page-component-module="aaxisontology/js/app/components/flow-history-maintenance-component"
+         data-page-component-options="{{ {
+             route: 'aaxis_ontology_config_flow_runs_rebuild',
+             queued: 'aaxis.ontology.config.flow_runs_index.queued',
+             failed: 'aaxis.ontology.config.flow_runs_index.queue_failed'
+         }|json_encode }}">
         {% if stale_since %}
             <div class="aaxis-connector-test__line is-fail">
                 <span class="fa fa-exclamation-triangle" aria-hidden="true"></span>
@@ -58,9 +63,51 @@
                 {{ 'aaxis.ontology.config.general.flow_runs_index.never_rebuilt'|trans }}
             {% endif %}
         </div>
-        <button type="button" class="btn" data-role="flow-runs-rebuild">
+        <button type="button" class="btn" data-role="maintenance-run">
             {{ 'aaxis.ontology.config.general.flow_runs_index.button'|trans }}
         </button>
-        <div class="aaxis-connector-test" data-role="flow-runs-rebuild-result" hidden></div>
+        <div class="aaxis-connector-test" data-role="maintenance-result" hidden></div>
+    </div>
+{% endblock %}
+
+{# "Clean up now": the daily retention purge on demand, after a confirmation naming the window.
+   The line above the button is the LAST purge (daily job or button): its time and what each store
+   dropped ("failed" = see the log; the bucket only when a connection is configured). #}
+{% block aaxis_ontology_flow_history_purge_widget %}
+    <div class="aaxis-config-run-index"
+         data-page-component-module="aaxisontology/js/app/components/flow-history-maintenance-component"
+         data-page-component-options="{{ {
+             route: 'aaxis_ontology_config_flow_history_purge',
+             queued: 'aaxis.ontology.config.flow_history_purge.queued',
+             failed: 'aaxis.ontology.config.flow_history_purge.queue_failed',
+             confirm: {
+                 title: 'aaxis.ontology.config.flow_history_purge.confirm_title',
+                 question: 'aaxis.ontology.config.flow_history_purge.confirm_question',
+                 button: 'aaxis.ontology.config.flow_history_purge.confirm_button',
+                 params: {days: history_days}
+             }
+         }|json_encode }}">
+        <div class="aaxis-config-run-index__last">
+            {% if last_purge %}
+                {% set failed = 'aaxis.ontology.config.general.flow_history_purge.failed'|trans %}
+                {{ 'aaxis.ontology.config.general.flow_history_purge.last'|trans({
+                    '{{ at }}': last_purge.at|slice(0, 19),
+                    '{{ cutoff }}': last_purge.cutoff|slice(0, 19),
+                    '{{ events }}': last_purge.events ?? failed,
+                    '{{ runs }}': last_purge.runs ?? failed
+                }) }}
+                {%- if last_purge.bucketConfigured ?? false %}
+                    {{ 'aaxis.ontology.config.general.flow_history_purge.last_bucket'|trans({
+                        '{{ objects }}': last_purge.bucketObjects ?? failed
+                    }) }}
+                {%- endif %}
+            {% else %}
+                {{ 'aaxis.ontology.config.general.flow_history_purge.never'|trans }}
+            {% endif %}
+        </div>
+        <button type="button" class="btn" data-role="maintenance-run">
+            {{ 'aaxis.ontology.config.general.flow_history_purge.button'|trans({'{{ days }}': history_days}) }}
+        </button>
+        <div class="aaxis-connector-test" data-role="maintenance-result" hidden></div>
     </div>
 {% endblock %}

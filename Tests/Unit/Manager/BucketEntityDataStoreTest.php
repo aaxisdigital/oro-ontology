@@ -295,6 +295,23 @@ class BucketEntityDataStoreTest extends TestCase
         );
     }
 
+    public function testErasingRecordsDropsTheirLiveObjectAndEveryVersion(): void
+    {
+        $this->seedLatest('A/1', 2, 'ua', '2026-01-01T00:00:00+00:00', []);
+        $this->seedLatest('B', 1, 'ub', '2026-01-01T00:00:00+00:00', []);
+        $this->seedHistory('A/1', 1, 'h1');
+        $this->seedHistory('A/1', 2, 'h2', '20260102000000');
+        $this->seedHistory('B', 1, 'h3');
+        $this->seedHistory('gone', 1, 'h4');
+
+        self::assertSame(1, $this->store->eraseRecords($this->entity, ['A/1', 'A/1', 'gone']));
+
+        self::assertEqualsCanonicalizing([
+            'aaxis-ontology/entity-data/12/B.json',
+            'aaxis-ontology/entity-data-history/12/B/20260101000000/1/h3.json',
+        ], array_keys($this->bucket->objects), 'a record already gone still loses its stray history');
+    }
+
     // --- merge + compare ----------------------------------------------------------------------
 
     /**

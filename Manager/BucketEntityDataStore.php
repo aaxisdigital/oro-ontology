@@ -203,6 +203,30 @@ class BucketEntityDataStore
         return \count($latestKeys);
     }
 
+    /**
+     * Erases the given records — the live object and every history version of each — and
+     * returns how many live records went (an id already gone is skipped).
+     *
+     * @param list<string> $uniqueIds
+     */
+    public function eraseRecords(OntologyEntity $entity, array $uniqueIds): int
+    {
+        $live = array_flip($this->client->listKeys($this->keys->latestPrefix($entity)));
+        $erased = 0;
+        foreach (array_unique($uniqueIds) as $uid) {
+            $key = $this->keys->latestKey($entity, $uid);
+            if (isset($live[$key])) {
+                $this->client->delete($key);
+                $erased++;
+            }
+            foreach ($this->client->listKeys($this->keys->historyPrefix($entity, $uid)) as $historyKey) {
+                $this->client->delete($historyKey);
+            }
+        }
+
+        return $erased;
+    }
+
     // --- Envelopes ---------------------------------------------------------------------------
 
     private function writeLatest(OntologyEntity $entity, string $uid, int $version, string $uuid, \DateTimeImmutable $updatedAt, array $payload): void

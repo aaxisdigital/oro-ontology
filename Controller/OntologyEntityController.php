@@ -6,14 +6,15 @@ namespace Aaxis\Bundle\OntologyBundle\Controller;
 
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyData;
-use Aaxis\Bundle\OntologyBundle\Entity\OntologyDataHistory;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntityAttribute;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlOutputFormatter;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard;
+use Aaxis\Bundle\OntologyBundle\Manager\EntityRecordEraser;
 use Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader;
+use Aaxis\Bundle\OntologyBundle\Manager\RecordFilter;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\EntityBundle\Provider\EntityFieldProvider;
 use Oro\Bundle\EntityBundle\Provider\EntityProvider;
@@ -220,51 +221,77 @@ class OntologyEntityController extends AbstractOntologyController
     }
 
     /**
-     * Deletes every stored record of the entity (the "erase records" action on the Entities grid)
-     * while keeping the entity and its attributes. Irreversible: there is no soft delete and the
-     * version history goes with it.
+     * The Erase popup's selection: how many records it holds and, with `rows=1`, one page of them
+     * (ordered by unique id). Query: `mode` = all | filter, plus `attribute`, `operator`, `value`
+     * for a filter ({@see RecordFilter}), `page`, `pageSize` (≤ 50).
+     *
+     * Shows record CONTENT, so it needs `OntologyData` VIEW on top of the entity VIEW (like the
+     * DWL playground). A selection that does not parse answers 422 with the reason.
+     */
+    #[Route(
+        path: '/entities/api/{id}/erase/preview',
+        name: 'aaxis_ontology_entity_erase_preview',
+        requirements: ['id' => '\d+'],
+        options: ['expose' => true],
+        methods: ['GET']
+    )]
+    #[AclAncestor('aaxis_ontology_entity_view')]
+    public function erasePreviewAction(OntologyEntity $entity, Request $request): JsonResponse
+    {
+        if (!$this->isGranted('VIEW', 'entity:' . OntologyData::class)) {
+            return new JsonResponse(['success' => false, 'message' => self::ACCESS_DENIED], 403);
+        }
+        $eraser = $this->container->get(EntityRecordEraser::class);
+        try {
+            $filter = RecordFilter::parse($request->query->all());
+            if (!$request->query->getBoolean('rows')) {
+                return new JsonResponse(['success' => true, 'total' => $eraser->count($entity, $filter)]);
+            }
+            $page = max(1, $request->query->getInt('page', 1));
+            $pageSize = max(1, min($request->query->getInt('pageSize', 10), EntityRecordEraser::MAX_PAGE_SIZE));
+
+            return new JsonResponse(['success' => true, 'page' => $page, 'pageSize' => $pageSize] + $eraser->preview($entity, $filter, $page, $pageSize));
+        } catch (\InvalidArgumentException $e) {
+            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * Erases the entity's stored records — ALL of them, or those matching one attribute condition
+     * (JSON body: the same selection as {@see erasePreviewAction()}) — with their version history,
+     * keeping the entity and its attributes. Irreversible: there is no soft delete.
      *
      * Permissions: the entity itself survives, so this is NOT an entity-delete — it is a data
      * delete, gated on `OntologyData` DELETE on top of the page's entity VIEW.
      *
-     * Flow execution events (`aaxis_ontology_data_events`) are deliberately left alone: they are a
-     * log of what the flows DID, not records of the entity.
+     * Flow execution events are deliberately left alone: they are a log of what the flows DID,
+     * not records of the entity.
      */
     #[Route(
-        path: '/entities/api/{id}/records',
-        name: 'aaxis_ontology_entity_purge_records',
+        path: '/entities/api/{id}/records/erase',
+        name: 'aaxis_ontology_entity_erase_records',
         requirements: ['id' => '\d+'],
         options: ['expose' => true],
-        methods: ['DELETE']
+        methods: ['POST']
     )]
     #[AclAncestor('aaxis_ontology_entity_view')]
     #[CsrfProtection]
-    public function purgeRecordsAction(OntologyEntity $entity): JsonResponse
+    public function eraseRecordsAction(OntologyEntity $entity, Request $request): JsonResponse
     {
         if (!$this->isGranted('DELETE', 'entity:' . OntologyData::class)) {
             return new JsonResponse(['success' => false, 'message' => self::ACCESS_DENIED], 403);
         }
+        $body = json_decode($request->getContent(), true);
+        try {
+            $filter = RecordFilter::parse(\is_array($body) ? $body : []);
 
-        // Bucket-backed entities: drop their objects too (records AND history). The DB deletes
-        // below still run — they clear any rows left from before the backend switch.
-        $bucketDeleted = 0;
-        if (($entity->getSystem()?->isExternal() ?? false)
-            && $this->container->get(BucketEntityDataStore::class)->isEnabled()) {
-            // Even for force-db entities: erase means erase — stale bucket objects written
-            // before the flag flipped must go too.
-            $bucketDeleted = $this->container->get(BucketEntityDataStore::class)->purgeEntity($entity);
+            return new JsonResponse([
+                'success' => true,
+                'deleted' => $this->container->get(EntityRecordEraser::class)->erase($entity, $filter),
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }
-
-        $em = $this->registry()->getManagerForClass(OntologyData::class);
-        // DQL deletes: no hydration, since an entity can hold a very large number of records.
-        $em->createQuery('DELETE FROM ' . OntologyDataHistory::class . ' h WHERE h.entity = :entity')
-            ->setParameter('entity', $entity)
-            ->execute();
-        $deleted = (int) $em->createQuery('DELETE FROM ' . OntologyData::class . ' d WHERE d.entity = :entity')
-            ->setParameter('entity', $entity)
-            ->execute();
-
-        return new JsonResponse(['success' => true, 'deleted' => $deleted + $bucketDeleted]);
     }
 
     /**
@@ -707,6 +734,7 @@ class OntologyEntityController extends AbstractOntologyController
             DwlOutputFormatter::class,
             DwlScriptGuard::class,
             OroEntityReader::class,
+            EntityRecordEraser::class,
         ]);
     }
 }

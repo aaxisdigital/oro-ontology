@@ -7,13 +7,13 @@ namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Controller;
 use Aaxis\Bundle\OntologyBundle\Controller\OntologyEntityController;
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyData;
-use Aaxis\Bundle\OntologyBundle\Entity\OntologyDataHistory;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntity;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyEntityAttribute;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlOutputFormatter;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard;
+use Aaxis\Bundle\OntologyBundle\Manager\EntityRecordEraser;
 use Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader;
 use Aaxis\Bundle\OntologyBundle\Tests\Unit\Controller\Fixtures\ControllerKit;
 use Oro\Bundle\EntityBundle\Provider\EntityFieldProvider;
@@ -32,6 +32,7 @@ class OntologyEntityControllerTest extends TestCase
     private EntityProvider&MockObject $entityProvider;
     private EntityFieldProvider&MockObject $fieldProvider;
     private OroEntityReader&MockObject $reader;
+    private EntityRecordEraser&MockObject $eraser;
     private DwlScriptGuard&MockObject $guard;
     private DwlOutputFormatter&MockObject $formatter;
     private DwlTransformer&MockObject $dwl;
@@ -48,6 +49,7 @@ class OntologyEntityControllerTest extends TestCase
         $this->guard = $this->createMock(DwlScriptGuard::class);
         $this->formatter = $this->createMock(DwlOutputFormatter::class);
         $this->dwl = $this->createMock(DwlTransformer::class);
+        $this->eraser = $this->createMock(EntityRecordEraser::class);
         foreach ([
             BucketEntityDataStore::class => $this->store,
             EntityProvider::class => $this->entityProvider,
@@ -56,6 +58,7 @@ class OntologyEntityControllerTest extends TestCase
             DwlScriptGuard::class => $this->guard,
             DwlOutputFormatter::class => $this->formatter,
             DwlTransformer::class => $this->dwl,
+            EntityRecordEraser::class => $this->eraser,
         ] as $id => $service) {
             $this->kit->set($id, $service);
         }
@@ -555,63 +558,113 @@ class OntologyEntityControllerTest extends TestCase
 
     // --- erase records ------------------------------------------------------------------------
 
-    public function testErasingNeedsTheDataDeletePermissionOnTopOfTheEntityOne(): void
+    /**
+     * @param array<string, mixed> $query
+     */
+    private static function get(array $query): Request
+    {
+        return Request::create('/', 'GET', $query);
+    }
+
+    public function testThePreviewNeedsToReadTheRecordContent(): void
+    {
+        $this->eraser->expects(self::never())->method(self::anything());
+
+        $response = $this->controller->erasePreviewAction($this->playgroundEntity(), self::get(['mode' => 'all']));
+
+        self::assertSame(403, $response->getStatusCode());
+    }
+
+    public function testThePreviewCountsTheSelectionByDefault(): void
+    {
+        $this->kit->granted = [self::VIEW_DATA];
+        $entity = $this->playgroundEntity();
+        $this->eraser->expects(self::once())->method('count')
+            ->with($entity, ['attribute' => 'status', 'path' => ['status'], 'operator' => 'ne', 'value' => 'open'])
+            ->willReturn(4);
+        $this->eraser->expects(self::never())->method('preview');
+
+        $response = $this->controller->erasePreviewAction($entity, self::get(['mode' => 'filter', 'attribute' => 'status', 'operator' => 'ne', 'value' => 'open']));
+
+        self::assertSame(['success' => true, 'total' => 4], ControllerKit::decode($response));
+    }
+
+    public function testThePreviewServesAPageWhenAskedForRows(): void
+    {
+        $this->kit->granted = [self::VIEW_DATA];
+        $entity = $this->playgroundEntity();
+        $this->eraser->expects(self::once())->method('preview')->with($entity, null, 2, 50)
+            ->willReturn(['total' => 61, 'records' => [['uniqueId' => 'A']]]);
+
+        $response = $this->controller->erasePreviewAction($entity, self::get(['mode' => 'all', 'rows' => '1', 'page' => '2', 'pageSize' => '500']));
+
+        self::assertSame(
+            ['success' => true, 'page' => 2, 'pageSize' => 50, 'total' => 61, 'records' => [['uniqueId' => 'A']]],
+            ControllerKit::decode($response)
+        );
+    }
+
+    public function testAnInvalidSelectionIsAnswered422WithTheReason(): void
     {
         $this->kit->granted = [self::VIEW_DATA];
 
-        $response = $this->controller->purgeRecordsAction($this->playgroundEntity());
+        $response = $this->controller->erasePreviewAction($this->playgroundEntity(), self::get(['mode' => 'filter', 'attribute' => 'a', 'operator' => 'eq']));
+
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame(['success' => false, 'message' => 'Enter the value to compare with.'], ControllerKit::decode($response));
+    }
+
+    public function testAnInternalEntityIsAnswered422(): void
+    {
+        $this->kit->granted = [self::VIEW_DATA, self::DELETE_DATA];
+        $this->eraser->method('count')->willThrowException(new \InvalidArgumentException('not here'));
+        $this->eraser->method('erase')->willThrowException(new \InvalidArgumentException('not here'));
+        $internal = self::entity(11, 'Oro\\X', self::system(2, 'OroCommerce', false));
+
+        self::assertSame(422, $this->controller->erasePreviewAction($internal, self::get(['mode' => 'all']))->getStatusCode());
+        self::assertSame(['success' => false, 'message' => 'not here'], ControllerKit::decode($this->controller->eraseRecordsAction($internal, self::post(['mode' => 'all']))));
+    }
+
+    public function testErasingNeedsTheDataDeletePermissionOnTopOfTheEntityOne(): void
+    {
+        $this->kit->granted = [self::VIEW_DATA];
+        $this->eraser->expects(self::never())->method('erase');
+
+        $response = $this->controller->eraseRecordsAction($this->playgroundEntity(), self::post(['mode' => 'all']));
 
         self::assertSame(403, $response->getStatusCode());
         self::assertSame(['success' => false, 'message' => 'Access denied.'], ControllerKit::decode($response));
-        self::assertSame([], $this->kit->orm->queries);
     }
 
-    public function testErasingDropsHistoryAndRecordsWithoutHydratingAnything(): void
+    public function testErasingTheSelection(): void
     {
         $this->kit->granted = [self::DELETE_DATA];
         $entity = $this->playgroundEntity();
-        $this->kit->orm->queryResult = static fn (string $dql): int => str_contains($dql, OntologyDataHistory::class) ? 40 : 12;
+        $this->eraser->expects(self::once())->method('erase')
+            ->with($entity, ['attribute' => 'qty', 'path' => ['qty'], 'operator' => 'lt', 'value' => '3'])
+            ->willReturn(12);
 
-        $response = $this->controller->purgeRecordsAction($entity);
+        $response = $this->controller->eraseRecordsAction($entity, self::post(['mode' => 'filter', 'attribute' => 'qty', 'operator' => 'lt', 'value' => 3]));
 
-        self::assertSame(['success' => true, 'deleted' => 12], ControllerKit::decode($response), 'only the live records are counted');
-        self::assertSame(
-            ['DELETE FROM ' . OntologyDataHistory::class . ' h WHERE h.entity = :entity', 'DELETE FROM ' . OntologyData::class . ' d WHERE d.entity = :entity'],
-            array_column($this->kit->orm->queries, 'dql')
-        );
-        self::assertSame(['entity' => $entity], $this->kit->orm->queries[1]['parameters']);
+        self::assertSame(['success' => true, 'deleted' => 12], ControllerKit::decode($response));
     }
 
-    public function testErasingAnExternalEntityAlsoEmptiesItsBucket(): void
+    public function testErasingWithABrokenBodyIsRefused(): void
     {
-        $store = $this->createMock(BucketEntityDataStore::class);
-        $store->method('isEnabled')->willReturn(true);
-        $entity = $this->playgroundEntity();
-        $store->expects(self::once())->method('purgeEntity')->with($entity)->willReturn(5);
-        $this->kit->set(BucketEntityDataStore::class, $store);
         $this->kit->granted = [self::DELETE_DATA];
-        $this->kit->orm->queryResult = static fn (): int => 2;
+        $this->eraser->expects(self::never())->method('erase');
 
-        self::assertSame(['success' => true, 'deleted' => 7], ControllerKit::decode($this->controller->purgeRecordsAction($entity)));
-    }
+        $response = $this->controller->eraseRecordsAction($this->playgroundEntity(), self::post('{oops'));
 
-    public function testErasingAnInternalEntityNeverTouchesTheBucket(): void
-    {
-        $store = $this->createMock(BucketEntityDataStore::class);
-        $store->method('isEnabled')->willReturn(true);
-        $store->expects(self::never())->method('purgeEntity');
-        $this->kit->set(BucketEntityDataStore::class, $store);
-        $this->kit->granted = [self::DELETE_DATA];
-        $this->kit->orm->queryResult = static fn (): int => 0;
-
-        $this->controller->purgeRecordsAction(self::entity(11, 'Oro\\X', self::system(2, 'OroCommerce', false)));
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame(['success' => false, 'message' => 'Choose "All records" or a filter.'], ControllerKit::decode($response));
     }
 
     public function testItSubscribesToTheServicesItUses(): void
     {
         $services = OntologyEntityController::getSubscribedServices();
 
-        foreach ([BucketEntityDataStore::class, EntityProvider::class, EntityFieldProvider::class, DwlTransformer::class, DwlOutputFormatter::class, DwlScriptGuard::class, OroEntityReader::class] as $service) {
+        foreach ([BucketEntityDataStore::class, EntityProvider::class, EntityFieldProvider::class, DwlTransformer::class, DwlOutputFormatter::class, DwlScriptGuard::class, OroEntityReader::class, EntityRecordEraser::class] as $service) {
             self::assertContains($service, $services);
         }
     }

@@ -707,6 +707,37 @@
     }
 }
 
+// Flows grid: the pick checkbox at the start of an editable flow's Name cell ("Open all"). Native
+// flows get the same empty slot, so the names stay aligned.
+.aaxis-flow-pick {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    vertical-align: middle;
+
+    &__slot {
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 16px;
+        width: 16px;
+        margin: 0;
+        cursor: pointer;
+    }
+
+    &__box {
+        margin: 0;
+        cursor: pointer;
+    }
+
+    &__name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+}
+
 // Single-line "text or DWL" input (widgets/dwl-input.ts): a plain text input with the small
 // pure-text/DWL switch INSIDE its right end (the input reserves room for it). DWL mode shows the
 // text in the same code style as the multi-line field above.
@@ -718,6 +749,9 @@
         width: 100%;
         box-sizing: border-box;
         padding-right: 76px;
+        // Oro's form-control bottom margin would make this wrapper taller than the input and
+        // push the switch (centered on the WRAPPER) below the text line.
+        margin: 0;
     }
 
     .aaxis-dwl-input__input--code {
@@ -1121,6 +1155,211 @@
 }
 
 
+// --- Entities → Erase popup (widgets/erase-records.ts) ------------------------------------------
+// All records or one attribute comparison, the live count, an optional paged preview, then the
+// danger warning and the actions (the shared .aaxis-ontology-confirm look). The dialog body is a
+// flex column (like the Events run popup) in which only the preview TABLE gives way, so the
+// warning and the Cancel / Erase buttons stay visible whatever the window height.
+.aaxis-dialog__body.aaxis-erase-host {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.aaxis-erase {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1 1 auto;
+    min-height: 0;
+
+    > * {
+        flex: 0 0 auto;
+    }
+
+    &__question {
+        margin: 0;
+        font-weight: font-weight('bold');
+        color: #1b3a5b;
+    }
+
+    &__modes {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 24px;
+    }
+
+    &__mode {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+        font-weight: normal;
+        cursor: pointer;
+
+        input {
+            margin: 0;
+        }
+    }
+
+    // Attribute | comparison | value. The value slot stays when a comparison takes none, so the
+    // two selects never jump.
+    &__filter {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr 1.4fr;
+        gap: 8px;
+
+        .form-control {
+            width: 100%;
+            max-width: 100%;
+            height: 34px;
+            margin: 0;
+            box-sizing: border-box;
+        }
+
+        &.is-disabled {
+            opacity: 0.55;
+        }
+    }
+
+    &__hint {
+        margin: -4px 0 0;
+        color: #6b7a89;
+        font-size: 12px;
+
+        &[hidden] {
+            display: none;
+        }
+    }
+
+    &__summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 30px;
+    }
+
+    &__count {
+        font-weight: font-weight('bold');
+        color: #2b3a4a;
+
+        &.is-error {
+            color: #c0392b;
+            font-weight: normal;
+        }
+    }
+
+    > .aaxis-erase__preview {
+        display: flex;
+        flex-direction: column;
+        flex: 0 1 auto;
+        min-height: 0;
+
+        &[hidden] {
+            display: none;
+        }
+
+        &.is-loading {
+            opacity: 0.5;
+        }
+    }
+
+    &__table-wrap {
+        flex: 0 1 auto;
+        min-height: 110px;
+        max-height: 320px;
+        overflow: auto;
+        border: 1px solid #e4e9ee;
+        border-radius: 4px;
+    }
+
+    &__table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+        font-size: 12.5px;
+
+        th,
+        td {
+            padding: 6px 10px;
+            border-bottom: 1px solid #eef1f4;
+            text-align: left;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        th {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: #f7f9fb;
+            color: #5c6b7a;
+            font-weight: font-weight('bold');
+        }
+
+        th:nth-child(1) {
+            width: 26%;
+        }
+
+        th:nth-child(2) {
+            width: 72px;
+        }
+
+        th:nth-child(3) {
+            width: 24%;
+        }
+
+        th.aaxis-erase__num,
+        td.aaxis-erase__num {
+            text-align: right;
+        }
+    }
+
+    &__payload code {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 0;
+        background: none;
+        color: #1b3a5b;
+        font-size: 12px;
+    }
+
+    &__pager {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 8px;
+        font-size: 12.5px;
+        color: #5c6b7a;
+    }
+
+    &__empty {
+        margin: 0;
+        color: #8a98a6;
+        font-style: italic;
+    }
+
+    &__spinner {
+        margin-right: 6px;
+    }
+
+    .aaxis-ontology-confirm__danger {
+        margin: 0;
+    }
+
+    .aaxis-ontology-confirm__actions {
+        margin-top: 0;
+    }
+}
+
+
 // --- Add Data form ----------------------------------------------------------
 
 .aaxis-data-form {
@@ -1361,145 +1600,28 @@
     // Fill the viewport below Oro's page chrome so the canvas gets all remaining height.
     min-height: calc(100vh - 230px);
 
-    &__topbar {
-        display: flex;
-        // Bottom-aligned: the buttons sit on the same row as the input/switch (the labels stick
-        // up above on the left).
-        align-items: flex-end;
-        justify-content: space-between;
-        gap: 16px;
-        // No horizontal padding — the Flow Name aligns with the grid's left edge (the page
-        // container already provides the outer margin); just enough breathing room vertically.
-        padding: 10px 0;
-        background: #fff;
-        border-bottom: 1px solid #d6dde4;
-    }
-
-    // Left topbar side: stacked label-above-control fields (narrow). Top-aligned so BOTH labels
-    // sit on the same Y; the switch centers itself against the input's 36px row via its margins.
-    &__name {
-        display: flex;
-        align-items: flex-start;
-        gap: 14px;
-        flex: 1 1 auto;
-        min-width: 0;
-    }
-
-    &__field {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 3px;
-        min-width: 0;
-    }
-
-    &__field-label {
-        margin: 0;
-        font-size: 11.5px;
-        font-weight: font-weight('bold');
-        line-height: 1.2;
-        color: #5a6b7d;
-        white-space: nowrap;
-    }
-
-    &__field--switch {
-        align-items: center;
-
-        .aaxis-flow-editor__switch {
-            margin: 6px 0; // 24px track + 6+6 = the input's 36px row
-        }
-    }
-
-    &__name-input {
-        width: 320px;
-        max-width: 100%;
-        height: 36px;
-        padding: 4px 10px;
-        box-sizing: border-box;
-        border: 1px solid #c7d0d9;
-        border-radius: 4px;
-        font-size: 14px;
-
-        &:focus {
-            outline: none;
-            border-color: #2b6cb0;
-        }
-    }
-
-    // Read-only mirror of the trigger step's name (the flow is named by its trigger).
-    &__name-display {
-        min-width: 160px;
-        max-width: 340px;
-        padding: 6px 0;
-        font-size: 15px;
-        font-weight: font-weight('bold');
-        color: #1b3a5b;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    &__controls {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex: 0 0 auto;
-
-        .btn {
-            // Flex centering ignores the whitespace text nodes between the icon and label spans,
-            // so an icon-only button (narrow mode) shows its image dead-center; the gap replaces
-            // any theme icon margin (zeroed below, it would skew the centering).
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            // Same box as the name input beside it, so the bottom-aligned row reads as one line.
-            height: 36px;
-        }
-
-        .btn .fa {
-            margin: 0;
-        }
-    }
-
-    // Narrow viewports: the buttons drop their text and keep icon + title tooltip only.
-    @media (max-width: 1199px) {
-        &__btn-text {
-            display: none;
-        }
-
-        &__controls .btn {
-            min-width: 44px;
-            padding-left: 0;
-            padding-right: 0;
-        }
-    }
-
-    // Run Now as a split button: the main button plus a caret opening its sub-options (Debug),
-    // joined into one control. The menu reuses the canvas context menu's look, anchored under
-    // the caret instead of at the pointer.
+    // Run Now as a split control in the tab bar's canvas group: the play button plus a caret
+    // opening its sub-options (Debug), joined into one piece. The menu reuses the canvas context
+    // menu's look, anchored under the control instead of at the pointer.
     &__run {
         position: relative;
         display: inline-flex;
+        align-items: flex-end;
 
         &[hidden] {
             display: none;
         }
     }
 
-    &__controls .btn.aaxis-flow-editor__run-main {
+    &__tab.aaxis-flow-editor__run-main {
         border-top-right-radius: 0;
-        border-bottom-right-radius: 0;
     }
 
-    // Narrow in both modes (the icon-only rule above would widen it to 44px).
-    &__controls .btn.aaxis-flow-editor__run-caret {
-        min-width: 26px;
-        width: 26px;
+    &__tab.aaxis-flow-editor__run-caret {
         margin-left: -1px;
-        padding: 0;
+        padding-left: 6px;
+        padding-right: 6px;
         border-top-left-radius: 0;
-        border-bottom-left-radius: 0;
     }
 
     &__menu.aaxis-flow-editor__run-menu {
@@ -1564,16 +1686,16 @@
     // background (VB6-style form grid; spacing via the --aaxis-flow-grid custom property set by
     // the component) and is sized by the component to the content extent, so anything placed
     // beyond the visible area brings up scrollbars instead of being clipped away.
-    // The tab bar between the topbar and the canvas: one tab per open flow (title = trigger
-    // name, dot = unsaved, x = close) + the two icon-only ACTION tabs (open / add).
+    // The tab bar above the canvas (the editor has no top bar): the flow tabs on the left (title
+    // = trigger name, dot = unsaved, x = close) and every editor action as an icon-only "tab" at
+    // the right edge, in two groups. Only the TAB LIST scrolls sideways when many flows are open,
+    // so the actions stay put and the Run Now menu is never clipped.
     &__tabs {
         display: flex;
         align-items: flex-end;
-        gap: 2px;
         padding: 6px 12px 0;
         border-bottom: 1px solid #d6dde4;
         background: #f0f3f6;
-        overflow-x: auto;
     }
 
     &__tab {
@@ -1603,6 +1725,16 @@
         &:hover:not(.is-active) {
             background: #eef1f4;
         }
+
+        &[hidden] {
+            display: none;
+        }
+
+        // Oro's reboot rings every FOCUSED button, mouse clicks included: keep the ring for
+        // keyboard focus only.
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
     }
 
     &__tab-title {
@@ -1627,19 +1759,35 @@
         }
     }
 
-    // The flow tabs lay out as direct children of the bar; the ACTION group (open, new, save,
-    // save all, close all, toolbox) pushes itself to the bar's right edge.
+    // The flow tabs: the one part of the bar that scrolls. It reaches 1px down over the bar's
+    // bottom border (negative margin + matching padding), so the active tab's -1px still covers
+    // that line inside the scroll box instead of being clipped.
     &__tab-list {
-        display: contents;
-    }
-
-    &__tab-actions {
         display: flex;
         align-items: flex-end;
         gap: 2px;
+        flex: 1 1 auto;
+        min-width: 0;
+        margin-bottom: -1px;
+        padding-bottom: 1px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+    }
+
+    // The two action groups (canvas tools | document tools), a small gap between them.
+    &__tab-actions {
+        display: flex;
+        align-items: flex-end;
+        gap: 14px;
         flex: 0 0 auto;
-        margin-left: auto;
         padding-left: 12px;
+    }
+
+    &__tab-group {
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
     }
 
     // Drag-reorder drop indicators: a strong edge on the half where the tab would land.
@@ -2248,8 +2396,8 @@
         display: none;
     }
 
-    // The × in the toolbox title bar.
-    // Header tools: expand all / collapse all sections, then hide.
+    // Toolbox header tools: expand all / collapse all sections, then hide (×). One box rule for
+    // all three, so they share one centre line.
     &__toolbox-tools {
         display: inline-flex;
         align-items: center;
@@ -2258,32 +2406,40 @@
     }
 
     &__toolbox-tool {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        padding: 0;
         border: 0;
         background: transparent;
-        padding: 0 2px;
         color: #8a98a6;
         font-size: 13px;
         line-height: 1;
         cursor: pointer;
 
+        // The handle greys every .fa; inside a tool the glyph follows the button (hover).
+        .fa {
+            color: inherit;
+        }
+
         &:hover {
             color: #2b3a4a;
+        }
+
+        // Oro's reboot rings every FOCUSED button, mouse clicks included (the blue box left
+        // around a clicked icon): keep the ring for keyboard focus only.
+        &:focus:not(:focus-visible) {
+            outline: none;
         }
     }
 
-    &__toolbox-hide {
-        margin-left: auto;
-        border: 0;
-        background: transparent;
-        padding: 0 2px;
-        color: #8a98a6;
-        font-size: 13px;
-        line-height: 1;
-        cursor: pointer;
-
-        &:hover {
-            color: #2b3a4a;
-        }
+    // FA 4's × is shorter than the square glyphs and sits on their baseline: lift it onto their
+    // centre line (measured 0.9px low at 13px).
+    &__toolbox-hide .fa {
+        position: relative;
+        top: -1px;
     }
 
     // "Flying" step settings: viewport-covering backdrop that absorbs outside clicks + a panel
@@ -2308,6 +2464,12 @@
         border: 1px solid #d6dde4;
         border-radius: 8px;
         box-shadow: 0 12px 36px rgba(17, 24, 33, 0.28);
+
+        // Entity Read: room for its Load row's four selects (measured: 600px is the narrowest
+        // width where "By attribute", a long attribute name, "DESC" and "No limit" all show).
+        &.is-medium {
+            width: 600px;
+        }
 
         // Widens when a section opens the right-hand column (e.g. the reader's body content).
         &.is-wide {
@@ -2507,6 +2669,13 @@
         flex-direction: column;
         gap: 6px;
         min-width: 0;
+
+        // A switch standing as a column's control (trigger Enabled, endpoint Public, HTTP Async)
+        // takes the 34px height of the inputs beside it, so its track centers on their line.
+        > .aaxis-flow-editor__switch {
+            align-self: flex-start;
+            height: 34px;
+        }
     }
 
     // Connector select + the button that re-fetches the (page-load cached) connector catalog.

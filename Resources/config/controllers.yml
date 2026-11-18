@@ -16,6 +16,7 @@ services:
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore, key: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore }
             - { name: container.service_subscriber, id: oro_entity.entity_provider, key: Oro\Bundle\EntityBundle\Provider\EntityProvider }
             - { name: container.service_subscriber, id: oro_entity.entity_field_provider, key: Oro\Bundle\EntityBundle\Provider\EntityFieldProvider }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\EntityRecordEraser, key: Aaxis\Bundle\OntologyBundle\Manager\EntityRecordEraser }
 
     Aaxis\Bundle\OntologyBundle\Controller\OntologyConnectorController:
         calls:

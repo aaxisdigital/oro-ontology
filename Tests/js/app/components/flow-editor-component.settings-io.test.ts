@@ -44,6 +44,15 @@ const FLOWS = {records: [
 describe('OntologyFlowEditorComponent — Entity Read / Entity Write settings', () => {
     useFlowEditorEnv(FlowEditorComponent);
 
+    it('gives the reader the medium panel, so its Load row selects show their values', async () => {
+        await open(st('r', 'entity_read', 'read', 300, 0));
+        expect($('.aaxis-flow-editor__settings').hasClass('is-medium')).toBe(true);
+        $('.aaxis-flow-editor__settings').remove();
+
+        await open(st('w', 'entity_write', 'write', 300, 0, {system: 'crm', entity: 'order'}));
+        expect($('.aaxis-flow-editor__settings').hasClass('is-medium')).toBe(false);
+    });
+
     it('reads all records with optional ordering and limit from the entity\'s reader attributes', async () => {
         const editor = await open(st('r', 'entity_read', 'read', 300, 0));
         const $system = field('config_system_label');

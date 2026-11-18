@@ -15,70 +15,74 @@
              }|json_encode }}">
 
             <div class="aaxis-flow-editor" data-role="editor">
-                <div class="aaxis-flow-editor__topbar">
-                    {# Labels sit ABOVE their controls to keep the left side narrow. #}
-                    {# The flow's name lives on its TRIGGER STEP and shows as the TAB title below. #}
-                    {# Every button: icon + a text span that a <1200px viewport hides (icon-only mode). #}
-                    <div class="aaxis-flow-editor__controls">
-                        {# Lays every step out in execution order, wrapping rows at the viewport width. #}
-                        <button type="button" class="btn" data-role="organize" hidden
-                                title="{{ 'aaxis.ontology.flow_editor.organize'|trans }}">
-                            <span class="fa fa-th" aria-hidden="true"></span>
-                            <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.organize'|trans }}</span>
-                        </button>
-                        {# Manual runs, offered only for flows that contain a trigger (kept in sync by the
-                           component) and whether or not the flow is enabled — the trigger's switch gates the
-                           AUTOMATIC runs only. Run Now executes everything; Debug (step by step) is its
-                           sub-option behind the caret. #}
-                        <div class="aaxis-flow-editor__run" data-role="run-split" hidden>
-                            <button type="button" class="btn aaxis-flow-editor__run-main" data-role="debug"
-                                    title="{{ 'aaxis.ontology.flow_editor.run_now'|trans }}">
-                                <span class="fa fa-play" aria-hidden="true"></span>
-                                <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.run_now'|trans }}</span>
+                {# The TAB BAR — the editor has no top bar. Left: one tab per open flow, rendered by the
+                   component into tab-list (title = the trigger's name, • = unsaved, × = close). Right:
+                   every editor action, icon-only (the titles are the labels), in two groups:
+                   - CANVAS tools: toolbox show/hide, Run Now (Debug behind its caret), Organize;
+                   - after a small gap, DOCUMENT tools: new, open, save, save all, view source,
+                     history and × = close the editor (back to the flows list). #}
+                <div class="aaxis-flow-editor__tabs" data-role="tabs">
+                    <div class="aaxis-flow-editor__tab-list" data-role="tab-list"></div>
+                    <div class="aaxis-flow-editor__tab-actions" data-role="tab-actions">
+                        <div class="aaxis-flow-editor__tab-group" data-role="canvas-actions">
+                            <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action" data-role="toolbox-toggle"
+                                    title="{{ 'aaxis.ontology.flow_editor.tab_toolbox'|trans }}"
+                                    aria-label="{{ 'aaxis.ontology.flow_editor.tab_toolbox'|trans }}">
+                                <span class="fa fa-wrench" aria-hidden="true"></span>
                             </button>
-                            <button type="button" class="btn aaxis-flow-editor__run-caret" data-role="run-menu-toggle"
-                                    aria-haspopup="true" aria-expanded="false"
-                                    title="{{ 'aaxis.ontology.flow_editor.run_options'|trans }}">
-                                <span class="fa fa-caret-down" aria-hidden="true"></span>
-                            </button>
-                            <div class="aaxis-flow-editor__menu aaxis-flow-editor__run-menu" data-role="run-menu" role="menu" hidden>
-                                <button type="button" class="aaxis-flow-editor__menu-item" data-role="debug-step" role="menuitem"
-                                        title="{{ 'aaxis.ontology.flow_editor.debug'|trans }}">
-                                    <span class="fa fa-bug" aria-hidden="true"></span>{{ 'aaxis.ontology.flow_editor.debug'|trans }}
+                            {# Manual runs, offered only for flows that contain a trigger (kept in sync by the
+                               component) and whether or not the flow is enabled — the trigger's switch gates the
+                               AUTOMATIC runs only. Run Now executes everything; Debug (step by step) is its
+                               sub-option behind the caret. #}
+                            <div class="aaxis-flow-editor__run" data-role="run-split" hidden>
+                                <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action aaxis-flow-editor__run-main" data-role="debug"
+                                        title="{{ 'aaxis.ontology.flow_editor.run_now'|trans }}"
+                                        aria-label="{{ 'aaxis.ontology.flow_editor.run_now'|trans }}">
+                                    <span class="fa fa-play" aria-hidden="true"></span>
                                 </button>
+                                <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action aaxis-flow-editor__run-caret" data-role="run-menu-toggle"
+                                        aria-haspopup="true" aria-expanded="false"
+                                        title="{{ 'aaxis.ontology.flow_editor.run_options'|trans }}"
+                                        aria-label="{{ 'aaxis.ontology.flow_editor.run_options'|trans }}">
+                                    <span class="fa fa-caret-down" aria-hidden="true"></span>
+                                </button>
+                                <div class="aaxis-flow-editor__menu aaxis-flow-editor__run-menu" data-role="run-menu" role="menu" hidden>
+                                    <button type="button" class="aaxis-flow-editor__menu-item" data-role="debug-step" role="menuitem"
+                                            title="{{ 'aaxis.ontology.flow_editor.debug'|trans }}">
+                                        <span class="fa fa-bug" aria-hidden="true"></span>{{ 'aaxis.ontology.flow_editor.debug'|trans }}
+                                    </button>
+                                </div>
                             </div>
+                            {# Lays every step out in execution order, wrapping rows at the viewport width. #}
+                            <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action" data-role="organize" hidden
+                                    title="{{ 'aaxis.ontology.flow_editor.organize'|trans }}"
+                                    aria-label="{{ 'aaxis.ontology.flow_editor.organize'|trans }}">
+                                <span class="fa fa-th" aria-hidden="true"></span>
+                            </button>
                         </div>
-                        <button type="button" class="btn" data-role="view-source"
-                                title="{{ 'aaxis.ontology.flow_editor.view_source'|trans }}">
-                            <span class="fa fa-code" aria-hidden="true"></span>
-                            <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.view_source'|trans }}</span>
-                        </button>
-                        {# Enabled only for SAVED flows (synced with the debug buttons) — an unsaved
-                           canvas has no history rows to compare against. #}
-                        <button type="button" class="btn" data-role="flow-history" disabled
-                                title="{{ 'aaxis.ontology.flow_editor.history'|trans }}">
-                            <span class="fa fa-history" aria-hidden="true"></span>
-                            <span class="aaxis-flow-editor__btn-text">{{ 'aaxis.ontology.flow_editor.history'|trans }}</span>
-                        </button>
-                        {# Clean state at load: the exit button reads Close and Save is disabled until
-                           something changes (the component syncs the LABEL span + title, not the button text,
-                           so the icon survives). #}
-                        <button type="button" class="btn" data-role="cancel"
-                                title="{{ 'aaxis.ontology.flow_editor.close'|trans }}">
-                            <span class="fa fa-times" aria-hidden="true"></span>
-                            <span class="aaxis-flow-editor__btn-text" data-role="cancel-label">{{ 'aaxis.ontology.flow_editor.close'|trans }}</span>
-                        </button>
+                        {# Save starts disabled (clean state) and History until the flow is saved — the
+                           component keeps both in sync. "Save all" is two stacked floppies (FA 4 has no
+                           such glyph). #}
+                        {% set document_actions = [
+                            {role: 'tab-add', icon: 'fa-file-o', label: 'aaxis.ontology.flow_editor.tab_add'},
+                            {role: 'tab-open', icon: 'fa-folder-open-o', label: 'aaxis.ontology.flow_editor.tab_open'},
+                            {role: 'save', icon: 'fa-floppy-o', label: 'aaxis.ontology.flow_editor.tab_save', disabled: true},
+                            {role: 'save-all', icon: 'fa-floppy-o aaxis-flow-editor__save-all-back', label: 'aaxis.ontology.flow_editor.tab_save_all', disabled: true},
+                            {role: 'view-source', icon: 'fa-code', label: 'aaxis.ontology.flow_editor.view_source'},
+                            {role: 'flow-history', icon: 'fa-history', label: 'aaxis.ontology.flow_editor.history', disabled: true},
+                            {role: 'tab-close-all', icon: 'fa-times', label: 'aaxis.ontology.flow_editor.tab_close_all'}
+                        ] %}
+                        <div class="aaxis-flow-editor__tab-group" data-role="document-actions">
+                            {% for action in document_actions %}
+                                <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action" data-role="{{ action.role }}"
+                                        title="{{ action.label|trans }}" aria-label="{{ action.label|trans }}"{% if action.disabled ?? false %} disabled{% endif %}>
+                                    <span class="fa {{ action.icon }}" aria-hidden="true"></span>
+                                    {%- if action.role == 'save-all' %}<span class="fa fa-floppy-o aaxis-flow-editor__save-all-front" aria-hidden="true"></span>{% endif %}
+                                </button>
+                            {% endfor %}
+                        </div>
                     </div>
                 </div>
-
-                {# The canvas is a scroll viewport over an inner content plane (data-role="canvas",
-                   where steps/wires live and every coordinate is measured — its rect follows the
-                   scroll). The toolbox floats OUTSIDE the scroller so it stays viewport-pinned.
-                   The debugger sidebar (left of the design area) is filled and shown by the
-                   component while a Debug / Run Now session is active. #}
-                {# One tab per open flow (title = trigger name, • = unsaved, × = close) plus the
-                   two ACTION tabs: open an existing flow / start a new one. #}
-                <div class="aaxis-flow-editor__tabs" data-role="tabs"></div>
 
                 <div class="aaxis-flow-editor__canvas-wrap">
                     <aside class="aaxis-flow-editor__debugger" data-role="debugger" hidden></aside>
@@ -102,7 +106,7 @@
                                         aria-label="{{ 'aaxis.ontology.flow_editor.toolbox.collapse_all'|trans }}">
                                     <span class="fa fa-minus-square-o" aria-hidden="true"></span>
                                 </button>
-                                <button type="button" class="aaxis-flow-editor__toolbox-hide" data-role="toolbox-hide"
+                                <button type="button" class="aaxis-flow-editor__toolbox-tool aaxis-flow-editor__toolbox-hide" data-role="toolbox-hide"
                                         title="{{ 'aaxis.ontology.flow_editor.toolbox.hide'|trans }}"
                                         aria-label="{{ 'aaxis.ontology.flow_editor.toolbox.hide'|trans }}">
                                     <span class="fa fa-times" aria-hidden="true"></span>

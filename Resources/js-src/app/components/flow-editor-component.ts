@@ -509,8 +509,8 @@ interface PlacedStep extends FlowStep {
 }
 
 /**
- * Flow editor page: top bar with the flow name + enabled switch, toolbox toggle and cancel/save,
- * over a dot-matrix canvas (spacing from System Configuration). Steps are dragged from the
+ * Flow editor page: a tab bar (one tab per open flow; every editor action as an icon at its
+ * right edge — there is no top bar) over a dot-matrix canvas (spacing from System Configuration). Steps are dragged from the
  * floating toolbox onto the canvas as Z×Z tiles (Z = configurable multiple of the dot spacing,
  * default 8×) showing the step icon with the step NAME (unique, up to two rows) centered below.
  * Tiles move freely afterwards, always snapping to the grid; double-click opens the step settings
@@ -788,7 +788,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="tab-close-all"]', (e: any) => {
             e.preventDefault();
-            this.closeAllTabs();
+            this.closeEditor();
         });
         // Warm the settings catalogs in the background so the first panel opens instantly too.
         this.prefetchCatalogs();
@@ -800,19 +800,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (this.debugSession?.autoClose && !$(e.target).closest('[data-role="debugger"]').length) {
                 this.closeDebugSession();
             }
-        });
-        this.$el.on('click.aaxisFlowEditor', '[data-role="cancel"]', (e: any) => {
-            e.preventDefault();
-            // Discard/Close is SCOPED TO THE ACTIVE TAB: its changes are dropped and the tab
-            // closes; the other tabs keep their work untouched. Only closing the LAST tab
-            // leaves the editor — and being explicit, neither path raises the unsaved prompts
-            // for THIS tab (a lone tab means no other work to guard).
-            if (this.tabs.length > 1) {
-                this.closeTab(this.activeTab, true);
-                return;
-            }
-            this.discarding = true;
-            window.location.href = this.listUrl;
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="save-all"]', (e: any) => {
             e.preventDefault();
@@ -1649,14 +1636,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.syncDirty();
     }
 
-    /** Save is enabled only with pending changes; the cancel button reads Close when clean. */
+    /** Re-syncs everything that follows the pending changes: tabs, Save / Save all, run buttons. */
     private syncDirty(): void {
-        const dirty = this.snapshot() !== this.savedState;
-        const label = dirty ? __('aaxis.ontology.flow_editor.cancel') : __('aaxis.ontology.flow_editor.close');
-        // Only the label SPAN changes (the button also holds the icon); the title follows for
-        // the icon-only narrow-viewport mode.
-        this.$el.find('[data-role="cancel-label"]').text(label);
-        this.$el.find('[data-role="cancel"]').attr('title', label);
         this.syncDebugButtons();
         this.syncFlowNameDisplay();
         this.syncTabActions();
@@ -1761,15 +1742,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (!$tabsBar.length || !this.tabs) {
             return;
         }
-        // Two groups: the flow tabs (re-rendered on every change) and the action buttons at the
-        // far right, built ONCE so their spinners/disabled states survive re-renders.
-        if (!$tabsBar.find('[data-role="tab-actions"]').length) {
-            $tabsBar.empty().append(
-                $('<div/>', {'class': 'aaxis-flow-editor__tab-list', 'data-role': 'tab-list'}),
-                this.buildTabActions()
-            );
+        // Only the flow tabs re-render (on every change); the action groups at the bar's right
+        // edge are the twig's, so their spinners/disabled states survive re-renders.
+        let $bar = $tabsBar.find('[data-role="tab-list"]');
+        if (!$bar.length) {
+            $bar = $('<div/>', {'class': 'aaxis-flow-editor__tab-list', 'data-role': 'tab-list'}).prependTo($tabsBar);
         }
-        const $bar = $tabsBar.find('[data-role="tab-list"]');
         $bar.empty();
         this.tabs.forEach((tab, index) => {
             const active = index === this.activeTab;
@@ -1837,57 +1815,37 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
-     * The ACTION buttons at the FAR RIGHT of the tab bar — away from the flow tabs, so a
-     * close/switch click cannot slip onto them: open an existing flow, new flow, save, save all,
-     * close all, and the toolbox show/hide toggle.
+     * Save follows the ACTIVE tab's changes. Save all is for the OTHER tabs: it becomes available
+     * only while a tab that is not in focus holds changes (several changed flows always include
+     * one) — with only the focused flow changed, Save alone is the action. The toolbox toggle
+     * shows whether the toolbox is open.
      */
-    private buildTabActions(): any {
-        const action = (role: string, icon: string, titleKey: string): any => $('<button/>', {
-            type: 'button',
-            'class': 'aaxis-flow-editor__tab aaxis-flow-editor__tab--action',
-            'data-role': role,
-            title: __(`aaxis.ontology.flow_editor.${titleKey}`),
-            'aria-label': __(`aaxis.ontology.flow_editor.${titleKey}`)
-        }).append($('<span/>', {'class': `fa ${icon}`, 'aria-hidden': 'true'}));
-
-        return $('<div/>', {'class': 'aaxis-flow-editor__tab-actions', 'data-role': 'tab-actions'}).append(
-            action('tab-open', 'fa-folder-open-o', 'tab_open'),
-            action('tab-add', 'fa-plus', 'tab_add'),
-            action('save', 'fa-floppy-o', 'tab_save'),
-            // "Save all": two stacked floppies (Font Awesome 4 has no save-all glyph).
-            action('save-all', 'fa-floppy-o aaxis-flow-editor__save-all-back', 'tab_save_all')
-                .append($('<span/>', {'class': 'fa fa-floppy-o aaxis-flow-editor__save-all-front', 'aria-hidden': 'true'})),
-            action('tab-close-all', 'fa-window-close-o', 'tab_close_all'),
-            action('toolbox-toggle', 'fa-wrench', 'tab_toolbox')
-        );
-    }
-
-    /** Save / Save all follow the dirty state; the toolbox toggle shows whether it is open. */
     private syncTabActions(): void {
         if (!this.tabs) {
             return;
         }
         const dirty = this.snapshot() !== this.savedState;
+        const othersDirty = !this.discarding
+            && this.tabs.some((tab, index) => index !== this.activeTab && this.tabDirty(tab, false));
         this.$el.find('[data-role="save"]').prop('disabled', this.saving || !dirty);
-        this.$el.find('[data-role="save-all"]').prop('disabled', this.savingAll || !this.anyTabDirty());
+        this.$el.find('[data-role="save-all"]').prop('disabled', this.savingAll || !othersDirty);
         this.$el.find('[data-role="toolbox-toggle"]').toggleClass('is-active', !this.toolbox().hidden);
     }
 
     /**
-     * "Close all": every tab closes, leaving one fresh empty tab (the editor always keeps one).
-     * With unsaved work anywhere it asks first: Save (everything, then close — a flow that could
-     * not be saved stays open with its error), Don't save (discard and close), or Cancel.
+     * The × at the end of the tab bar: closes every tab AND the editor, back to the flows list.
+     * With unsaved work anywhere it asks first: Save (everything, then leave — when a flow could
+     * not be saved the editor stays, keeping open only those flows, their errors flashed), Don't
+     * save (discard and leave), or Cancel.
      */
-    private closeAllTabs(): void {
-        const closeTabs = (keepUnsaved: boolean): void => {
-            this.stashActiveTab();
-            const kept = keepUnsaved ? this.tabs.filter(tab => this.tabDirty(tab, false)) : [];
-            this.tabs = kept.length ? kept : [{flow: null, design: null, savedState: null, invalidNames: []}];
-            this.activeTab = 0;
-            this.loadTab(this.tabs[0]);
+    private closeEditor(): void {
+        const leave = (): void => {
+            // Explicit: whatever is still unsaved was the user's choice to drop — no guard prompts.
+            this.discarding = true;
+            window.location.href = this.listUrl;
         };
         if (!this.anyTabDirty()) {
-            closeTabs(false);
+            leave();
             return;
         }
         const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.tab_close_all'), width: '480px'});
@@ -1898,12 +1856,23 @@ class OntologyFlowEditorComponent extends BaseComponent {
             dialog.close();
             onClick();
         });
+        const saveThenLeave = (): void => this.saveAll(() => {
+            if (!this.anyTabDirty()) {
+                leave();
+                return;
+            }
+            // Some flows could not be saved: stay, with just those open.
+            this.stashActiveTab();
+            this.tabs = this.tabs.filter(tab => this.tabDirty(tab, false));
+            this.activeTab = 0;
+            this.loadTab(this.tabs[0]);
+        });
         $content.append($('<div/>', {'class': 'aaxis-ontology-confirm'}).append(
             $('<p/>', {'class': 'aaxis-ontology-confirm__q', text: __('aaxis.ontology.flow_editor.tab_close_all_question')}),
             $('<div/>', {'class': 'aaxis-ontology-confirm__actions'}).append(
                 button('dialog_cancel', false, () => undefined),
-                button('dont_save', false, () => closeTabs(false)),
-                button('save', true, () => this.saveAll(() => closeTabs(true)))
+                button('dont_save', false, leave),
+                button('save', true, saveThenLeave)
             )
         ));
     }
@@ -3447,6 +3416,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.settingsCol('step_name_label', $nameInput, 1.2),
             this.settingsCol('destination_label', $destination)
         ));
+
+        // The reader's Load row holds up to four selects (mode, order by, direction, limit) —
+        // at the default width their values are cut, so the reader takes the medium panel.
+        if (kind === 'reader') {
+            panel.classList.add('is-medium');
+        }
 
         let onEntityChange: () => void = () => undefined;
         const entityPair = this.systemEntitySection($body, initial, true, () => onEntityChange());

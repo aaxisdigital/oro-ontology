@@ -71,6 +71,16 @@ system_configuration:
                 label: aaxis.ontology.config.general.entity_version_history_days.label
                 tooltip: aaxis.ontology.config.general.entity_version_history_days.tooltip
                 required: false
+        aaxis_ontology.flow_history_purge:
+            ui_only: true
+            data_type: string
+            type: Aaxis\Bundle\OntologyBundle\Form\Type\FlowHistoryPurgeType
+            options:
+                label: aaxis.ontology.config.general.flow_history_purge.label
+                tooltip: aaxis.ontology.config.general.flow_history_purge.tooltip
+                required: false
+                # last cleanup + button — no "Use Default" wrapper (it would disable the button)
+                resettable: false
         aaxis_ontology.flow_runs_index:
             ui_only: true
             data_type: string
@@ -391,6 +401,7 @@ system_configuration:
                                         children:
                                             - aaxis_ontology.enabled
                                             - aaxis_ontology.flow_execution_history_days
+                                            - aaxis_ontology.flow_history_purge
                                             - aaxis_ontology.flow_version_history_days
                                             - aaxis_ontology.entity_version_history_days
                                             - aaxis_ontology.flow_runs_index

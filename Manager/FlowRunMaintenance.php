@@ -11,12 +11,14 @@ use Psr\Log\LoggerInterface;
 
 /**
  * Upkeep of the flow-execution history: the run index's REBUILD (System Configuration button,
- * `aaxis:ontology:flow-runs:rebuild`), its OUT-OF-SYNC flag, and the daily RETENTION purge
- * (`aaxis:ontology:flow-events:purge`) — one place, so the button, the commands and the
- * consumer cannot disagree on which backend, which window or what the flag means.
+ * `aaxis:ontology:flow-runs:rebuild`), its OUT-OF-SYNC flag, and the RETENTION purge (daily
+ * `aaxis:ontology:flow-history:purge`, or the Settings page's "Clean up now") — one place, so
+ * the buttons, the commands and the consumer cannot disagree on which backend, which window or
+ * what the flag means.
  *
- * The flag and the last rebuild live in two internal config values shown read-only on the
- * Settings page ({@see \Aaxis\Bundle\OntologyBundle\Form\Type\FlowRunIndexStatusType}).
+ * The flag, the last rebuild and the last purge live in internal config values shown read-only
+ * on the Settings page ({@see \Aaxis\Bundle\OntologyBundle\Form\Type\FlowRunIndexStatusType},
+ * {@see \Aaxis\Bundle\OntologyBundle\Form\Type\FlowHistoryPurgeType}).
  */
 class FlowRunMaintenance
 {
@@ -25,6 +27,12 @@ class FlowRunMaintenance
 
     /** JSON {at, storage, runs, days} of the last completed rebuild; '' = never rebuilt. */
     public const string LAST_REBUILD = 'aaxis_ontology.flow_runs_index_last_rebuild';
+
+    /**
+     * JSON {at, days, cutoff, events, runs, bucketConfigured, bucketObjects} of the last purge —
+     * daily job or the Settings page's "Clean up now" alike; '' = never purged.
+     */
+    public const string LAST_PURGE = 'aaxis_ontology.flow_history_last_purge';
 
     private const string HISTORY_DAYS = 'aaxis_ontology.flow_execution_history_days';
     private const int DEFAULT_HISTORY_DAYS = 30;
@@ -110,23 +118,35 @@ class FlowRunMaintenance
     }
 
     /**
+     * @return array{at: string, days: int, cutoff: string, events: int|null, runs: int|null, bucketConfigured: bool, bucketObjects: int|null}|null
+     */
+    public function lastPurge(): ?array
+    {
+        $decoded = json_decode((string) ($this->config->get(self::LAST_PURGE) ?? ''), true);
+
+        return \is_array($decoded) && isset($decoded['at'], $decoded['cutoff']) ? $decoded : null;
+    }
+
+    /**
      * RETENTION: drops the flow-execution history older than the history window from BOTH
      * stores — table events (by event time), run index rows (whose last event is older) and, when
      * a bucket connection is configured, the bucket's event day folders before the cutoff day.
      * Each store is purged independently: one failing is logged and reported, the others still run.
+     * The outcome is recorded ({@see lastPurge()}) for the Settings page.
      *
      * @return array{cutoff: string, events: int|null, runs: int|null, bucketConfigured: bool, bucketObjects: int|null}
      *               a null count = that store failed (see the log)
      */
     public function purge(?\DateTimeImmutable $now = null): array
     {
+        $days = $this->historyDays();
         $cutoff = ($now ?? new \DateTimeImmutable('now', new \DateTimeZone('UTC')))
             ->setTimezone(new \DateTimeZone('UTC'))
-            ->modify(sprintf('-%d days', $this->historyDays()));
+            ->modify(sprintf('-%d days', $days));
         $stamp = $cutoff->format(self::DB_MICRO);
         $bucket = $this->bucketEvents->isConfigured();
 
-        return [
+        $result = [
             'cutoff' => $stamp,
             'events' => $this->attempt('flow events table', fn (): int => $this->purgeEventTable($stamp)),
             'runs' => $this->attempt('run index', fn (): int => $this->runs->purgeBefore($stamp)),
@@ -135,6 +155,15 @@ class FlowRunMaintenance
                 ? $this->attempt('bucket flow events', fn (): int => $this->bucketEvents->purgeBefore($cutoff))
                 : null,
         ];
+        // Recording is a courtesy for the Settings page: the purge itself already happened.
+        $this->attempt('last purge record', function () use ($result, $days): int {
+            $this->config->set(self::LAST_PURGE, json_encode(['at' => self::now(), 'days' => $days] + $result));
+            $this->config->flush();
+
+            return 0;
+        });
+
+        return $result;
     }
 
     private function purgeEventTable(string $cutoff): int

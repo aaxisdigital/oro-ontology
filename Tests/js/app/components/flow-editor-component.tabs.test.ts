@@ -167,22 +167,6 @@ describe('OntologyFlowEditorComponent — tabs', () => {
 
         expect(tabTitles()).toEqual(['nightly', KEY('name_unset')]);
     });
-
-    it('scopes Discard to the active tab while others are open, and leaves the editor from the last', () => {
-        const editor = createEditor({flow: simpleFlow()});
-        root(editor).find('[data-role="tab-add"]').trigger('click');
-        dropFromToolbox('cron', 140, 140);
-
-        root(editor).find('[data-role="cancel"]').trigger('click');
-        expect(FlowDialog.instances).toHaveLength(0); // the button IS the confirmation
-        expect(tabTitles()).toEqual(['nightly']);
-
-        dropFromToolbox('logger', 540, 440);
-        root(editor).find('[data-role="cancel"]').trigger('click');
-        expect(window.location.hash).toBe('#flows');
-        // Leaving explicitly silences the unsaved-changes guards.
-        expect(editor.dirtyChecker()).toBe(false);
-    });
 });
 
 describe('OntologyFlowEditorComponent — the "open flow" picker', () => {

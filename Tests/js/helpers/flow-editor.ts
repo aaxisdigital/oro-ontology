@@ -72,26 +72,24 @@ export const PALETTE: Array<[string, Array<[string, string, string]>]> = [
         ['email', 'fa-envelope-o', 'Email'], ['ms_teams', 'fa-windows', 'MS Teams']]]
 ];
 
-/** The editor markup of Flow/editor.html.twig (topbar, tab bar, debugger, canvas, toolbox). */
+/** The editor markup of Flow/editor.html.twig (tab bar with its action groups, debugger, canvas, toolbox). */
 export function editorDom(): any {
-    const button = (role: string): string => {
-        const hidden = role === 'organize' ? ' hidden' : '';
-        const label = role === 'cancel'
-            ? '<span data-role="cancel-label">aaxis.ontology.flow_editor.close</span>'
-            : `<span class="aaxis-flow-editor__btn-text">${role}</span>`;
-        return `<button type="button" class="btn" data-role="${role}" title="${role}"${hidden}><span class="fa fa-x"></span>${label}</button>`;
-    };
+    const button = (role: string, extra = ''): string =>
+        `<button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action" data-role="${role}" title="${role}"${extra}><span class="fa fa-x"></span></button>`;
     // Run Now as a split button: the caret opens a menu holding Debug (debug-step).
     const runSplit = `
         <div class="aaxis-flow-editor__run" data-role="run-split" hidden>
             ${button('debug')}
-            <button type="button" class="btn" data-role="run-menu-toggle" aria-expanded="false" title="run-options"></button>
+            <button type="button" class="aaxis-flow-editor__tab" data-role="run-menu-toggle" aria-expanded="false" title="run-options"></button>
             <div class="aaxis-flow-editor__menu" data-role="run-menu" hidden>
                 <button type="button" class="aaxis-flow-editor__menu-item" data-role="debug-step" title="debug-step">debug-step</button>
             </div>
         </div>`;
-    // Toolbox toggle, Save and Save all live in the tab bar's action group (built by the component).
-    const buttons = [button('organize'), runSplit, ...['view-source', 'flow-history', 'cancel'].map(button)].join('');
+    const canvasActions = [button('toolbox-toggle'), runSplit, button('organize', ' hidden')].join('');
+    const documentActions = [
+        button('tab-add'), button('tab-open'), button('save', ' disabled'), button('save-all', ' disabled'),
+        button('view-source'), button('flow-history', ' disabled'), button('tab-close-all')
+    ].join('');
     const sections = PALETTE.map(([category, items]) => `
         <div class="aaxis-flow-editor__toolbox-section">
             <div class="aaxis-flow-editor__toolbox-section-title">
@@ -104,8 +102,13 @@ export function editorDom(): any {
     return $(`
         <div class="content">
             <div class="aaxis-flow-editor" data-role="editor">
-                <div class="aaxis-flow-editor__topbar"><div class="aaxis-flow-editor__controls">${buttons}</div></div>
-                <div class="aaxis-flow-editor__tabs" data-role="tabs"></div>
+                <div class="aaxis-flow-editor__tabs" data-role="tabs">
+                    <div class="aaxis-flow-editor__tab-list" data-role="tab-list"></div>
+                    <div class="aaxis-flow-editor__tab-actions" data-role="tab-actions">
+                        <div class="aaxis-flow-editor__tab-group" data-role="canvas-actions">${canvasActions}</div>
+                        <div class="aaxis-flow-editor__tab-group" data-role="document-actions">${documentActions}</div>
+                    </div>
+                </div>
                 <div class="aaxis-flow-editor__canvas-wrap">
                     <aside class="aaxis-flow-editor__debugger" data-role="debugger" hidden></aside>
                     <div class="aaxis-flow-editor__canvas" data-role="canvas-viewport">

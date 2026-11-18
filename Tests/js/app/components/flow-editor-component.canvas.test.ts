@@ -50,7 +50,6 @@ describe('OntologyFlowEditorComponent — dropping steps from the toolbox', () =
         expect(tabTitles()).toEqual(['schedule-1']);
         expect($('[data-role="tab"] .aaxis-flow-editor__tab-dirty')).toHaveLength(1);
         expect(root(editor).find('[data-role="save"]').prop('disabled')).toBe(false);
-        expect(root(editor).find('[data-role="cancel-label"]').text()).toBe(MENU('cancel'));
     });
 
     it('seeds a dropped endpoint with the response example and derives names from the labels', () => {

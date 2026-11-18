@@ -197,6 +197,64 @@ class FlowRunMaintenanceTest extends TestCase
             ['cutoff' => '2026-03-10 11:00:00.250000', 'events' => FlowRunIndex::PURGE_BATCH + 7, 'runs' => 3, 'bucketConfigured' => true, 'bucketObjects' => 9],
             $this->maintenance->purge($now)
         );
+
+        // The outcome is recorded for the Settings page's "last cleanup" line.
+        $last = $this->maintenance->lastPurge();
+        self::assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/', $last['at']);
+        unset($last['at']);
+        self::assertSame(
+            ['days' => 10, 'cutoff' => '2026-03-10 11:00:00.250000', 'events' => FlowRunIndex::PURGE_BATCH + 7, 'runs' => 3, 'bucketConfigured' => true, 'bucketObjects' => 9],
+            $last
+        );
+        self::assertSame(1, $this->flushes);
+    }
+
+    public function testAPurgeIsRecordedEvenWhenAStoreFailed(): void
+    {
+        $this->connection->method('executeStatement')->willThrowException(new \RuntimeException('locked'));
+        $this->bucket->method('isConfigured')->willReturn(false);
+
+        $this->maintenance->purge();
+
+        self::assertSame([null, 0, false, null], [
+            $this->maintenance->lastPurge()['events'], $this->maintenance->lastPurge()['runs'],
+            $this->maintenance->lastPurge()['bucketConfigured'], $this->maintenance->lastPurge()['bucketObjects'],
+        ]);
+    }
+
+    public function testFailingToRecordThePurgeIsLoggedAndTheReportStillReturned(): void
+    {
+        $config = $this->createMock(ConfigManager::class);
+        $config->method('get')->willReturn(null);
+        $config->method('set')->willThrowException(new \RuntimeException('config down'));
+        $doctrine = $this->createMock(ManagerRegistry::class);
+        $doctrine->method('getConnection')->willReturn($this->connection);
+        $this->connection->method('executeStatement')->willReturn(0);
+        $this->bucket->method('isConfigured')->willReturn(false);
+        $this->logger->expects(self::once())->method('error')
+            ->with('Flow execution history purge failed for the last purge record.');
+
+        $report = (new FlowRunMaintenance($doctrine, $config, $this->runs, $this->bucket, $this->logger))->purge();
+
+        self::assertSame(0, $report['events']);
+    }
+
+    /**
+     * @dataProvider unreadablePurges
+     */
+    public function testAnUnreadableLastPurgeReadsAsNever(mixed $stored): void
+    {
+        $this->values[FlowRunMaintenance::LAST_PURGE] = $stored;
+
+        self::assertNull($this->maintenance->lastPurge());
+    }
+
+    /**
+     * @return array<string, array{mixed}>
+     */
+    public static function unreadablePurges(): array
+    {
+        return ['unset' => [null], 'empty' => [''], 'not json' => ['{'], 'incomplete' => ['{"at":"x"}']];
     }
 
     public function testWithoutABucketOnlyTheDatabaseIsPurged(): void

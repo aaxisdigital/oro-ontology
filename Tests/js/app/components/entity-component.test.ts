@@ -20,6 +20,17 @@ vi.mock('../../../../Resources/js-src/app/widgets/dwl-playground', () => ({
     }
 }));
 
+const erasers: Array<{options: any; open: ReturnType<typeof vi.fn>}> = [];
+vi.mock('../../../../Resources/js-src/app/widgets/erase-records', () => ({
+    default: class {
+        open = vi.fn();
+
+        constructor(public options: any) {
+            erasers.push(this);
+        }
+    }
+}));
+
 const LIST_URL = '/aaxis_ontology_entity_list';
 const ORO_ENTITIES_URL = '/aaxis_ontology_entity_oro_entities';
 const ORO_FIELDS_URL = '/aaxis_ontology_entity_oro_fields';
@@ -45,6 +56,7 @@ describe('OntologyEntityComponent', () => {
     beforeEach(() => {
         resetFakes();
         playgrounds.length = 0;
+        erasers.length = 0;
         vi.spyOn(document, 'cookie', 'get').mockReturnValue('_csrf=tok');
     });
 
@@ -125,6 +137,7 @@ describe('OntologyEntityComponent', () => {
             expect(grid.action('purge').variant).toBe('danger');
             expect(grid.action('purge').disabled(entity({recordCount: 0}))).toBe(true);
             expect(grid.action('purge').disabled(entity({recordCount: 3}))).toBe(false);
+            expect(grid.action('purge').label).toBe('aaxis.ontology.entity_manager.purge_title');
             expect(grid.action('purge').disabledTitle).toBe('aaxis.ontology.entity_manager.purge_empty');
             expect(grid.action('delete').variant).toBe('danger');
         });
@@ -233,87 +246,48 @@ describe('OntologyEntityComponent', () => {
         });
     });
 
-    describe('purge', () => {
-        function openPurge(routes: Record<string, any> = {}, row: any = entity()) {
-            const ctx = mount({}, routes);
-            ctx.grid.options.onAction('purge', row);
+    describe('erase', () => {
+        it('is disabled for an OroCommerce entity, whose data is its own table', async () => {
+            const {grid} = mount();
+            await flush(); // the systems (external or not) arrive with the list
 
-            return {...ctx, dialog: FakeDialog.instances[0]};
-        }
-
-        it('asks for confirmation, stressing the entity itself stays', () => {
-            const {dialog} = openPurge();
-
-            expect(dialog.options).toMatchObject({title: 'aaxis.ontology.entity_manager.purge_title', width: '520px'});
-            expect(dialog.$content.find('.aaxis-ontology-confirm__q').text()).toBe('aaxis.ontology.entity_manager.confirm_purge');
-            expect(dialog.$content.find('.aaxis-ontology-confirm__danger').text())
-                .toBe('aaxis.ontology.entity_manager.purge_data_warning');
-            expect(dialog.$content.text()).toContain('aaxis.ontology.entity_manager.purge_keeps_entity');
-            expect(dialog.$content.find('.aaxis-ontology-confirm__delete').text()).toBe('aaxis.ontology.entity_manager.purge_confirm');
+            expect(grid.action('purge').disabled(entity({systemId: 2, recordCount: 900}))).toBe(true);
+            expect(grid.action('purge').disabled(entity({systemId: 1, recordCount: 900}))).toBe(false);
         });
 
-        it('cancels without a request', () => {
-            const {dialog, fetchSpy} = openPurge();
+        it('opens the Erase popup with the unique attribute first, then the others alphabetically', async () => {
+            const {grid} = mount();
+            await flush();
+
+            grid.options.onAction('purge', entity({
+                uniqueAttribute: 'sku',
+                attributes: [{name: 'weight'}, {name: 'sku'}, {name: 'address.city'}, {name: ''}]
+            }));
+
+            expect(erasers).toHaveLength(1);
+            expect(erasers[0].open).toHaveBeenCalled();
+            expect(erasers[0].options).toMatchObject({entityId: 10, entityLabel: 'Orders', attributes: ['sku', 'address.city', 'weight']});
+        });
+
+        it('offers just the configured attributes when there is no unique attribute, labelled by name', async () => {
+            const {grid} = mount();
+            await flush();
+
+            grid.options.onAction('purge', entity({uniqueAttribute: null, displayName: '', attributes: undefined}));
+
+            expect(erasers[0].options).toMatchObject({entityLabel: 'Order', attributes: []});
+        });
+
+        it('reloads the grid once records were erased', async () => {
+            const {grid, fetchSpy} = mount();
+            await flush();
+            grid.options.onAction('purge', entity());
             fetchSpy.mockClear();
 
-            dialog.$content.find('button.btn').first().trigger('click');
-
-            expect(dialog.close).toHaveBeenCalled();
-            expect(fetchSpy).not.toHaveBeenCalled();
-        });
-
-        it('erases via DELETE, flashes the deleted count, reloads and closes', async () => {
-            const {dialog, fetchSpy} = openPurge({'/aaxis_ontology_entity_purge_records': jsonResponse({success: true, deleted: 7})});
+            erasers[0].options.onErased(3);
             await flush();
 
-            dialog.$content.find('.aaxis-ontology-confirm__delete').trigger('click');
-            expect(dialog.$content.find('.aaxis-ontology-confirm__delete').prop('disabled')).toBe(true);
-            await flush();
-
-            const [url, init] = fetchSpy.mock.calls.find(c => c[0].startsWith('/aaxis_ontology_entity_purge_records'))!;
-            expect(url).toBe('/aaxis_ontology_entity_purge_records?id=10');
-            expect(init.method).toBe('DELETE');
-            expect(init.headers['X-CSRF-Header']).toBe('tok');
-            expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('success', 'aaxis.ontology.entity_manager.purged');
-            expect(fetchSpy.mock.calls.filter(c => c[0] === LIST_URL)).toHaveLength(2);
-            expect(dialog.close).toHaveBeenCalled();
-        });
-
-        it('reports zero when the server omits the deleted count', async () => {
-            const {dialog} = openPurge({'/aaxis_ontology_entity_purge_records': jsonResponse({success: true})});
-            await flush();
-
-            dialog.$content.find('.aaxis-ontology-confirm__delete').trigger('click');
-            await flush();
-
-            expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('success', 'aaxis.ontology.entity_manager.purged');
-        });
-
-        it.each([
-            ['with the server message', jsonResponse({success: false, message: 'Locked'}), 'Locked'],
-            ['when success is not literally true', jsonResponse({success: 'yes'}), 'aaxis.ontology.entity_manager.purge_error'],
-            ['on an HTTP failure', jsonResponse({success: true}, false), 'aaxis.ontology.entity_manager.purge_error'],
-            ['on an empty body', jsonResponse(null), 'aaxis.ontology.entity_manager.purge_error']
-        ])('flashes an error %s and still closes', async (_name, response, message) => {
-            const {dialog} = openPurge({'/aaxis_ontology_entity_purge_records': response});
-            await flush();
-
-            dialog.$content.find('.aaxis-ontology-confirm__delete').trigger('click');
-            await flush();
-
-            expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', message);
-            expect(dialog.close).toHaveBeenCalled();
-        });
-
-        it('flashes the generic error when the request fails', async () => {
-            const {dialog} = openPurge({'/aaxis_ontology_entity_purge_records': Promise.reject(new Error('net'))});
-            await flush();
-
-            dialog.$content.find('.aaxis-ontology-confirm__delete').trigger('click');
-            await flush();
-
-            expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', 'aaxis.ontology.entity_manager.purge_error');
-            expect(dialog.close).toHaveBeenCalled();
+            expect(fetchSpy.mock.calls.map(c => c[0])).toEqual([LIST_URL]);
         });
     });
 
@@ -422,14 +396,19 @@ describe('OntologyEntityComponent', () => {
             expect(attributes.fields[1].options).toEqual(DATATYPES);
         });
 
-        it('lays the first two rows out as system + storage, then name + unique attribute + enabled', async () => {
+        it('lays the rows out as system + name (50/50), then unique attribute + enabled + storage (50/15/35)', async () => {
             const {modal} = await openForm(null);
 
-            expect(modal.options.fields.map((f: any) => [f.key, f.row ?? null])).toEqual([
-                ['systemId', 'system'], ['forceDbStorage', 'system'], ['name', 'main'],
-                ['uniqueAttribute', 'main'], ['enabled', 'main'], ['attributes', null]
+            expect(modal.options.fields.map((f: any) => [f.key, f.row ?? null, f.width ?? null])).toEqual([
+                ['systemId', 'identity', '50%'], ['name', 'identity', '50%'],
+                ['uniqueAttribute', 'settings', '50%'], ['enabled', 'settings', '15%'], ['forceDbStorage', 'settings', '35%'],
+                ['attributes', null, null]
             ]);
+            expect(modal.field('forceDbStorage').hint).toBe('aaxis.ontology.entity.force_db_storage.hint');
+            // Only the attribute rows scroll; the fields, the title and the add button stay in view.
+            expect(modal.field('attributes').fill).toBe(true);
         });
+
     });
 
     describe('edit form', () => {
@@ -597,7 +576,8 @@ describe('OntologyEntityComponent', () => {
             await flush();
 
             expect(api.rebuildFields).toHaveBeenCalledTimes(1);
-            expect(api.rebuildFields.mock.calls[0][0].find((f: any) => f.key === 'name').type).toBe('select');
+            const internalName = api.rebuildFields.mock.calls[0][0].find((f: any) => f.key === 'name');
+            expect([internalName.type, internalName.row, internalName.width]).toEqual(['select', 'identity', '50%']);
         });
 
         it('reloads the fields and rebuilds when the entity changes within an internal system', async () => {

@@ -147,6 +147,26 @@ class OntologyConfigControllerTest extends TestCase
         self::assertSame(['success' => false], ControllerKit::decode($response));
     }
 
+    public function testTheHistoryCleanupIsQueued(): void
+    {
+        $this->producer->expects(self::once())->method('send')->with('aaxis_ontology_flow_history_purge', []);
+
+        $response = $this->controller->flowHistoryPurgeAction();
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(['success' => true], ControllerKit::decode($response));
+    }
+
+    public function testACleanupThatCannotBeQueuedFails(): void
+    {
+        $this->producer->method('send')->willThrowException(new \RuntimeException('broker down'));
+
+        $response = $this->controller->flowHistoryPurgeAction();
+
+        self::assertSame(500, $response->getStatusCode());
+        self::assertSame(['success' => false], ControllerKit::decode($response));
+    }
+
     public function testItSubscribesToTheServicesItUses(): void
     {
         $services = OntologyConfigController::getSubscribedServices();

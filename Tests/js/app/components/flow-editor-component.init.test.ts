@@ -35,7 +35,6 @@ describe('OntologyFlowEditorComponent — loading a flow', () => {
         expect(tabTitles()).toEqual(['nightly']);
         const $root = root(editor);
         expect($root.find('[data-role="save"]').prop('disabled')).toBe(true);
-        expect($root.find('[data-role="cancel-label"]').text()).toBe('aaxis.ontology.flow_editor.close');
         expect($root.find('[data-role="run-split"]').prop('hidden')).toBe(false);
         expect($root.find('[data-role="debug"]').prop('disabled')).toBe(false);
         expect($root.find('[data-role="flow-history"]').prop('disabled')).toBe(false);

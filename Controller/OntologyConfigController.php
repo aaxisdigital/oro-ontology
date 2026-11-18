@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Controller;
 
+use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowHistoryPurgeTopic;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowRunsRebuildTopic;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Manager\ConnectorTester;
@@ -71,6 +72,25 @@ class OntologyConfigController extends AbstractController
     {
         try {
             $this->container->get(MessageProducerInterface::class)->send(OntologyFlowRunsRebuildTopic::getName(), []);
+        } catch (\Throwable) {
+            return new JsonResponse(['success' => false], 500);
+        }
+
+        return new JsonResponse(['success' => true]);
+    }
+
+    /**
+     * Settings → "Clean up now": queues the retention purge the daily job runs (history older than
+     * "Flow execution history days", table and bucket alike); the page's "last cleanup" line
+     * shows the outcome once it is done.
+     */
+    #[Route(path: '/config/api/flow-history-purge', name: 'aaxis_ontology_config_flow_history_purge', options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('oro_config_system')]
+    #[CsrfProtection]
+    public function flowHistoryPurgeAction(): JsonResponse
+    {
+        try {
+            $this->container->get(MessageProducerInterface::class)->send(OntologyFlowHistoryPurgeTopic::getName(), []);
         } catch (\Throwable) {
             return new JsonResponse(['success' => false], 500);
         }

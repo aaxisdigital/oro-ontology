@@ -26,14 +26,22 @@ function sectionsCollapsed(): boolean[] {
 describe('OntologyFlowEditorComponent — tab bar actions', () => {
     useFlowEditorEnv(FlowEditorComponent);
 
-    it('groups open, new, save, save all, close all and the toolbox toggle at the right of the tab bar', () => {
+    it('renders only the flow tabs, leaving the twig\'s action groups in place', () => {
         const editor = createEditor({flow: simpleFlow()});
-        const $actions = root(editor).find('[data-role="tabs"] [data-role="tab-actions"]');
+        const $tabs = root(editor).find('[data-role="tabs"]');
 
-        expect($actions.children().map((_i: number, el: HTMLElement) => el.dataset.role).get())
-            .toEqual(['tab-open', 'tab-add', 'save', 'save-all', 'tab-close-all', 'toolbox-toggle']);
-        expect($actions.find('[data-role="save"]').attr('title')).toBe(KEY('tab_save'));
-        expect(root(editor).find('.aaxis-flow-editor__controls [data-role="save"], .aaxis-flow-editor__controls [data-role="toolbox-toggle"]')).toHaveLength(0);
+        expect($tabs.children().map((_i: number, el: HTMLElement) => el.dataset.role).get()).toEqual(['tab-list', 'tab-actions']);
+        expect($tabs.find('[data-role="tab-list"] [data-role="tab"]')).toHaveLength(1);
+        expect($tabs.find('[data-role="tab-actions"] [data-role="tab"]')).toHaveLength(0);
+        expect($tabs.find('[data-role="document-actions"]').children().map((_i: number, el: HTMLElement) => el.dataset.role).get())
+            .toEqual(['tab-add', 'tab-open', 'save', 'save-all', 'view-source', 'flow-history', 'tab-close-all']);
+    });
+
+    it('re-creates the tab list when the markup lacks it', () => {
+        $('[data-role="tab-list"]').remove();
+        const editor = createEditor({flow: simpleFlow()});
+
+        expect(root(editor).find('[data-role="tabs"] > [data-role="tab-list"]:first-child [data-role="tab"]')).toHaveLength(1);
     });
 
     it('keeps the same action buttons across re-renders, their state following the canvas', () => {
@@ -47,6 +55,24 @@ describe('OntologyFlowEditorComponent — tab bar actions', () => {
         expect(root(editor).find('[data-role="save"]')[0]).toBe(save);
         expect(save.disabled).toBe(true); // the new tab is clean
         expect(root(editor).find('[data-role="save-all"]').prop('disabled')).toBe(false); // the first is not
+    });
+
+    it('offers Save all only while a tab out of focus holds changes', () => {
+        const editor = createEditor({flow: simpleFlow()});
+        const $saveAll = root(editor).find('[data-role="save-all"]');
+
+        dropFromToolbox('logger', 540, 440);
+        expect(root(editor).find('[data-role="save"]').prop('disabled')).toBe(false);
+        expect($saveAll.prop('disabled')).toBe(true); // only the focused flow changed: Save is the action
+
+        root(editor).find('[data-role="tab-add"]').trigger('click');
+        expect($saveAll.prop('disabled')).toBe(false); // the changed flow is now out of focus
+
+        dropFromToolbox('cron', 140, 140);
+        expect($saveAll.prop('disabled')).toBe(false); // two changed flows
+
+        $('[data-role="tab"]').eq(0).trigger('click');
+        expect($saveAll.prop('disabled')).toBe(false); // still another changed one behind the focus
     });
 
     it('keeps Save disabled while its request is in flight, even when the canvas re-syncs', async () => {
@@ -82,19 +108,17 @@ describe('OntologyFlowEditorComponent — tab bar actions', () => {
         expect($toggle.hasClass('is-active')).toBe(true);
     });
 
-    it('closes every clean tab at once, leaving one fresh tab', () => {
+    it('closes the editor straight away when nothing is unsaved', () => {
         const editor = createEditor({flow: simpleFlow()});
         root(editor).find('[data-role="tab-add"]').trigger('click');
-        expect(tabTitles()).toHaveLength(2);
 
         root(editor).find('[data-role="tab-close-all"]').trigger('click');
 
         expect(FlowDialog.instances).toHaveLength(0);
-        expect(tabTitles()).toEqual([KEY('name_unset')]);
-        expect(tileNames()).toEqual([]);
+        expect(window.location.hash).toBe('#flows');
     });
 
-    it('asks before closing unsaved work: Cancel keeps everything, Don\'t save discards it', () => {
+    it('asks before closing unsaved work: Cancel keeps everything, Don\'t save leaves without the guards', () => {
         const editor = createEditor({flow: simpleFlow()});
         dropFromToolbox('logger', 540, 440);
         const $closeAll = root(editor).find('[data-role="tab-close-all"]');
@@ -105,15 +129,30 @@ describe('OntologyFlowEditorComponent — tab bar actions', () => {
             .toEqual([KEY('dialog_cancel'), KEY('dont_save'), KEY('save')]);
         dialogButton('dialog_cancel').trigger('click');
         expect(FlowDialog.last().closed).toBe(true);
+        expect(window.location.hash).not.toBe('#flows');
         expect(tileNames()).toEqual(['nightly', 'shape', 'logger-1']);
 
         $closeAll.trigger('click');
         dialogButton('dont_save').trigger('click');
-        expect(tabTitles()).toEqual([KEY('name_unset')]);
-        expect(tileNames()).toEqual([]);
+        expect(window.location.hash).toBe('#flows');
+        // Leaving explicitly silences the unsaved-changes guards.
+        expect(editor.dirtyChecker()).toBe(false);
     });
 
-    it('saves everything before closing, keeping open only the flows that could not be saved', async () => {
+    it('saves everything, then leaves the editor', async () => {
+        const spy = mockFetch({aaxis_ontology_flow_api_update: saved(simpleFlow())});
+        const editor = createEditor({flow: simpleFlow()});
+        dropFromToolbox('logger', 540, 440);
+
+        root(editor).find('[data-role="tab-close-all"]').trigger('click');
+        dialogButton('save').trigger('click');
+        await flush();
+
+        expect(sentTo(spy, 'aaxis_ontology_flow_api_update')).toHaveLength(1);
+        expect(window.location.hash).toBe('#flows');
+    });
+
+    it('stays when a flow could not be saved, keeping open only those flows', async () => {
         const spy = mockFetch({aaxis_ontology_flow_api_update: saved(simpleFlow())});
         const editor = createEditor({flow: simpleFlow()});
         dropFromToolbox('logger', 540, 440);
@@ -126,6 +165,7 @@ describe('OntologyFlowEditorComponent — tab bar actions', () => {
 
         expect(sentTo(spy, 'aaxis_ontology_flow_api_update')).toHaveLength(1);
         expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', `${KEY('name_unset')}: ${KEY('trigger_required')}`);
+        expect(window.location.hash).not.toBe('#flows');
         expect(tabTitles()).toEqual([KEY('name_unset')]);
         expect(tileNames()).toEqual(['logger-1']);
     });

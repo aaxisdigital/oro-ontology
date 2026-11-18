@@ -181,6 +181,12 @@ services:
         tags:
             - { name: console.command, command: 'aaxis:ontology:flow-history:purge' }
 
+    # Entities page → Erase: count / preview / erase an entity's stored records (all or filtered).
+    Aaxis\Bundle\OntologyBundle\Manager\EntityRecordEraser:
+        arguments:
+            - '@doctrine'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore'
+
     Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager:
         public: true
         arguments:
@@ -261,6 +267,12 @@ services:
         tags:
             - { name: form.type }
 
+    Aaxis\Bundle\OntologyBundle\Form\Type\FlowHistoryPurgeType:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
+        tags:
+            - { name: form.type }
+
     Aaxis\Bundle\OntologyBundle\Form\Type\DbUsageType:
         arguments:
             - '@doctrine'
@@ -314,6 +326,18 @@ services:
             - { name: oro_message_queue.topic }
 
     Aaxis\Bundle\OntologyBundle\Async\OntologyFlowRunsRebuildProcessor:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
+            - '@logger'
+        tags:
+            - { name: oro_message_queue.client.message_processor }
+
+    # Message queue: "Clean up now" (Settings) — the daily retention purge, on demand.
+    Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowHistoryPurgeTopic:
+        tags:
+            - { name: oro_message_queue.topic }
+
+    Aaxis\Bundle\OntologyBundle\Async\OntologyFlowHistoryPurgeProcessor:
         arguments:
             - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
             - '@logger'

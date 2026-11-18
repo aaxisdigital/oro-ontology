@@ -336,13 +336,54 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
   follows what is on screen. The OLDEST version shows its complete payload in BOTH modes with no
   change markers (everything is "new" in v1 — highlighting the whole document would be noise); a
   no-change version shows a muted note instead of an empty pane.
-- **Erase records** (Entities grid, eraser between edit and delete): `DELETE
-  /entities/api/{id}/records` (`aaxis_ontology_entity_purge_records`) drops the entity's
-  `OntologyData` **and** `OntologyDataHistory` rows via DQL deletes (no hydration — an entity can
-  hold a lot), keeping the entity and its attributes. Gated on **`OntologyData` DELETE** on top of
-  entity VIEW: the entity survives, so this is a data delete, not an entity delete. Flow execution
-  events are deliberately NOT touched — they log what the flows did, not the entity's records. The
-  action is disabled when `recordCount` is 0 and always confirms first.
+- **Erase** (Entities grid, eraser between edit and delete; 2026-11-18 — it used to erase
+  everything after a plain confirm) opens `widgets/erase-records.ts` (`EraseRecordsDialog`): ALL
+  records, or those whose attribute matches ONE comparison. The attribute select lists the unique
+  attribute first, then the configured attributes. The comparisons are = ≠ < ≤ > ≥, contains /
+  does not contain, matches / does not match (wildcards) and is empty / is not empty. The
+  selection is COUNTED on every change (a typed value after 350ms; stale answers dropped by a
+  generation counter), the Erase button names the count, and **Show preview** pages through the
+  selected records (10 per page; unique id, version, updated, one-line payload). While the
+  preview is open, its request also carries the count. The action is disabled with no records
+  AND for internal-system entities (their `recordCount` is the Oro table's size, and that table is
+  never erased from here).
+  - Semantics live in ONE pure class, `Manager/RecordFilter`: `parse()` validates (422 messages)
+    and `sql()` renders a predicate over a jsonb column, binding the path (dotted, split in SQL by
+    `string_to_array`, read with `#>>`) and the value. `matches()` is the PHP mirror for
+    bucket-backed entities. Highlights:
+    - ne / not_contains / not_matches are NEGATIONS, so they also select records WITHOUT the
+      attribute;
+    - < ≤ > ≥ are numeric when the value is a number (non-numeric records never match), otherwise
+      byte-order text (`COLLATE "C"` ↔ strcmp);
+    - contains / matches ignore case; matches covers the WHOLE text (`*` = any run, `?` = one),
+      with LIKE's own `%`/`_`/`\` escaped first.
+  - Validated on braskem7's real data (2.9k payloads): 32 filters covering every operator,
+    nested and list-index paths, literal %/_ and missing attributes selected identical records in
+    SQL and PHP. The filtered DELETE pair ran in a rolled-back transaction and removed exactly the
+    matching records and their history.
+  - `Manager/EntityRecordEraser` does count / preview / erase. A bucket-backed entity (external,
+    store on, not force-db) is counted, previewed and filter-erased on the BUCKET:
+    `listLatest` + `RecordFilter::matches`, then `BucketEntityDataStore::eraseRecords` drops each
+    live object and its whole history prefix. Every other entity uses `aaxis_ontology_data`; the
+    filtered erase runs history first (`DELETE … USING aaxis_ontology_data d` on the matching
+    live rows — the qualified `d.payload` matters, the history table has its own `payload`),
+    then the rows, in one transaction. Erasing ALL keeps the old behaviour: both stores, the bucket
+    whenever it is enabled even for force-db entities.
+  - Endpoints:
+    - `GET /entities/api/{id}/erase/preview` (`aaxis_ontology_entity_erase_preview`): entity VIEW
+      + `OntologyData` VIEW, because it shows content. Query `mode`, `attribute`, `operator`,
+      `value`, plus `rows=1&page&pageSize` (≤ 50) for a page; without `rows` it is a count only.
+    - `POST /entities/api/{id}/records/erase` (`aaxis_ontology_entity_erase_records`, CSRF):
+      `OntologyData` DELETE on top of entity VIEW, since the entity survives this is a data delete.
+      JSON body = the selection.
+    - The old `DELETE /entities/api/{id}/records` route is gone. Run `fos:js-routing:dump`.
+  - Flow execution events are deliberately NOT touched — they log what the flows did.
+- **Entity form** (`RecordFormModal`, 840px): row 1 System | Name (50/50; Name turns into an
+  Oro-entity combobox for internal systems, same row/width); row 2 Unique attribute | Enabled |
+  Force DB storage (50/15/35; a boolean's hint reads to the right of its switch and switches sit
+  on the inputs' line — both oro-common behaviours); then the attributes collection with
+  `fill: true`, so ONLY its rows scroll while the fields above, the "Attributes" title and the
+  Add attribute button stay in view (oro-common ≥ the release carrying `FormField.fill`).
 
 ### DWL playground (Entities grid → `dwl` badge action)
 
@@ -539,6 +580,17 @@ The **flow editor** (`aaxis_ontology_flow_editor`, `Flow/editor.html.twig` +
 "Add Flow" and by CLICKING ANYWHERE ON A FLOWS-GRID ROW (`DataGrid.onRowClick` — there is no
 separate edit action anymore, and enabling row click disables the grid's cell click-to-copy;
 built-in `type = native` rows do nothing, enforced again by the editor page + update endpoint).
+**OPEN ALL** (2026-11-18): every editable row has a checkbox at the START OF ITS NAME CELL
+(`nameCell()`, `data-role="flow-pick"`, `.aaxis-flow-pick`; native rows get the same empty slot so
+names align). It sits INSIDE the Name cell rather than in its own column ON PURPOSE: DataGrid
+appends columns unknown to a SAVED layout (gridKey `ontology-flow-view`, saved on any page-size or
+column change) at the END, so a new first column would land last for most users. Clicks on it
+never open the row (row click ignores inputs/labels). The page toolbar's **Open all**
+(`open-selected`, before Import; disabled while nothing is checked, `(N)` count) opens ONE editor
+with every checked flow as a tab, in the order they were CHECKED: `editor/{first}?tabs=a,b,c` —
+the editor's own restore-tabs URL (`restoreTabsFromUrl`). Checks survive grid re-renders (the
+component holds `picked`), and a reload drops ids that are gone. cmd/ctrl+click opens it in a new
+browser tab (`navigateTo`).
 The flows grid also carries a DELETE action
 (trash, `variant: 'danger'`, disabled for native — enforced again by `deleteAction`, route
 `aaxis_ontology_flow_delete`, ACL `aaxis_ontology_flow_delete`/DELETE): confirm dialog, then the
@@ -600,26 +652,38 @@ SAVED tab as `?tabs=<id,id,…>` in tab order — `syncTabsUrl()` on tab load/cl
 the URL; never-saved tabs cannot travel and are not listed). Tab title = the
 TRIGGER STEP's name ("unnamed — add a trigger" until one exists — the flow is NAMED BY ITS
 TRIGGER; there is no top-bar name display anymore), a • marks unsaved changes, × closes (confirm
-when dirty; the editor always keeps at least one tab). The bar holds TWO groups:
-`[data-role="tab-list"]` (`display: contents`) is re-rendered by `renderTabs()` on every
-syncDirty. `[data-role="tab-actions"]` is built ONCE (`buildTabActions()`, margin-left auto —
-away from the flow tabs so a close/switch click cannot slip onto them) so spinners and disabled
-states survive re-renders. Its state is synced by `syncTabActions()`: Save disabled while clean
-or `saving`, Save all while clean everywhere or `savingAll`, toolbox `is-active` while shown.
-The ICON ACTION buttons, in order:
-- folder = open any existing non-native flow in a NEW tab (picker over `aaxis_ontology_flow_list` —
-a full-width name filter + a Flows|Subflows tab pair whose COUNTS follow the filter, only the list
-scrolls and the popup is capped at ~60% of the window;
-an already-open flow just focuses its tab);
-- + = a new empty flow tab;
-- floppy = **Save** (`data-role="save"`);
-- two stacked floppies = **Save all** (`save-all`; FA 4 has no such glyph);
-- **Close all** (`tab-close-all`, `closeAllTabs()`): leaves one fresh empty tab. With unsaved work
-  anywhere it asks first, in a Cancel / Don't save / Save dialog. Save runs `saveAll(onDone)` and
-  then closes, KEEPING OPEN only the tabs still dirty (their errors were flashed);
-- wrench = the **toolbox show/hide** toggle (`toolbox-toggle`).
+when dirty; the editor always keeps at least one tab). THERE IS NO TOP BAR (removed 2026-11-18):
+the tab bar is the editor's only chrome. Left, `[data-role="tab-list"]` — the one part that
+SCROLLS sideways (`overflow-x: auto`; its -1px margin + 1px padding keep the active tab's
+border-covering -1px inside the scroll box), re-rendered by `renderTabs()` on every syncDirty
+(`renderTabs()` re-creates the list if the markup lacks it). Right, `[data-role="tab-actions"]` —
+TWIG markup (Flow/editor.html.twig, labels in the `messages` domain), so spinners and disabled
+states survive re-renders and the absolutely-positioned Run menu is never clipped. Every action is
+an icon-only `__tab--action` (titles are the labels) in two `__tab-group`s, 14px apart:
+- CANVAS tools (`canvas-actions`): wrench = toolbox show/hide (`toolbox-toggle`, `is-active` while
+  shown) · the Run Now split (`run-split`: play + caret, Debug in its menu — see Debug / Run Now) ·
+  Organize (`organize`, hidden without steps);
+- DOCUMENT tools (`document-actions`), in order:
+  - empty page (fa-file-o) = a new empty flow tab (`tab-add`);
+  - folder = open any existing non-native flow in a NEW tab (`tab-open`; picker over
+    `aaxis_ontology_flow_list` — a full-width name filter + a Flows|Subflows tab pair whose COUNTS
+    follow the filter, only the list scrolls and the popup is capped at ~60% of the window; an
+    already-open flow just focuses its tab);
+  - floppy = **Save** (`save`) — the ACTIVE tab, disabled while it is clean or `saving`;
+  - two stacked floppies = **Save all** (`save-all`; FA 4 has no such glyph) — enabled ONLY while a
+    tab OUT OF FOCUS holds changes (several changed tabs always include one): with just the focused
+    flow changed, Save is the action. Disabled rather than hidden, so nothing shifts;
+  - View source (`view-source`) and History (`flow-history`, disabled until saved);
+  - plain × (fa-times, no box) = **Close the editor** (`tab-close-all`, `closeEditor()`): back to
+    the flows list. With unsaved work anywhere it asks first (Cancel / Don't save / Save). Don't
+    save sets `discarding` (silences the leave guards) and leaves; Save runs `saveAll(onDone)` and
+    leaves when everything saved — otherwise it STAYS, keeping open only the tabs still dirty (their
+    errors were flashed).
 
-Save, Save all and the toolbox toggle MOVED here from the topbar (2026-11-18). FLOW tabs are
+State sync is `syncTabActions()`. The old exit button (Discard/Close, `data-role="cancel"`) is
+GONE with the top bar; a single tab is closed by its own ×.
+
+FLOW tabs are
 DRAG-REORDERABLE (HTML5 drag; drop lands before/after the target by pointer half, indicators
 `is-drop-before/-after`; the active tab travels by identity and `syncTabsUrl()` persists the new
 order). Switching tabs closes any debug session. A TRIGGER IS REQUIRED TO SAVE (`structuralErrors`: `trigger_required` — blocks
@@ -628,18 +692,16 @@ never pass through save). The save payload carries no name; the server
 derives it (`deriveFlowName()`: trigger step name → stored name → generated `new_flow_<hex>`),
 re-checking uniqueness against the derived value, and `FlowPortability::import()` derives it the
 same way (document name only as the legacy triggerless fallback, re-checked for collisions).
-Topbar fields are STACKED label-above-control (`__field` /
-`__field-label`, controls bottom-aligned — keeps the left side narrow); every right-side button is
-icon + a `__btn-text` span that a `max-width: 1199px` viewport hides (icon-only mode, the `title`
-tooltips carry the labels — which is why syncDirty updates the cancel button's LABEL SPAN
-(`data-role="cancel-label"`) + title, never `.text()` on the button, which would wipe the icon).
-**Organize** (hidden without steps:
-lays every step out in execution order — BFS from the trigger/"Start here", unreachable steps
-appended in reading order — with one-tile gaps, wrapping rows before the viewport width, then
-scrolls to top-left), Run Now, View source, History and the cancel button on the right. The toolbox
+**Organize** lays every step out in execution order — BFS from the trigger/"Start here",
+unreachable steps appended in reading order — with one-tile gaps, wrapping rows before the
+viewport width, then scrolls to top-left. The toolbox
 title bar carries expand-all / collapse-all (`toolbox-expand-all` / `toolbox-collapse-all` →
-`collapseToolboxSections()`) and a × that hides it. The handle's drag guard skips ANY button
-inside it. The draggable toolbox
+`collapseToolboxSections()`) and a × that hides it — all three `__toolbox-tool` boxes (16px,
+centered; the × glyph is lifted 1px because FA 4 draws it lower than the square glyphs). The
+handle's drag guard skips ANY button inside it. ⚠️ Oro's reboot rings EVERY focused button,
+mouse clicks included (`button:focus { outline: 5px auto }` — the "blue box left around a clicked
+icon"): the toolbox tools and the tab-bar buttons reset it with `:focus:not(:focus-visible)`, so
+the ring stays for keyboard focus only. Do the same for new icon buttons. The draggable toolbox
 (Triggers: cron/endpoint/entity change/Subflow (`subflow` — the ENTRY POINT of a callable
 subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call Subflow" action
 `sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop
@@ -690,12 +752,9 @@ pushState navigation — same hook PageStateView uses for forms) and `page:befor
 (deferred into the refresh queue), plus a `pageStateChecker.registerChecker()` registration so
 grid inline-editing / config-form / hidden-redirect checks see the editor too; all use Oro's
 `oro.ui.leave_page_with_unsaved_data_confirm` message and every hook is removed in dispose().
-The editor's own cancel button (labelled "Discard" while dirty, "Close" when clean) is an
-EXPLICIT discard SCOPED TO THE ACTIVE TAB: with several tabs open it closes just the active one
-(`closeTab(index, force)` — force skips the dirty confirm, the button IS the confirmation) and
-the others keep their work; only from the LAST tab does it leave the editor, setting
-`discarding = true` so the guards stay quiet for that lone tab's changes. **Save all**
-(`data-role="save-all"`, enabled while `anyTabDirty()`): stashes the active tab, then saves every
+Leaving through the tab bar's × after choosing Don't save sets `discarding = true`, so the
+guards stay quiet. **Save all**
+(`data-role="save-all"`, see the tab bar for when it is enabled): stashes the active tab, then saves every
 dirty tab SEQUENTIALLY from its stashed design (parallel saves would race the unique-name check),
 updating each tab's flow/baseline in place — no canvas reload; per-tab failures (missing trigger,
 name taken) flash with the tab's title and the rest still save; ends with an "N flows saved"
@@ -769,7 +828,9 @@ checks both shapes; a present expression still re-validates with `Cron\CronExpre
 (422 `flow_manager.invalid_cron`);
 **entity_change** requires `{system, entity}` (selects fed by `aaxis_ontology_entity_list` —
 entities filtered by the chosen system, both referenced by NAME per the bundle's addressing);
-**entity_read / entity_write** ("Entity Read"/"Entity Write", `entityIoSection`): first row
+**entity_read / entity_write** ("Entity Read"/"Entity Write", `entityIoSection`; the READER's
+popup is `is-medium` = 600px — measured as the narrowest width at which its Load row's four
+selects (mode, order by, direction, limit) show their values; the default 420px cut all four): first row
 `Name | Destination` (destination defaults to `payload`), then `System | Entity` (selects fed by
 `aaxis_ontology_entity_list`, both referenced by NAME per the bundle's addressing), then for READS
 the Load row `{mode: all|by_id|by_attribute, record_id (when by_id), attribute + attr_value (when
@@ -951,7 +1012,7 @@ the replaced revision never executed and is simply overwritten). Rows: (flow_id,
 unique per flow, name, steps, design, last_executed at archive time, archived_at UTC), FK CASCADE
 with the flow. KNOWN LIMIT: `last_executed` has SECOND precision — a run in the same wall-clock
 second as the previously archived one is indistinguishable from "not run since". UI: the editor
-topbar's **History** button (with **View source** between Run Now and the exit button; History is
+tab bar's **History** button (next to **View source** in the document tools; History is
 enabled only for SAVED flows, synced in syncDebugButtons) opens `openFlowHistory()` — versions
 from `aaxis_ontology_flow_history_list` (`GET /flows/api/{id}/history`, exposed, flow-view ACL,
 steps/design decoded server-side), a version select + the Data-View-style "Diff only" toggle, and
@@ -1300,13 +1361,26 @@ consumer agree on backend, window and flag:
   store's count reported as null.
 
 Entry points:
-- **Settings page**: `aaxis_ontology.flow_runs_index` (`ui_only`, `Form/Type/FlowRunIndexStatusType`,
-  twig block `aaxis_ontology_flow_runs_index_widget`, after the history days) shows "In sync." or
+- **Settings page**, right after the history days: `aaxis_ontology.flow_history_purge` (`ui_only`,
+  `Form/Type/FlowHistoryPurgeType`, twig block `aaxis_ontology_flow_history_purge_widget`) shows
+  the LAST purge — daily job or button alike, `FlowRunMaintenance::purge()` records it in the
+  internal `flow_history_last_purge` (JSON `{at, days, cutoff, events, runs, bucketConfigured,
+  bucketObjects}`; a null count renders "failed (see the log)"; recording is best effort, logged
+  as the "last purge record" store) — and its **Clean up now (older than N days)** button. After
+  a confirmation naming the window it QUEUES topic `aaxis_ontology_flow_history_purge`
+  (`OntologyConfigController::flowHistoryPurgeAction`, CSRF, `oro_config_system` →
+  `Async/OntologyFlowHistoryPurgeProcessor`, which ACKs even when a store failed — the purge
+  already logged and recorded it — and rejects only a crash). It purges by the SAVED days setting.
+- Then `aaxis_ontology.flow_runs_index` (`ui_only`, `Form/Type/FlowRunIndexStatusType`,
+  twig block `aaxis_ontology_flow_runs_index_widget`) shows "In sync." or
   "Out of sync since …", plus the last rebuild. Its **Rebuild run index** button
-  (`flow-runs-index-component.ts` → `OntologyConfigController::flowRunsRebuildAction`, CSRF,
+  (`OntologyConfigController::flowRunsRebuildAction`, CSRF,
   `oro_config_system`) QUEUES topic `aaxis_ontology_flow_runs_rebuild`
   (`Async/OntologyFlowRunsRebuildProcessor`). It is async because a bucket rebuild lists days of
   keys. The page shows the outcome after a reload.
+- Both buttons are `flow-history-maintenance-component.ts` (was flow-runs-index-component): one
+  generic "queue a job" button whose widget passes `{route, queued, failed, confirm?}` as page
+  component options; roles `maintenance-run` / `maintenance-result`.
 - `aaxis:ontology:flow-runs:rebuild [--days=N]` does the same rebuild in the foreground.
 - `aaxis:ontology:flow-history:purge` runs as an Oro cron job at `15 2 * * *` (register it with
   `oro:cron:definitions:load`). It exits FAILURE when a store failed.
@@ -1358,8 +1432,12 @@ container, since the processor's constructor arguments changed).
 **Single-line DWL input** — `widgets/dwl-input.ts`, `createDwlInput({value, dwl, label?,
 placeholder?, maxlength?, inputClass?})` → `{$el, $input, $toggle, value(), isDwl()}`. It is the
 one-line sibling of the field below: a text input with the small pure-text/DWL switch INSIDE its
-right end (`.aaxis-dwl-input`, which reserves 76px of padding-right). Code style applies while the
-switch is on. The visible label stays the host's (e.g. a `settingsCol`), and the host stores the
+right end (`.aaxis-dwl-input`, which reserves 76px of padding-right and ZEROES the input's margin:
+Oro's form-control margin-bottom made the wrapper 42px for a 34px input, and the switch — centered
+on the wrapper — sat 4px low). Code style applies while the switch is on. A plain switch used as a
+`settingsCol`'s control (trigger Enabled, endpoint Public, HTTP Async) is given the inputs' 34px
+height by `.aaxis-flow-editor__settings-col > .aaxis-flow-editor__switch`, so its track centers on
+their line (it used to sit 5px high). The visible label stays the host's (e.g. a `settingsCol`), and the host stores the
 `<key>` + `<key>_dwl` pair. Used by the HTTP Request path; reach for it wherever a one-line value
 may be an expression.
 **DWL-toggled fields** render through ONE shared widget — `widgets/dwl-field.ts`,
@@ -1602,8 +1680,12 @@ docker compose exec php php bin/console oro:assets:build --env=dev   # compiles 
 theme and is built when you run with no theme arg.)
 
 **REQUIRED after ANY change to `Resources/translations/*.yml`** — new/updated keys won't resolve
-in the UI until loaded into the DB-backed translation store. Two gotchas:
+in the UI until loaded into the DB-backed translation store. Three gotchas:
 
+- **Placeholders are `{{ name }}`** in BOTH domains — Oro's JS translator sets the placeholder
+  prefix/suffix to `{{ ` / ` }}`, so a single-brace `{count}` renders LITERALLY. Four jsmessages
+  keys had that bug until 2026-11-18 (saved_all, copy_done, foreach_item_reserved,
+  endpoint_path_reserved). Literal braces that are not placeholders (`/orders/{id}`) are fine.
 - **Domain split.** JS labels (`__()`) read the **`jsmessages`** domain → put them in
   `jsmessages.en.yml`. Server-side strings (PHP `$this->trans()`, Oro entity-config labels,
   datagrids) read **`messages`** → `messages.en.yml`. A label used in BOTH the TS grid/form and
@@ -1647,7 +1729,7 @@ connection is complete), EXTERNAL entities' records live on the S3 bucket instea
 does NOT migrate rows either way (agreed scope; old DB rows simply stop being shown/served).
 Internal entities are untouched (always the Oro tables). **Per-entity opt-out**: the entity's
 `force_db_storage` flag (v1_13 column, default false; the "Force DB storage" toggle in the entity
-form's FIRST row next to System) keeps THAT entity on the DB backend regardless of the global
+form's SECOND row, after Unique attribute and Enabled, its hint to the right of the switch) keeps THAT entity on the DB backend regardless of the global
 toggle — the escape hatch for hot entities where the bucket's LIST+GET-per-record full reads are
 too slow. Every routing decision goes through `isBucketBacked()`/`bucketBacked()` (external AND
 not force_db AND store enabled) — manager reads/writes, the async consumer, Data View (a
