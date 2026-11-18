@@ -74,14 +74,24 @@ export const PALETTE: Array<[string, Array<[string, string, string]>]> = [
 
 /** The editor markup of Flow/editor.html.twig (topbar, tab bar, debugger, canvas, toolbox). */
 export function editorDom(): any {
-    const buttons = ['toolbox-toggle', 'organize', 'debug-step', 'debug', 'view-source', 'flow-history', 'cancel', 'save', 'save-all']
-        .map(role => {
-            const hidden = ['organize', 'debug-step', 'debug'].includes(role) ? ' hidden' : '';
-            const label = role === 'cancel'
-                ? '<span data-role="cancel-label">aaxis.ontology.flow_editor.close</span>'
-                : `<span class="aaxis-flow-editor__btn-text">${role}</span>`;
-            return `<button type="button" class="btn" data-role="${role}"${hidden}><span class="fa fa-x"></span>${label}</button>`;
-        }).join('');
+    const button = (role: string): string => {
+        const hidden = role === 'organize' ? ' hidden' : '';
+        const label = role === 'cancel'
+            ? '<span data-role="cancel-label">aaxis.ontology.flow_editor.close</span>'
+            : `<span class="aaxis-flow-editor__btn-text">${role}</span>`;
+        return `<button type="button" class="btn" data-role="${role}" title="${role}"${hidden}><span class="fa fa-x"></span>${label}</button>`;
+    };
+    // Run Now as a split button: the caret opens a menu holding Debug (debug-step).
+    const runSplit = `
+        <div class="aaxis-flow-editor__run" data-role="run-split" hidden>
+            ${button('debug')}
+            <button type="button" class="btn" data-role="run-menu-toggle" aria-expanded="false" title="run-options"></button>
+            <div class="aaxis-flow-editor__menu" data-role="run-menu" hidden>
+                <button type="button" class="aaxis-flow-editor__menu-item" data-role="debug-step" title="debug-step">debug-step</button>
+            </div>
+        </div>`;
+    const buttons = [button('toolbox-toggle'), button('organize'), runSplit,
+        ...['view-source', 'flow-history', 'cancel', 'save', 'save-all'].map(button)].join('');
     const sections = PALETTE.map(([category, items]) => `
         <div class="aaxis-flow-editor__toolbox-section">
             <div class="aaxis-flow-editor__toolbox-section-title">
@@ -403,7 +413,7 @@ export function contextMenu(target: Element, clientX = 300, clientY = 300): void
 
 /** The labels of the open context menu's top-level items (submenu parents included). */
 export function menuLabels(): string[] {
-    return $('.aaxis-flow-editor__menu').first().children().map((_i: number, el: HTMLElement) => {
+    return $('body > .aaxis-flow-editor__menu').first().children().map((_i: number, el: HTMLElement) => {
         const item = el.classList.contains('aaxis-flow-editor__menu-sub') ? el.firstElementChild as HTMLElement : el;
         return item.textContent;
     }).get();

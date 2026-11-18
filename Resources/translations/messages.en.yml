@@ -387,6 +387,7 @@ aaxis:
             save: 'Save'
             debug: 'Debug'
             run_now: 'Run Now'
+            run_options: 'More run options'
             toolbox_toggle: 'Toolbox'
             organize: 'Organize'
             toolbox:

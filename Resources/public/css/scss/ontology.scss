@@ -1432,6 +1432,40 @@
         }
     }
 
+    // Run Now as a split button: the main button plus a caret opening its sub-options (Debug),
+    // joined into one control. The menu reuses the canvas context menu's look, anchored under
+    // the caret instead of at the pointer.
+    &__run {
+        position: relative;
+        display: inline-flex;
+
+        &[hidden] {
+            display: none;
+        }
+    }
+
+    &__controls .btn.aaxis-flow-editor__run-main {
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+    }
+
+    // Narrow in both modes (the icon-only rule above would widen it to 44px).
+    &__controls .btn.aaxis-flow-editor__run-caret {
+        min-width: 26px;
+        width: 26px;
+        margin-left: -1px;
+        padding: 0;
+        border-top-left-radius: 0;
+        border-bottom-left-radius: 0;
+    }
+
+    &__menu.aaxis-flow-editor__run-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        white-space: nowrap;
+    }
+
     // Enabled/disabled switch (same look as the record-form modal switch).
     &__switch {
         display: inline-flex;

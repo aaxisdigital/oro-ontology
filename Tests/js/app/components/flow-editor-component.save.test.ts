@@ -365,7 +365,7 @@ describe('OntologyFlowEditorComponent — dispose', () => {
         expect(document.querySelector('.is-ghost')).toBeNull();
         expect(document.querySelector('[data-role="wire-temp"]')).toBeNull();
         expect(document.querySelector('.aaxis-flow-editor__marquee')).toBeNull();
-        expect(document.querySelector('.aaxis-flow-editor__menu')).toBeNull();
+        expect(document.querySelector('body > .aaxis-flow-editor__menu')).toBeNull();
         root(editor).find('[data-role="view-source"]').trigger('click');
         expect(FlowDialog.instances).toHaveLength(0);
         pointer(window, 'pointerup', 300, 300);

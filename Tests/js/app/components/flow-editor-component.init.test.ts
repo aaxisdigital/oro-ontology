@@ -36,7 +36,7 @@ describe('OntologyFlowEditorComponent — loading a flow', () => {
         const $root = root(editor);
         expect($root.find('[data-role="save"]').prop('disabled')).toBe(true);
         expect($root.find('[data-role="cancel-label"]').text()).toBe('aaxis.ontology.flow_editor.close');
-        expect($root.find('[data-role="debug"]').prop('hidden')).toBe(false);
+        expect($root.find('[data-role="run-split"]').prop('hidden')).toBe(false);
         expect($root.find('[data-role="debug"]').prop('disabled')).toBe(false);
         expect($root.find('[data-role="flow-history"]').prop('disabled')).toBe(false);
         expect($root.find('[data-role="organize"]').prop('hidden')).toBe(false);
@@ -78,7 +78,7 @@ describe('OntologyFlowEditorComponent — loading a flow', () => {
 
         expect(tileNames()).toEqual([]);
         expect(tabTitles()).toEqual(['aaxis.ontology.flow_editor.name_unset']);
-        expect(root(editor).find('[data-role="debug"]').prop('hidden')).toBe(true);
+        expect(root(editor).find('[data-role="run-split"]').prop('hidden')).toBe(true);
         expect(root(editor).find('[data-role="organize"]').prop('hidden')).toBe(true);
         expect(root(editor).find('[data-role="flow-history"]').prop('disabled')).toBe(true);
     });
@@ -178,14 +178,52 @@ describe('OntologyFlowEditorComponent — loading a flow', () => {
         expect($run.attr('title')).toBe('aaxis.ontology.flow_editor.invalid_steps_blocked');
     });
 
-    it('disables running while the trigger is switched off', () => {
+    it('opens Debug from the caret next to Run Now, closing on an outside click or Escape', () => {
+        const editor = createEditor({flow: simpleFlow()});
+        const $root = root(editor);
+        const $toggle = $root.find('[data-role="run-menu-toggle"]');
+        const $menu = $root.find('[data-role="run-menu"]');
+
+        expect($menu.prop('hidden')).toBe(true);
+        $toggle.trigger('click');
+        expect($menu.prop('hidden')).toBe(false);
+        expect($toggle.attr('aria-expanded')).toBe('true');
+        $toggle.trigger('click');
+        expect($menu.prop('hidden')).toBe(true);
+
+        $toggle.trigger('click');
+        $menu[0].dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        expect($menu.prop('hidden')).toBe(false);
+        document.body.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        expect($menu.prop('hidden')).toBe(true);
+        expect($toggle.attr('aria-expanded')).toBe('false');
+
+        $toggle.trigger('click');
+        document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+        expect($menu.prop('hidden')).toBe(true);
+    });
+
+    it('keeps the run buttons\' own titles unless red steps block them', () => {
+        const editor = createEditor({flow: simpleFlow(7, {invalidSteps: ['shape']})});
+        const $run = root(editor).find('[data-role="debug"]');
+        expect($run.attr('title')).toBe('aaxis.ontology.flow_editor.invalid_steps_blocked');
+
+        editor.markStepInvalid(editor.steps.find((s: any) => s.name === 'shape'), false);
+
+        expect($run.prop('disabled')).toBe(false);
+        expect($run.attr('title')).toBe('debug');
+        expect(root(editor).find('[data-role="run-menu-toggle"]').attr('title')).toBe('run-options');
+    });
+
+    it('still runs a flow manually while its trigger is switched off', () => {
         const flow = simpleFlow();
         flow.design.steps[0].config.enabled = false;
         const editor = createEditor({flow});
 
-        expect(root(editor).find('[data-role="debug"]').prop('hidden')).toBe(false);
-        expect(root(editor).find('[data-role="debug"]').prop('disabled')).toBe(true);
-        expect(root(editor).find('[data-role="debug-step"]').prop('disabled')).toBe(true);
+        expect(root(editor).find('[data-role="run-split"]').prop('hidden')).toBe(false);
+        expect(root(editor).find('[data-role="debug"]').prop('disabled')).toBe(false);
+        expect(root(editor).find('[data-role="run-menu-toggle"]').prop('disabled')).toBe(false);
+        expect(root(editor).find('[data-role="debug-step"]').prop('disabled')).toBe(false);
     });
 
     it('clamps the grid options and sizes the tiles from them', () => {

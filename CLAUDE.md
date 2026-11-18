@@ -578,7 +578,8 @@ DERIVED on every save
 (`OntologyFlow::computeEnabled()`: true only when a trigger exists AND carries `enabled: true` —
 a missing/unconfigured trigger or a missing flag reads as DISABLED, so a broken entry point never
 runs; the column stays synced for the grid and the scheduler's plain WHERE). The client mirror is
-`flowEnabled()` (gates Run Now/Debug, refreshed via syncDirty). v1_10's
+`flowEnabled()` (View source's `enabled`; it NO LONGER gates Run Now/Debug — since 2026-11-18 a
+disabled flow still runs MANUALLY, the switch gating only automatic runs). v1_10's
 `SeedTriggerEnabledFlags` seeded the flag into existing triggers from the old column so no flow
 changed state; `FlowPortability::import()` forces the imported trigger's flag OFF (steps + design)
 so the column and the config agree on "imported = disabled". `computeType()`: a REAL trigger
@@ -1029,9 +1030,18 @@ into the URL via `history.replaceState` so refresh reopens the same flow) and re
 state; every mutation path (add/move/rename/remove steps, link changes, toolbox move/visibility,
 name/switch inputs, drag ends) calls `syncDirty()`. On open the editor restores from `design` (strictly
 validated; corrupted/outdated → warning flash + empty canvas; NULL → rebuilt from `steps`).
-**Debug / Run Now**: two topbar buttons — shown only while a REAL trigger exists (synced in
-`updateReachability`) and DISABLED while the Enabled switch is off or a session is already open
-(`syncDebugButtons()`, re-synced on switch change + session open/close). Both collect the trigger
+**Debug / Run Now**: ONE split control (`data-role="run-split"`) shown only while a REAL trigger
+exists (synced in `updateReachability`): the Run Now button (`data-role="debug"`) plus a caret
+(`run-menu-toggle`) opening a small menu (`run-menu`, styled like the canvas context menu, anchored
+under Run Now) that holds **Debug** (`data-role="debug-step"`). The menu closes on an outside
+pointerdown, on Escape, or when an item is picked (`openRunMenu`/`closeRunMenu`, document handlers
+namespaced `.aaxisFlowRunMenu`). The buttons are DISABLED only while a step is red or a session is
+already open (`syncDebugButtons()`). A DISABLED flow still runs manually: the trigger's Enabled
+switch gates only the AUTOMATIC runs. The server never checked the root flow's flag on these
+endpoints. A sub_flow/foreach that calls a DISABLED subflow still FAILS, which is the stated
+subflow rule. The twig titles are preserved (swapped for the red-steps reason only while that
+blocks). Tests: context-menu probes must target `body > .aaxis-flow-editor__menu` — the run menu
+shares the class. Both collect the trigger
 input via `collectDebugInput()` (cron/endpoint run immediately, entity_change asks for its event
 first) and then open the **debugger SIDEBAR** (`data-role="debugger"`, left of the design area in
 `__canvas-wrap`) instead of popups — `startDebugSession(mode, input)` SNAPSHOTS the canvas

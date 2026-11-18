@@ -850,12 +850,24 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
+            this.closeRunMenu();
             // Run Now: the whole flow in one request; the sidebar shows the result at the end.
             this.collectDebugInput(input => this.startDebugSession('run', input));
+        });
+        // The caret next to Run Now opens its sub-options (Debug).
+        this.$el.on('click.aaxisFlowEditor', '[data-role="run-menu-toggle"]', (e: any) => {
+            e.preventDefault();
+            this.closeContextMenu();
+            if (this.$el.find('[data-role="run-menu"]').prop('hidden')) {
+                this.openRunMenu();
+            } else {
+                this.closeRunMenu();
+            }
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug-step"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
+            this.closeRunMenu();
             // Debug: step-by-step in the sidebar — variables, stepper buttons, DWL evaluator.
             this.collectDebugInput(input => this.startDebugSession('step', input));
         });
@@ -3949,7 +3961,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         this.steps.forEach(s => s.el.classList.toggle('is-unreachable', !reachable.has(s.id)));
         // Debug is only offered for flows that contain a REAL trigger (not a sub-flow start).
-        this.$el.find('[data-role="debug"], [data-role="debug-step"]').prop('hidden', !this.findTrigger());
+        this.$el.find('[data-role="run-split"]').prop('hidden', !this.findTrigger());
+        if (!this.findTrigger()) {
+            this.closeRunMenu();
+        }
         this.syncDebugButtons();
         this.$el.find('[data-role="organize"]').prop('hidden', this.steps.length === 0);
     }
@@ -5089,26 +5104,61 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-    /**
-     * Run Now / Debug availability: hidden without a real trigger (synced in updateReachability),
-     * DISABLED while the flow's Enabled switch is off or a debug session is already open.
-     */
     /** The flow's effective enabled state: the trigger step's `enabled` config flag (see server). */
     private flowEnabled(): boolean {
         const trigger = this.findTrigger();
         return trigger?.config?.enabled === true;
     }
 
+    /**
+     * Run Now / Debug availability: hidden without a real trigger (synced in updateReachability),
+     * DISABLED while a step is red or a debug session is already open. A DISABLED flow still runs
+     * manually: the trigger's Enabled switch gates only the automatic runs (scheduler, endpoint).
+     */
     private syncDebugButtons(): void {
-        const enabled = this.flowEnabled();
         // A flow with red (incomplete/invalid) steps cannot run — the server enforces the same
         // gate on every entry point, this just keeps the buttons honest.
         const invalid = this.steps.some(s => s.invalid === true);
-        const $buttons = this.$el.find('[data-role="debug"], [data-role="debug-step"]');
-        $buttons.prop('disabled', !enabled || invalid || this.debugSession !== null);
-        $buttons.attr('title', invalid ? __('aaxis.ontology.flow_editor.invalid_steps_blocked') : null);
+        const blocked = invalid || this.debugSession !== null;
+        const $buttons = this.$el.find('[data-role="debug"], [data-role="debug-step"], [data-role="run-menu-toggle"]');
+        $buttons.prop('disabled', blocked);
+        $buttons.each((_i: number, el: HTMLElement) => {
+            // The twig titles name the buttons (the only label in icon-only mode): keep them,
+            // swapping in the reason while running is blocked by red steps.
+            if (el.dataset.title === undefined) {
+                el.dataset.title = el.getAttribute('title') || '';
+            }
+            el.setAttribute('title', invalid ? __('aaxis.ontology.flow_editor.invalid_steps_blocked') : el.dataset.title);
+        });
+        if (blocked) {
+            this.closeRunMenu();
+        }
         // History compares against ARCHIVED revisions — meaningless until the flow is saved.
         this.$el.find('[data-role="flow-history"]').prop('disabled', !this.flow?.id);
+    }
+
+    /** Opens Run Now's sub-options; an outside click or Escape closes them again. */
+    private openRunMenu(): void {
+        this.$el.find('[data-role="run-menu"]').prop('hidden', false);
+        this.$el.find('[data-role="run-menu-toggle"]').attr('aria-expanded', 'true');
+        $(document)
+            .off('.aaxisFlowRunMenu')
+            .on('pointerdown.aaxisFlowRunMenu', (e: any) => {
+                if (!$(e.target).closest('[data-role="run-split"]').length) {
+                    this.closeRunMenu();
+                }
+            })
+            .on('keydown.aaxisFlowRunMenu', (e: any) => {
+                if (e.key === 'Escape') {
+                    this.closeRunMenu();
+                }
+            });
+    }
+
+    private closeRunMenu(): void {
+        $(document).off('.aaxisFlowRunMenu');
+        this.$el?.find('[data-role="run-menu"]').prop('hidden', true);
+        this.$el?.find('[data-role="run-menu-toggle"]').attr('aria-expanded', 'false');
     }
 
     // --- View source / Flow history --------------------------------------------------------
@@ -6030,6 +6080,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.marqueeDrag = null;
         }
         this.closeContextMenu();
+        this.closeRunMenu();
         this.panelDrag = null;
         this.stepDrag = null;
         $(window).off('resize.aaxisFlowEditor');

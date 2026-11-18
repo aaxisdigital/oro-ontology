@@ -358,7 +358,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
 
         expect(tileNames()).toEqual(['nightly']);
         expect(linksOf(editor)).toEqual([]);
-        expect(document.querySelector('.aaxis-flow-editor__menu')).toBeNull();
+        expect(document.querySelector('body > .aaxis-flow-editor__menu')).toBeNull();
     });
 
     it('lists the anchor sides with the current one checked and the used ones disabled', () => {
@@ -396,13 +396,13 @@ describe('OntologyFlowEditorComponent — context menus', () => {
     it('closes the menu on any press outside it', () => {
         createEditor({flow: simpleFlow()});
         contextMenu(tile('shape'), 5000, 5000);
-        const menu = document.querySelector<HTMLElement>('.aaxis-flow-editor__menu')!;
+        const menu = document.querySelector<HTMLElement>('body > .aaxis-flow-editor__menu')!;
         expect(menu.style.left).toBe(`${window.innerWidth - 8}px`);
 
         pointer(menu, 'pointerdown', 0, 0);
-        expect(document.querySelector('.aaxis-flow-editor__menu')).not.toBeNull();
+        expect(document.querySelector('body > .aaxis-flow-editor__menu')).not.toBeNull();
         pointer(document.body, 'pointerdown', 0, 0);
-        expect(document.querySelector('.aaxis-flow-editor__menu')).toBeNull();
+        expect(document.querySelector('body > .aaxis-flow-editor__menu')).toBeNull();
     });
 
     it('sets and clears the sub-flow "Start here" marker', () => {

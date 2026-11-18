@@ -211,7 +211,8 @@ describe('OntologyFlowEditorComponent — trigger settings', () => {
         confirmSettings();
 
         expect(configOf(editor, 'tick')).toEqual({enabled: false, mode: 'cron', expression: '0 3 * * mon-fri'});
-        expect(root(editor).find('[data-role="debug"]').prop('disabled')).toBe(true);
+        // Switched off, the flow still runs manually (the switch gates the automatic runs only).
+        expect(root(editor).find('[data-role="debug"]').prop('disabled')).toBe(false);
     });
 
     it('opens a legacy {expression} config in cron mode', () => {
