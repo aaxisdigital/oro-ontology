@@ -329,6 +329,27 @@
     &__last {
         color: #6b7a89;
     }
+
+    // The history cleanup's second part: "Compact tables" and its per-table sizes.
+    &--compact {
+        margin-top: 14px;
+    }
+
+    &__tables {
+        margin: 4px 0 0;
+        padding-left: 18px;
+
+        code {
+            padding: 0;
+            background: none;
+            color: #2b3a4a;
+            font-size: 12px;
+        }
+    }
+
+    &__error {
+        color: #c0392b;
+    }
 }
 
 // System Configuration → Settings: the read-only DB Usage table (DbUsageType widget).

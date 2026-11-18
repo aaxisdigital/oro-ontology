@@ -50,17 +50,22 @@ aaxis:
                     button: 'Rebuild run index'
                 flow_history_purge:
                     label: 'History cleanup'
-                    tooltip: 'Every night (02:15) the flow execution history older than "Flow execution history days" is removed: event rows, Events-page runs and, when a bucket connection is configured, the bucket''s event day folders. "Clean up now" runs the same cleanup immediately, in the background. Save a changed number of days first: the cleanup uses the saved setting.'
+                    tooltip: 'Every night (02:15) the flow execution history older than "Flow execution history days" is removed: event rows, Events-page runs and, when a bucket connection is configured, the bucket''s event day folders. "Clean up now" runs the same cleanup immediately, in the background. Save a changed number of days first: the cleanup uses the saved setting. Removed rows leave free space inside the tables (reused for new rows, so they stop growing); "Compact tables" rewrites the two history tables to give that space back to the disk, briefly blocking event writes and the Events page while it runs.'
                     last: 'Last cleanup: {{ at }} UTC, everything before {{ cutoff }} UTC: {{ events }} events, {{ runs }} runs'
                     last_bucket: ', {{ objects }} bucket objects'
                     failed: 'failed (see the log)'
                     never: 'Never cleaned up yet.'
                     button: 'Clean up now (older than {{ days }} days)'
+                    last_compact: 'Last compaction: {{ at }} UTC'
+                    never_compacted: 'The tables were never compacted from here. A cleanup frees space inside them for new rows; compacting gives it back to the disk.'
+                    compact_failed: 'not compacted ({{ error }})'
+                    compact_button: 'Compact tables'
                 db_usage:
                     label: 'DB Usage'
                     col_table: 'Table'
                     col_size: 'Size on disk'
-                    tooltip: 'Current on-disk size (table + indexes) of the ontology data and history tables — information only, to support the retention choices above.'
+                    col_rows: 'Rows (estimate)'
+                    tooltip: 'Current on-disk size (table + indexes) of the ontology data and history tables, and their row count (PostgreSQL''s estimate) — information only, to support the retention choices above. Removing rows does not shrink a table: the space is reused for new rows. "Compact tables" above gives the history tables'' space back to the disk.'
             bucket:
                 title: 'Bucket'
                 use_bucket_for_entity_data:

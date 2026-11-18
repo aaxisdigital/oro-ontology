@@ -220,7 +220,14 @@ as each event is stored, for both event storages (table or bucket).
 - The same Settings page shows, right after the history days, the **last cleanup** (when, the
   cutoff, and how many events, runs and bucket objects it removed) and a **Clean up now** button
   that runs the same cleanup immediately, in the background, after a confirmation. It uses the
-  saved number of days.
+  saved number of days. After a cleanup, each table it removed rows from is vacuumed, so the freed
+  space is reused by new rows (the table stops growing).
+- Deleting rows never makes a PostgreSQL table smaller on disk: **DB Usage** shows the row count
+  dropping while the size stays. **Compact tables** (below Clean up now) rewrites the two history
+  tables (flow events and the run index) to give that space back. While each table is rewritten,
+  usually for seconds, flow event writes and the Events page wait; a table that stays busy for
+  5 seconds is skipped and shown as such. The page shows each table's size before and after the
+  last compaction.
 - **System Configuration → Aaxis → Ontology → Settings** shows the run index status:
   - "In sync", or "Out of sync since …" when an event could not be added to it (only the first
     such failure is recorded);

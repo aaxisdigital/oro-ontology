@@ -20,6 +20,9 @@
                 <th class="aaxis-config-db-usage__size" scope="col">
                     {{ 'aaxis.ontology.config.general.db_usage.col_size'|trans }}
                 </th>
+                <th class="aaxis-config-db-usage__size" scope="col">
+                    {{ 'aaxis.ontology.config.general.db_usage.col_rows'|trans }}
+                </th>
             </tr>
         </thead>
         <tbody>
@@ -27,6 +30,7 @@
                 <tr>
                     <td class="aaxis-config-db-usage__name">{{ row.table }}</td>
                     <td class="aaxis-config-db-usage__size">{{ row.size }}</td>
+                    <td class="aaxis-config-db-usage__size">{{ row.rows }}</td>
                 </tr>
             {% endfor %}
         </tbody>
@@ -107,6 +111,45 @@
         </div>
         <button type="button" class="btn" data-role="maintenance-run">
             {{ 'aaxis.ontology.config.general.flow_history_purge.button'|trans({'{{ days }}': history_days}) }}
+        </button>
+        <div class="aaxis-connector-test" data-role="maintenance-result" hidden></div>
+    </div>
+    {# "Compact tables": VACUUM FULL of the tables the cleanup deletes from — the cleanup frees space
+       INSIDE them, only this gives it back to the disk. A SIBLING component (not nested), so each
+       button stays bound to its own route. #}
+    <div class="aaxis-config-run-index aaxis-config-run-index--compact"
+         data-page-component-module="aaxisontology/js/app/components/flow-history-maintenance-component"
+         data-page-component-options="{{ {
+             route: 'aaxis_ontology_config_flow_history_compact',
+             queued: 'aaxis.ontology.config.flow_history_compact.queued',
+             failed: 'aaxis.ontology.config.flow_history_compact.queue_failed',
+             confirm: {
+                 title: 'aaxis.ontology.config.flow_history_compact.confirm_title',
+                 question: 'aaxis.ontology.config.flow_history_compact.confirm_question',
+                 button: 'aaxis.ontology.config.flow_history_compact.confirm_button'
+             }
+         }|json_encode }}">
+        <div class="aaxis-config-run-index__last">
+            {% if last_compact %}
+                {{ 'aaxis.ontology.config.general.flow_history_purge.last_compact'|trans({'{{ at }}': last_compact.at|slice(0, 19)}) }}
+                <ul class="aaxis-config-run-index__tables">
+                    {% for t in last_compact.tables %}
+                        <li>
+                            <code>{{ t.table }}</code>:
+                            {% if t.error %}
+                                <span class="aaxis-config-run-index__error">{{ 'aaxis.ontology.config.general.flow_history_purge.compact_failed'|trans({'{{ error }}': t.error}) }}</span>
+                            {% else %}
+                                {{ t.before }} → {{ t.after }}
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                {{ 'aaxis.ontology.config.general.flow_history_purge.never_compacted'|trans }}
+            {% endif %}
+        </div>
+        <button type="button" class="btn" data-role="maintenance-run">
+            {{ 'aaxis.ontology.config.general.flow_history_purge.compact_button'|trans }}
         </button>
         <div class="aaxis-connector-test" data-role="maintenance-result" hidden></div>
     </div>

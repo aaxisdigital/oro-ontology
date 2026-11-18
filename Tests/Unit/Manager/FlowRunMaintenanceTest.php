@@ -182,10 +182,12 @@ class FlowRunMaintenanceTest extends TestCase
         $this->values['aaxis_ontology.flow_execution_history_days'] = 10;
         $now = new \DateTimeImmutable('2026-03-20 12:00:00.250000', new \DateTimeZone('Europe/Paris'));
         $sizes = [FlowRunIndex::PURGE_BATCH, 7];
-        $this->connection->expects(self::exactly(2))->method('executeStatement')
-            ->with(self::stringContains('DELETE FROM aaxis_ontology_flow_events WHERE id IN (SELECT id FROM aaxis_ontology_flow_events WHERE datetime < :cutoff LIMIT 10000)'), ['cutoff' => '2026-03-10 11:00:00.250000'])
-            ->willReturnCallback(static function () use (&$sizes): int {
-                return array_shift($sizes);
+        $statements = [];
+        $this->connection->method('executeStatement')
+            ->willReturnCallback(static function (string $sql, array $params = []) use (&$sizes, &$statements): int {
+                $statements[] = [$sql, $params];
+
+                return str_starts_with($sql, 'DELETE') ? array_shift($sizes) : 0;
             });
         $this->runs->expects(self::once())->method('purgeBefore')->with('2026-03-10 11:00:00.250000')->willReturn(3);
         $this->bucket->method('isConfigured')->willReturn(true);
@@ -193,17 +195,26 @@ class FlowRunMaintenanceTest extends TestCase
             ->with(self::callback(static fn (\DateTimeImmutable $cutoff): bool => $cutoff->format('Y-m-d H:i:s e') === '2026-03-10 11:00:00 UTC'))
             ->willReturn(9);
 
+        $vacuumed = ['aaxis_ontology_flow_events', 'aaxis_ontology_flow_runs'];
         self::assertSame(
-            ['cutoff' => '2026-03-10 11:00:00.250000', 'events' => FlowRunIndex::PURGE_BATCH + 7, 'runs' => 3, 'bucketConfigured' => true, 'bucketObjects' => 9],
+            ['cutoff' => '2026-03-10 11:00:00.250000', 'events' => FlowRunIndex::PURGE_BATCH + 7, 'runs' => 3, 'bucketConfigured' => true, 'bucketObjects' => 9, 'vacuumed' => $vacuumed],
             $this->maintenance->purge($now)
         );
+        $delete = 'DELETE FROM aaxis_ontology_flow_events WHERE id IN (SELECT id FROM aaxis_ontology_flow_events WHERE datetime < :cutoff LIMIT 10000)';
+        self::assertSame([
+            [$delete, ['cutoff' => '2026-03-10 11:00:00.250000']],
+            [$delete, ['cutoff' => '2026-03-10 11:00:00.250000']],
+            // Both tables lost rows: their freed space becomes reusable right away.
+            ['VACUUM (ANALYZE) aaxis_ontology_flow_events', []],
+            ['VACUUM (ANALYZE) aaxis_ontology_flow_runs', []],
+        ], $statements);
 
         // The outcome is recorded for the Settings page's "last cleanup" line.
         $last = $this->maintenance->lastPurge();
         self::assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/', $last['at']);
         unset($last['at']);
         self::assertSame(
-            ['days' => 10, 'cutoff' => '2026-03-10 11:00:00.250000', 'events' => FlowRunIndex::PURGE_BATCH + 7, 'runs' => 3, 'bucketConfigured' => true, 'bucketObjects' => 9],
+            ['days' => 10, 'cutoff' => '2026-03-10 11:00:00.250000', 'events' => FlowRunIndex::PURGE_BATCH + 7, 'runs' => 3, 'bucketConfigured' => true, 'bucketObjects' => 9, 'vacuumed' => $vacuumed],
             $last
         );
         self::assertSame(1, $this->flushes);
@@ -274,14 +285,119 @@ class FlowRunMaintenanceTest extends TestCase
         $this->runs->method('purgeBefore')->willReturn(2);
         $this->bucket->method('isConfigured')->willReturn(true);
         $this->bucket->method('purgeBefore')->willThrowException(new \RuntimeException('bucket down'));
-        $this->logger->expects(self::exactly(2))->method('error')
+        $this->logger->expects(self::exactly(3))->method('error')
             ->with(self::logicalOr(
                 'Flow execution history purge failed for the flow events table.',
-                'Flow execution history purge failed for the bucket flow events.'
+                'Flow execution history purge failed for the bucket flow events.',
+                'Flow execution history purge failed for the vacuum of aaxis_ontology_flow_runs.'
             ));
 
         $report = $this->maintenance->purge();
 
-        self::assertSame([null, 2, true, null], [$report['events'], $report['runs'], $report['bucketConfigured'], $report['bucketObjects']]);
+        self::assertSame([null, 2, true, null, []], [$report['events'], $report['runs'], $report['bucketConfigured'], $report['bucketObjects'], $report['vacuumed']]);
+    }
+
+    public function testOnlyTablesThatLostRowsAreVacuumed(): void
+    {
+        $statements = [];
+        $this->connection->method('executeStatement')->willReturnCallback(static function (string $sql) use (&$statements): int {
+            $statements[] = $sql;
+
+            return 0;
+        });
+        $this->runs->method('purgeBefore')->willReturn(4);
+        $this->bucket->method('isConfigured')->willReturn(false);
+
+        self::assertSame(['aaxis_ontology_flow_runs'], $this->maintenance->purge()['vacuumed']);
+        self::assertSame(['VACUUM (ANALYZE) aaxis_ontology_flow_runs'], array_values(array_filter($statements, static fn (string $sql): bool => str_starts_with($sql, 'VACUUM'))));
+    }
+
+    public function testNoVacuumInsideATransaction(): void
+    {
+        $this->connection->method('isTransactionActive')->willReturn(true);
+        $this->connection->method('executeStatement')->willReturnCallback(static function (string $sql): int {
+            self::assertStringNotContainsString('VACUUM', $sql);
+
+            return 0;
+        });
+        $this->runs->method('purgeBefore')->willReturn(4);
+        $this->bucket->method('isConfigured')->willReturn(false);
+
+        self::assertSame([], $this->maintenance->purge()['vacuumed']);
+    }
+
+    // --- compaction ---------------------------------------------------------------------------
+
+    public function testCompactionRewritesThePurgedTablesUnderALockTimeoutAndRecordsTheSizes(): void
+    {
+        $sizes = ['aaxis_ontology_flow_events' => [16_000_000, 9_000_000], 'aaxis_ontology_flow_runs' => ['1500000', '900000']];
+        $this->connection->method('fetchOne')->willReturnCallback(static function (string $sql, array $params) use (&$sizes) {
+            self::assertSame('SELECT pg_total_relation_size(to_regclass(?))', $sql);
+
+            return array_shift($sizes[$params[0]]);
+        });
+        $statements = [];
+        $this->connection->method('executeStatement')->willReturnCallback(static function (string $sql) use (&$statements): int {
+            $statements[] = $sql;
+
+            return 0;
+        });
+
+        $result = $this->maintenance->compact();
+
+        self::assertSame([
+            "SET lock_timeout = '5s'", 'VACUUM (FULL, ANALYZE) aaxis_ontology_flow_events', 'RESET lock_timeout',
+            "SET lock_timeout = '5s'", 'VACUUM (FULL, ANALYZE) aaxis_ontology_flow_runs', 'RESET lock_timeout',
+        ], $statements);
+        self::assertSame([
+            ['table' => 'aaxis_ontology_flow_events', 'before' => 16_000_000, 'after' => 9_000_000],
+            ['table' => 'aaxis_ontology_flow_runs', 'before' => 1_500_000, 'after' => 900_000],
+        ], $result['tables']);
+        self::assertSame($result, $this->maintenance->lastCompact());
+        self::assertSame(1, $this->flushes);
+    }
+
+    public function testATableWhoseLockStaysBusyIsGivenUpAndTheTimeoutStillReset(): void
+    {
+        $this->connection->method('fetchOne')->willThrowException(new \RuntimeException('no size'));
+        $statements = [];
+        $this->connection->method('executeStatement')->willReturnCallback(static function (string $sql) use (&$statements): int {
+            $statements[] = $sql;
+            if ($sql === 'VACUUM (FULL, ANALYZE) aaxis_ontology_flow_events') {
+                throw new \RuntimeException('canceling statement due to lock timeout');
+            }
+
+            return 0;
+        });
+        $this->logger->expects(self::once())->method('error')
+            ->with('Flow execution history compaction failed for aaxis_ontology_flow_events.');
+
+        $tables = $this->maintenance->compact()['tables'];
+
+        self::assertSame(
+            ['table' => 'aaxis_ontology_flow_events', 'before' => null, 'after' => null, 'error' => 'canceling statement due to lock timeout'],
+            $tables[0]
+        );
+        self::assertArrayNotHasKey('error', $tables[1]);
+        self::assertSame('RESET lock_timeout', $statements[2], 'the session timeout is reset even after a failure');
+        self::assertCount(6, $statements);
+    }
+
+    /**
+     * @dataProvider unreadableCompactions
+     */
+    public function testAnUnreadableLastCompactionReadsAsNever(mixed $stored): void
+    {
+        $this->values[FlowRunMaintenance::LAST_COMPACT] = $stored;
+
+        self::assertNull($this->maintenance->lastCompact());
+    }
+
+    /**
+     * @return array<string, array{mixed}>
+     */
+    public static function unreadableCompactions(): array
+    {
+        return ['unset' => [null], 'not json' => ['{'], 'no tables' => ['{"at":"x"}'], 'tables not a list' => ['{"at":"x","tables":"y"}']];
     }
 }

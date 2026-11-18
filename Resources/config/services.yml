@@ -344,6 +344,18 @@ services:
         tags:
             - { name: oro_message_queue.client.message_processor }
 
+    # Message queue: "Compact tables" (Settings) — VACUUM FULL of the history cleanup's tables.
+    Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowHistoryCompactTopic:
+        tags:
+            - { name: oro_message_queue.topic }
+
+    Aaxis\Bundle\OntologyBundle\Async\OntologyFlowHistoryCompactProcessor:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
+            - '@logger'
+        tags:
+            - { name: oro_message_queue.client.message_processor }
+
     Aaxis\Bundle\OntologyBundle\Async\OntologyHttpRequestProcessor:
         arguments:
             - '@doctrine'

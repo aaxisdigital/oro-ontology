@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Controller;
 
+use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowHistoryCompactTopic;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowHistoryPurgeTopic;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowRunsRebuildTopic;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
@@ -91,6 +92,25 @@ class OntologyConfigController extends AbstractController
     {
         try {
             $this->container->get(MessageProducerInterface::class)->send(OntologyFlowHistoryPurgeTopic::getName(), []);
+        } catch (\Throwable) {
+            return new JsonResponse(['success' => false], 500);
+        }
+
+        return new JsonResponse(['success' => true]);
+    }
+
+    /**
+     * Settings → "Compact tables": queues the VACUUM FULL of the tables the history cleanup deletes
+     * from (it rewrites them under an exclusive lock, so it runs in the background); the page's
+     * "last compaction" line shows each table's size before/after once it is done.
+     */
+    #[Route(path: '/config/api/flow-history-compact', name: 'aaxis_ontology_config_flow_history_compact', options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('oro_config_system')]
+    #[CsrfProtection]
+    public function flowHistoryCompactAction(): JsonResponse
+    {
+        try {
+            $this->container->get(MessageProducerInterface::class)->send(OntologyFlowHistoryCompactTopic::getName(), []);
         } catch (\Throwable) {
             return new JsonResponse(['success' => false], 500);
         }

@@ -206,8 +206,12 @@ page and drives the daily purge (see "Run index"). `flow_version_history_days` (
 flow/data "bucket archive after history days" and "allow UI view of archived data" — were REMOVED
 by request before any logic consumed them.) Below them sits **DB Usage** — a read-only `ui_only` field (`Form/Type/DbUsageType`,
 tagged form.type) listing `pg_total_relation_size` of aaxis_ontology_data/_data_history/_flow/
-_flow_history/_flow_events formatted kb/mb/gb ("flow execution history" = the flow EVENTS table;
-missing tables render "—", never an error). Its widget block lives in
+_flow_history/_flow_events/_flow_runs formatted kb/mb/gb ("flow execution history" = the flow EVENTS table;
+missing tables render "—", never an error), plus each table's ROW estimate
+(`pg_stat_user_tables.n_live_tup`, no scan). Both come from ONE live query per page render —
+there is no cache. ⚠️ A DELETE never shrinks a PostgreSQL table: (auto)vacuum turns the space into
+free space INSIDE the files, reused by new rows. So after a cleanup the rows drop while the size
+stays; only "Compact tables" (VACUUM FULL, below) gives the space back to the disk. Its widget block lives in
 `Resources/views/Form/fields.html.twig`, registered as a form theme via
 `Resources/config/oro/twig.yml` (`bundles:` list — Oro's cumulative form-theme mechanism, same as
 OroFormBundle's own; NOT app.yml, which has no precedent for twig config). A **Bucket** page
@@ -1358,7 +1362,20 @@ consumer agree on backend, window and flag:
   a bucket connection is CONFIGURED (toggle on or off), the bucket's day folders before the cutoff
   day (`BucketFlowEventStore::purgeBefore`, which walks the year/month/day prefixes and skips newer
   years and months). Each store is attempted independently, and a failure is logged with that
-  store's count reported as null.
+  store's count reported as null. Then every table that actually LOST rows gets a plain
+  `VACUUM (ANALYZE)` (`PURGED_TABLES`: flow events, run index) — a non-blocking lock, so the
+  freed space is reusable at once instead of after autovacuum, and the statistics (DB Usage's row
+  estimate) are current. The report and the record carry `vacuumed` (table names). It is skipped
+  inside an open transaction (VACUUM cannot run in one) and a failure is logged like a store's.
+- `compact()` ("Compact tables"): `VACUUM (FULL, ANALYZE)` of the same two tables ONLY — the
+  only way to hand deleted rows' space back to the disk. It REWRITES each table under an ACCESS
+  EXCLUSIVE lock, so event writes (consumers) and the Events page wait meanwhile (seconds at
+  braskem7's size). It runs under `SET lock_timeout = '5s'` — always `RESET` afterwards, from a
+  `finally`, because the consumer's connection is reused — so a busy table is GIVEN UP with its
+  error recorded instead of queueing everything behind the waiting lock. Sizes before/after go
+  into `flow_history_last_compact` (JSON `{at, tables: [{table, before, after, error?}]}`,
+  `lastCompact()`). Validated on PostgreSQL: deleting 75% of a table and then a plain vacuum left
+  it 5.1 → 4.8 MB; VACUUM FULL → 1.2 MB.
 
 Entry points:
 - **Settings page**, right after the history days: `aaxis_ontology.flow_history_purge` (`ui_only`,
@@ -1371,6 +1388,11 @@ Entry points:
   (`OntologyConfigController::flowHistoryPurgeAction`, CSRF, `oro_config_system` →
   `Async/OntologyFlowHistoryPurgeProcessor`, which ACKs even when a store failed — the purge
   already logged and recorded it — and rejects only a crash). It purges by the SAVED days setting.
+  Below it, as a SIBLING component (if nested, the purge button's delegated handler would catch its clicks),
+  the last compaction (per table `before → after`, or why it was given up) and the **Compact
+  tables** button: it confirms (naming the brief lock), then QUEUES topic
+  `aaxis_ontology_flow_history_compact` (`OntologyConfigController::flowHistoryCompactAction` →
+  `Async/OntologyFlowHistoryCompactProcessor`; ACK even when a table was given up).
 - Then `aaxis_ontology.flow_runs_index` (`ui_only`, `Form/Type/FlowRunIndexStatusType`,
   twig block `aaxis_ontology_flow_runs_index_widget`) shows "In sync." or
   "Out of sync since …", plus the last rebuild. Its **Rebuild run index** button

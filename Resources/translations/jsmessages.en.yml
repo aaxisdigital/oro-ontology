@@ -190,6 +190,12 @@ aaxis:
                 confirm_button: 'Clean up'
                 queued: 'Cleanup queued — it runs in the background. Reload this page in a moment to see the result above.'
                 queue_failed: 'The cleanup could not be queued. Try again.'
+            flow_history_compact:
+                confirm_title: 'Compact the flow history tables'
+                confirm_question: 'Rewrite the flow events and run index tables now to give the space of removed rows back to the disk? While each table is rewritten (usually seconds) flow event writes and the Events page wait for it; a table whose lock stays busy for 5 seconds is skipped.'
+                confirm_button: 'Compact'
+                queued: 'Compaction queued — it runs in the background. Reload this page in a moment to see the result above.'
+                queue_failed: 'The compaction could not be queued. Try again.'
         event_view:
             flow: 'Flow'
             uuid: 'UUID'

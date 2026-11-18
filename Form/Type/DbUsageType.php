@@ -12,8 +12,10 @@ use Symfony\Component\Form\FormView;
 
 /**
  * Read-only System Configuration widget listing the on-disk size of the bundle's data/history
- * tables (pg_total_relation_size: table + indexes + toast) — information to support the
- * retention-days settings above it. Declared `ui_only` in system_configuration.yml, renders no
+ * tables (pg_total_relation_size: table + indexes + toast) and their live row count — information
+ * to support the retention-days settings above it. The count is PostgreSQL's statistics estimate
+ * (`pg_stat_user_tables.n_live_tup`, no table scan), so it shows a cleanup at once while the size
+ * stays until the table is compacted (deleted rows leave reusable space INSIDE the files). Declared `ui_only` in system_configuration.yml, renders no
  * input (block aaxis_ontology_db_usage_widget in Form/fields.html.twig) and persists nothing.
  */
 class DbUsageType extends AbstractType
@@ -35,10 +37,7 @@ class DbUsageType extends AbstractType
     #[\Override]
     public function buildView(FormView $view, FormInterface $form, array $options): void
     {
-        $view->vars['db_usage'] = array_map(
-            fn (string $table): array => ['table' => $table, 'size' => $this->tableSize($table)],
-            self::TABLES
-        );
+        $view->vars['db_usage'] = array_map(fn (string $table): array => $this->usage($table), self::TABLES);
     }
 
     #[\Override]
@@ -53,34 +52,38 @@ class DbUsageType extends AbstractType
         return 'aaxis_ontology_db_usage';
     }
 
-    private function tableSize(string $table): string
-    {
-        $bytes = $this->tableBytes($table);
-
-        return $bytes === null ? '—' : self::formatBytes($bytes);
-    }
-
     /**
-     * The table's total size in bytes, or null when it cannot be told (unknown/renamed table, or
-     * a database error — the config page must render either way).
+     * One table's line: its total size and estimated live rows, each '—' when it cannot be told
+     * (unknown/renamed table, no statistics yet, or a database error — the config page must
+     * render either way).
+     *
+     * @return array{table: string, size: string, rows: string}
      */
-    private function tableBytes(string $table): ?int
+    private function usage(string $table): array
     {
         try {
             // to_regclass() is NULL for a missing table and the size function passes it through,
-            // so an unknown/renamed table comes back null.
-            $bytes = $this->doctrine->getConnection()->fetchOne(
-                'SELECT pg_total_relation_size(to_regclass(?))',
+            // so an unknown/renamed table comes back null (and finds no statistics row).
+            $row = $this->doctrine->getConnection()->fetchAssociative(
+                'SELECT pg_total_relation_size(t.oid) AS bytes, s.n_live_tup AS live'
+                . ' FROM (SELECT to_regclass(?) AS oid) t LEFT JOIN pg_stat_user_tables s ON s.relid = t.oid',
                 [$table]
             );
         } catch (\Throwable) {
-            return null;
+            $row = false;
         }
+        $bytes = \is_array($row) ? ($row['bytes'] ?? null) : null;
+        $live = \is_array($row) ? ($row['live'] ?? null) : null;
 
-        return $bytes === null || $bytes === false ? null : (int) $bytes;
+        return [
+            'table' => $table,
+            'size' => $bytes === null ? '—' : self::formatBytes((int) $bytes),
+            'rows' => $live === null ? '—' : number_format((int) $live),
+        ];
     }
 
-    private static function formatBytes(int $bytes): string
+    /** "12.3 kb" / "4.6 mb" / "1.25 gb" — shared with the history cleanup's compaction line. */
+    public static function formatBytes(int $bytes): string
     {
         $kb = $bytes / 1024;
 

@@ -46,6 +46,7 @@ class PurgeFlowHistoryCommand extends Command implements CronCommandScheduleDefi
             '  bucket objects: %s',
             $report['bucketConfigured'] ? $count($report['bucketObjects']) : 'skipped (no bucket configured)'
         ));
+        $output->writeln(sprintf('  vacuumed: %s', $report['vacuumed'] ? implode(', ', $report['vacuumed']) : 'none'));
         $failed = $report['events'] === null || $report['runs'] === null
             || ($report['bucketConfigured'] && $report['bucketObjects'] === null);
 

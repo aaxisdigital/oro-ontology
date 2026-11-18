@@ -27,5 +27,24 @@ class FlowHistoryPurgeTypeTest extends TestCase
         self::assertSame(30, $view->vars['history_days']);
         self::assertSame(TextType::class, $type->getParent());
         self::assertSame('aaxis_ontology_flow_history_purge', $type->getBlockPrefix());
+        self::assertNull($view->vars['last_compact']);
+    }
+
+    public function testItFormatsTheLastCompactionPerTable(): void
+    {
+        $maintenance = $this->createMock(FlowRunMaintenance::class);
+        $maintenance->method('lastCompact')->willReturn(['at' => '2026-11-18 19:00:00.000000', 'tables' => [
+            ['table' => 'aaxis_ontology_flow_events', 'before' => 16 * 1024 * 1024, 'after' => '9576448'],
+            ['table' => 'aaxis_ontology_flow_runs', 'before' => null, 'after' => null, 'error' => 'canceling statement due to lock timeout'],
+            'garbage',
+        ]]);
+        $view = new FormView();
+
+        (new FlowHistoryPurgeType($maintenance))->buildView($view, $this->createMock(FormInterface::class), []);
+
+        self::assertSame(['at' => '2026-11-18 19:00:00.000000', 'tables' => [
+            ['table' => 'aaxis_ontology_flow_events', 'before' => '16.0 mb', 'after' => '9.1 mb', 'error' => null],
+            ['table' => 'aaxis_ontology_flow_runs', 'before' => '—', 'after' => '—', 'error' => 'canceling statement due to lock timeout'],
+        ]], $view->vars['last_compact']);
     }
 }

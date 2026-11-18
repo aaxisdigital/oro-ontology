@@ -20,7 +20,7 @@ class PurgeFlowHistoryCommandTest extends TestCase
     private function execute(array $report): array
     {
         $maintenance = $this->createMock(FlowRunMaintenance::class);
-        $maintenance->expects(self::once())->method('purge')->willReturn($report + ['cutoff' => '2026-03-10 11:00:00.000000']);
+        $maintenance->expects(self::once())->method('purge')->willReturn($report + ['cutoff' => '2026-03-10 11:00:00.000000', 'vacuumed' => []]);
         $tester = new CommandTester(new PurgeFlowHistoryCommand($maintenance));
 
         return [$tester->execute([]), $tester->getDisplay()];
@@ -43,6 +43,15 @@ class PurgeFlowHistoryCommandTest extends TestCase
         self::assertStringContainsString('events: 120', $display);
         self::assertStringContainsString('runs: 7', $display);
         self::assertStringContainsString('bucket objects: 33', $display);
+        self::assertStringContainsString('vacuumed: none', $display);
+    }
+
+    public function testItListsTheTablesItVacuumed(): void
+    {
+        [, $display] = $this->execute(['events' => 1, 'runs' => 1, 'bucketConfigured' => false, 'bucketObjects' => null,
+            'vacuumed' => ['aaxis_ontology_flow_events', 'aaxis_ontology_flow_runs']]);
+
+        self::assertStringContainsString('vacuumed: aaxis_ontology_flow_events, aaxis_ontology_flow_runs', $display);
     }
 
     public function testASkippedBucketIsNotAFailure(): void

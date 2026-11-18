@@ -24,17 +24,23 @@ class DbUsageTypeTest extends TestCase
     ];
 
     /**
-     * @param callable(string): mixed $sizeOf answers for each table's fetchOne()
+     * @param callable(string): mixed $sizeOf answers each table's size (a \Throwable is thrown, false = no row)
+     * @param callable(string): mixed $liveOf answers each table's live-row estimate
      *
-     * @return array<int, array{table: string, size: string}>
+     * @return array<int, array{table: string, size: string, rows: string}>
      */
-    private function usage(callable $sizeOf): array
+    private function usage(callable $sizeOf, ?callable $liveOf = null): array
     {
         $connection = $this->createMock(Connection::class);
-        $connection->method('fetchOne')->willReturnCallback(function (string $sql, array $params) use ($sizeOf) {
-            self::assertSame('SELECT pg_total_relation_size(to_regclass(?))', $sql);
+        $connection->method('fetchAssociative')->willReturnCallback(function (string $sql, array $params) use ($sizeOf, $liveOf) {
+            self::assertSame(
+                'SELECT pg_total_relation_size(t.oid) AS bytes, s.n_live_tup AS live'
+                . ' FROM (SELECT to_regclass(?) AS oid) t LEFT JOIN pg_stat_user_tables s ON s.relid = t.oid',
+                $sql
+            );
+            $bytes = $sizeOf($params[0]);
 
-            return $sizeOf($params[0]);
+            return $bytes === false ? false : ['bytes' => $bytes, 'live' => $liveOf ? $liveOf($params[0]) : 0];
         });
         $registry = $this->createMock(ManagerRegistry::class);
         $registry->method('getConnection')->willReturn($connection);
@@ -103,6 +109,23 @@ class DbUsageTypeTest extends TestCase
             'false (no row)' => [false],
             'database error' => [new \RuntimeException('connection lost')],
         ];
+    }
+
+    public function testRowsAreTheFormattedLiveEstimate(): void
+    {
+        $usage = $this->usage(static fn () => 1024, static fn (string $table) => match ($table) {
+            'aaxis_ontology_flow_events' => '42207',
+            'aaxis_ontology_flow' => null,
+            default => 3,
+        });
+
+        self::assertSame(['3', '3', '—', '3', '42,207', '3'], array_column($usage, 'rows'));
+    }
+
+    public function testAMissingRowOrAFailedQueryHasNoRowCountEither(): void
+    {
+        self::assertSame(['—'], array_unique(array_column($this->usage(static fn () => false), 'rows')));
+        self::assertSame(['—'], array_unique(array_column($this->usage(static fn () => throw new \RuntimeException('x')), 'rows')));
     }
 
     public function testEachTableIsResolvedIndependently(): void

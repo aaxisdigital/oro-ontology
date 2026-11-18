@@ -36,6 +36,8 @@ class Configuration implements ConfigurationInterface
             'flow_runs_index_stale_since' => ['type' => 'string', 'value' => ''],
             'flow_runs_index_last_rebuild' => ['type' => 'string', 'value' => ''],
             'flow_history_last_purge' => ['type' => 'string', 'value' => ''],
+            // The last "Compact tables" run: JSON {at, tables: [{table, before, after, error?}]}.
+            'flow_history_last_compact' => ['type' => 'string', 'value' => ''],
             'flow_version_history_days' => ['type' => 'integer', 'value' => 365],
             'entity_version_history_days' => ['type' => 'integer', 'value' => 365],
             // Bucket (S3-compatible object storage). The two keys are stored ENCRYPTED by
