@@ -83,11 +83,11 @@
                             {role: 'save-all', icon: 'fa-floppy-o aaxis-flow-editor__save-all-back', label: 'aaxis.ontology.flow_editor.tab_save_all', disabled: true},
                             {role: 'view-source', icon: 'fa-code', label: 'aaxis.ontology.flow_editor.view_source'},
                             {role: 'flow-history', icon: 'fa-history', label: 'aaxis.ontology.flow_editor.history', disabled: true},
-                            {role: 'tab-close-all', icon: 'fa-times', label: 'aaxis.ontology.flow_editor.tab_close_all'}
+                            {role: 'tab-close-all', icon: 'fa-times', label: 'aaxis.ontology.flow_editor.tab_close_all', class: 'aaxis-flow-editor__tab--leave'}
                         ] %}
                         <div class="aaxis-flow-editor__tab-group" data-role="document-actions">
                             {% for action in document_actions %}
-                                <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action" data-role="{{ action.role }}"
+                                <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action {{ action.class ?? '' }}" data-role="{{ action.role }}"
                                         title="{{ action.label|trans }}" aria-label="{{ action.label|trans }}"{% if action.disabled ?? false %} disabled{% endif %}>
                                     <span class="fa {{ action.icon }}" aria-hidden="true"></span>
                                     {%- if action.role == 'save-all' %}<span class="fa fa-floppy-o aaxis-flow-editor__save-all-front" aria-hidden="true"></span>{% endif %}

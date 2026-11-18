@@ -694,7 +694,7 @@ an icon-only `__tab--action` (titles are the labels) in two `__tab-group`s, 14px
     tab OUT OF FOCUS holds changes (several changed tabs always include one): with just the focused
     flow changed, Save is the action. Disabled rather than hidden, so nothing shifts;
   - View source (`view-source`) and History (`flow-history`, disabled until saved);
-  - plain × (fa-times, no box) = **Close the editor** (`tab-close-all`, `closeEditor()`): back to
+  - plain × (fa-times, no box; `__tab--leave` sets it 14px apart, like a group of its own) = **Close the editor** (`tab-close-all`, `closeEditor()`): back to
     the flows list. With unsaved work anywhere it asks first (Cancel / Don't save / Save). Don't
     save sets `discarding` (silences the leave guards) and leaves; Save runs `saveAll(onDone)` and
     leaves when everything saved — otherwise it STAYS, keeping open only the tabs still dirty (their
@@ -1490,7 +1490,7 @@ container, since the processor's constructor arguments changed).
 **Single-line DWL input** — `widgets/dwl-input.ts`, `createDwlInput({value, dwl, label?,
 placeholder?, maxlength?, inputClass?})` → `{$el, $input, $toggle, value(), isDwl()}`. It is the
 one-line sibling of the field below: a text input with the small pure-text/DWL switch INSIDE its
-right end (`.aaxis-dwl-input`, which reserves 76px of padding-right and ZEROES the input's margin:
+LEFT end — moved there from the right by request, 2026-11-18 — (`.aaxis-dwl-input`, which reserves 82px of padding-left and ZEROES the input's margin:
 Oro's form-control margin-bottom made the wrapper 42px for a 34px input, and the switch — centered
 on the wrapper — sat 4px low). Code style applies while the switch is on. A plain switch used as a
 `settingsCol`'s control (trigger Enabled, endpoint Public, HTTP Async) is given the inputs' 34px
@@ -1601,6 +1601,11 @@ optional (bare expressions work). Scripts are parse-validated on SAVE
 deliberately NOT imported — upstream's `Format/` layer serves its CLI's I/O; read()/write() use the
 mirrored `Runtime/DataFormats` + `Runtime/Codec/` (also copied upstream). Errors (unconfigured step, unknown
 system/entity, missing connector, failed request) abort with a 422 naming the step.
+NATIVE `<select>`s in the bundle's popups (step settings, the Erase popup's filter, the Flow
+History version picker) use the `aaxis-select-arrow` SCSS mixin (top of ontology.scss): the
+browser's own arrow sits ~4px from the right border, so the mixin drops it (`appearance: none`)
+and draws a chevron 14px in. Give any new native select in a popup the mixin; Select2-upgraded
+combos (RecordFormModal, the Add Data modal) draw their own arrow and need nothing.
 Gotcha fixed here once: a textarea's initial value must be set via jQuery `.val()` — a `value`
 key in the `$('<textarea/>', {...})` creation map is silently ignored.
 

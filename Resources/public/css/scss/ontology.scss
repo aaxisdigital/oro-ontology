@@ -1,5 +1,21 @@
 /* @theme: admin.oro; */
 
+// Native selects in the bundle's popups: the browser's own arrow sits ~4px from the right border,
+// so it is drawn here instead, with the same inset as the text on the left side.
+@mixin aaxis-select-arrow {
+    appearance: none;
+    padding-right: 34px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%235a6b7d' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    background-size: 10px 6px;
+    cursor: pointer;
+
+    &:disabled {
+        cursor: default;
+    }
+}
+
 // --- Page shell (shared by System & Entity pages) ---------------------------
 
 .aaxis-ontology-sys {
@@ -178,8 +194,19 @@
         white-space: nowrap;
     }
 
+    // The Flow History version picker: a boxed control with the drawn arrow (the bare native
+    // select had its arrow right on the border).
     &__select {
         max-width: 320px;
+        height: 32px;
+        margin: 0;
+        padding: 0 0 0 10px;
+        border: 1px solid #c7d0d9;
+        border-radius: 4px;
+        background-color: #fff;
+        color: #2b3a4a;
+        font-size: 13px;
+        @include aaxis-select-arrow;
     }
 
     &__spacer {
@@ -728,8 +755,8 @@
 }
 
 // Single-line "text or DWL" input (widgets/dwl-input.ts): a plain text input with the small
-// pure-text/DWL switch INSIDE its right end (the input reserves room for it). DWL mode shows the
-// text in the same code style as the multi-line field above.
+// pure-text/DWL switch INSIDE its LEFT end (the input reserves room for it), so the mode reads
+// before the value. DWL mode shows the text in the same code style as the multi-line field above.
 .aaxis-dwl-input {
     position: relative;
     min-width: 0;
@@ -737,7 +764,7 @@
     .aaxis-dwl-input__input {
         width: 100%;
         box-sizing: border-box;
-        padding-right: 76px;
+        padding-left: 82px;
         // Oro's form-control bottom margin would make this wrapper taller than the input and
         // push the switch (centered on the WRAPPER) below the text line.
         margin: 0;
@@ -752,7 +779,7 @@
     &__switch {
         position: absolute;
         top: 50%;
-        right: 10px;
+        left: 10px;
         transform: translateY(-50%);
     }
 }
@@ -1206,6 +1233,10 @@
             height: 34px;
             margin: 0;
             box-sizing: border-box;
+        }
+
+        select.form-control {
+            @include aaxis-select-arrow;
         }
 
         &.is-disabled {
@@ -1781,6 +1812,12 @@
         display: flex;
         align-items: flex-end;
         gap: 2px;
+    }
+
+    // The × that leaves the editor, set apart from the document tools by the same gap as the two
+    // groups — it is not one of them, and a slip from History should not close everything.
+    &__tab--leave {
+        margin-left: 12px;
     }
 
     // Drag-reorder drop indicators: a strong edge on the half where the tab would land.
@@ -2598,9 +2635,15 @@
         gap: 8px;
     }
 
-    // Searchable combobox (Call Subflow): a text filter over a dropdown of options.
+    // Searchable combobox (Call Subflow, connector pickers): a text filter over a dropdown of
+    // options. Oro's form-control bottom margin would make the combo 8px taller than its input —
+    // and a button beside it (the connector refresh) would centre on the wrong line.
     &__combo {
         position: relative;
+
+        > .form-control {
+            margin: 0;
+        }
     }
 
     &__combo-list {
@@ -2820,22 +2863,10 @@
         margin-left: auto;
     }
 
-    // Selects of the step settings popup (and of the debug-input dialog, which reuses its body):
-    // the browser's own arrow sat ~4px from the right border, so the arrow is drawn here instead,
-    // with the same inset as the text on the left side.
+    // Selects of the step settings popup (and of the debug-input dialog, which reuses its body).
     &__settings select.form-control,
     &__settings-body select.form-control {
-        appearance: none;
-        padding-right: 34px;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%235a6b7d' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-        background-repeat: no-repeat;
-        background-position: right 14px center;
-        background-size: 10px 6px;
-        cursor: pointer;
-
-        &:disabled {
-            cursor: default;
-        }
+        @include aaxis-select-arrow;
     }
 }
 

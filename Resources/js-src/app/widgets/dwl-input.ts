@@ -15,7 +15,7 @@ export interface DwlInputOptions {
 }
 
 export interface DwlInput {
-    /** The whole component (input + the switch inside its right end) — append this. */
+    /** The whole component (input + the switch inside its left end) — append this. */
     $el: any;
     /** The text input, for host event bindings/focus. */
     $input: any;
@@ -28,7 +28,7 @@ export interface DwlInput {
 /**
  * Single-line "text or DWL" input: the one-line sibling of {@see createDwlField} (which renders a
  * textarea under its own title row). A plain text input with a small pure-text/DWL switch INSIDE
- * its right end; while the switch is on the text is a single-line DWL expression the host
+ * its left end (so the mode reads before the value); while the switch is on the text is a single-line DWL expression the host
  * evaluates at run time, shown in code style with spellcheck off. A pasted multi-line expression
  * is flattened by the input itself (text inputs drop line breaks).
  *
