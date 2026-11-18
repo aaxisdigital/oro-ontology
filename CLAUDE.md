@@ -1178,6 +1178,23 @@ emits flow-exception itself on rejected batches/crashes since no executor wraps 
 `parseUpsertResponse()` moved to `OntologyDataApiManager` as a public static (failure payloads
 recognised BY SHAPE — the whole payload being `{errors: [strings]}`). REMOVED: the
 OntologyDataEvent entity, OntologyDataEventRecorder and the data_events table.
+**"Log event" switch** (2026-11-18, quieter logs on stable flows). Every NON-TRIGGER settings popup
+has the switch on the LEFT of its actions row; the row has a full-width divider above it
+(`__settings-actions` border-top) and Cancel/Confirm sit in `__settings-buttons`
+(margin-left: auto, so trigger popups keep them right without the switch). Config `log_event:
+false` is stored ONLY while the switch is off (`logEventSwitch()`, a pseudo-section appended
+LAST to the popup's sections). A step left on keeps its config byte-identical, and a name-only
+step left on stays `config: null`. Validator: `boolOk(log_event)` for every type
+(`FlowStepConfigRules::isValid`). Executor: `logsEvents($step, $quietRun)` /
+`configLogsEvents($config)`. OFF drops:
+- the step's `step` row (executeStepTracked and every debug-walk emit);
+- an entity_write's `data-upsert` (`upsertRecordsSync(..., $recordEvent)` → `recordUpsert()`);
+- for sub_flow/foreach, the invoked runs' subflow-start/-finish AND their trigger's step row.
+  The nested `execute()` gets `runInfo.quiet` via `nestedRunInfo()`, and debug frames carry
+  `quiet`, read with `?? false` because blobs from older sessions lack it.
+
+KEPT regardless: flow-exception, the root flow-start/flow-finish, the Event step's log-message
+(its purpose) and async HTTP failure log-messages. Triggers have no switch; theirs follows the run.
 ⚠️ REMOVING AN ENTITY CLASS (learned here the hard way): stale references survive in THREE places
 that each break `oro:entity-config:update`/migrations differently — the `oro_entity_config`(+
 _field/_index_value) ROWS (delete them), composer's CLASSMAP (`composer dump-autoload`) and the

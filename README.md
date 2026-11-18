@@ -176,6 +176,32 @@ records to an API) where the flow does not need the answers.
 
 ---
 
+## Quieter event logs ("Log event" switch)
+
+Every flow run records its trail on the **Events** page. On stable, high-volume flows that trail
+can grow large, so every step type except the triggers has a **Log event** switch. It sits on the
+left of the settings popup's bottom row, under a divider and opposite Cancel/Confirm. It is on by
+default.
+
+Switched **off**, the step records none of its own events:
+
+- its `step` row;
+- for **Entity Write**, the `data-upsert` row;
+- for **Call Subflow** / **Foreach Loop**, the `subflow-start` / `subflow-finish` rows of the runs it
+  invokes, and the row of the subflow's trigger. The subflow's own steps follow their own switches.
+
+What stays recorded regardless:
+
+- **failures** (`flow-exception`);
+- the run's `flow-start` / `flow-finish`;
+- an **Event** step's `log-message`, which is that step's purpose;
+- an async HTTP request's failure message.
+
+Config: `log_event: false`, stored only while the switch is off. The switch applies to Run Now,
+scheduled and endpoint runs, and the stepwise debugger alike.
+
+---
+
 ## Moving flows between environments
 
 A flow row's **Export** action downloads it as a self-contained JSON file, and the **Import Flow**

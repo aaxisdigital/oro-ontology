@@ -113,6 +113,45 @@ class FlowDebugExecutorDebugWalkTest extends FlowDebugExecutorTestCase
         self::assertSame(['step', 'Main', ['name' => 'Call', 'type' => 'sub_flow']], $this->events[7]);
     }
 
+    public function testSteppingIntoAQuietInvokerRecordsOnlyTheSubflowsOwnSteps(): void
+    {
+        $steps = self::mainSteps('sub_flow', ['subflow' => 20, 'log_event' => false]);
+        $blob = null;
+        $transitions = [];
+        do {
+            $result = $this->tick($blob, steps: $steps);
+            $blob = $result['blob'];
+            $transitions[] = $result['response']['transition'];
+        } while (!$result['response']['done']);
+
+        self::assertSame([null, null, 'entered', null, 'returned', null], $transitions);
+        self::assertSame(['flow-start', 'step', 'step', 'step', 'step', 'flow-finish'], $this->eventKinds());
+        self::assertSame(
+            ['Main', 'Init', 'Add', 'Finish'],
+            array_map(static fn (array $e): string => $e[2]['name'], \array_slice($this->events, 1, 4))
+        );
+    }
+
+    public function testAQuietForeachDropsItsIterationBoundaries(): void
+    {
+        $steps = [
+            self::step('t', 'cron', null, 'Main'),
+            self::step('call', 'foreach', ['subflow' => 20, 'array' => 'items', 'item' => 'item', 'log_event' => false], 'Loop'),
+        ];
+        $blob = ['context' => ['flowUuid' => 'u', 'items' => [5, 6], 'n' => 0], 'frames' => [[
+            'kind' => 'flow', 'flowId' => 1, 'flowName' => 'Main', 'steps' => $steps,
+            'links' => [self::link('t', 'call')], 'index' => 1, 'callerStepId' => null,
+        ]], 'done' => false];
+
+        do {
+            $result = $this->executor->debugWalk($steps, [], [], $blob, $this->root);
+            $blob = $result['blob'];
+        } while (!$result['response']['done']);
+
+        self::assertSame(2, $blob['context']['n']);
+        self::assertSame(['step', 'step', 'flow-finish'], $this->eventKinds());
+    }
+
     public function testNothingIsLeftAfterTheRunIsDone(): void
     {
         $this->expectException(\RuntimeException::class);

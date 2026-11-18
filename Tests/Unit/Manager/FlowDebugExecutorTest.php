@@ -449,6 +449,17 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
         self::assertSame(['uuid' => 'run-uuid', 'count' => 2, 'upsert' => 1, 'changedIds' => ['2']], $context['receipt']);
     }
 
+    public function testEntityWriteWithLogEventOffRecordsNoDataUpsert(): void
+    {
+        $entity = $this->entity('Erp', 'Order');
+        $flow = $this->savedFlow(8, 'Import');
+        $this->dataApi->expects(self::once())->method('upsertRecordsSync')
+            ->with($entity, [['id' => 1]], $flow, 'run-uuid', false)
+            ->willReturn(['uuid' => 'run-uuid', 'seen' => ['1'], 'changed' => ['1']]);
+
+        $this->runStep('entity_write', ['destination' => 'receipt', 'system' => 'Erp', 'entity' => 'Order', 'content' => 'payload', 'log_event' => false], [['id' => 1]], $flow);
+    }
+
     public function testEntityWriteOfOneObjectFromDwlStampsTheManualFlowWhenUnsaved(): void
     {
         $entity = $this->entity('Erp', 'Order');
@@ -970,6 +981,65 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
             $this->eventKinds()
         );
         self::assertSame(['subflow-start', 'Enrich', ['trigger' => 'subflow']], $this->events[2]);
+    }
+
+    public function testAStepWithLogEventOffLeavesNoStepRow(): void
+    {
+        $this->executor->execute(
+            [
+                self::step('t', 'cron', null, 'Main'),
+                self::step('a', 'dwl_transform', ['code' => '1', 'destination' => 'x', 'log_event' => false], 'Quiet'),
+                self::step('b', 'dwl_transform', ['code' => '2', 'destination' => 'y', 'log_event' => true], 'Loud'),
+            ],
+            [self::link('t', 'a'), self::link('a', 'b')],
+            []
+        );
+
+        self::assertSame(['flow-start', 'step', 'step', 'flow-finish'], $this->eventKinds());
+        self::assertSame(['Main', 'Loud'], array_map(static fn (array $e): string => $e[2]['name'], \array_slice($this->events, 1, 2)));
+        self::assertSame(['t', 'a', 'b'], $this->executor->lastExecutedIds());
+    }
+
+    public function testAQuietCallSubflowDropsItsBoundariesButNotTheSubflowsOwnSteps(): void
+    {
+        $this->subflow(20, 'Enrich', [
+            ['id' => 'st', 'type' => 'subflow', 'name' => 'Enrich'],
+            ['id' => 'sd', 'type' => 'dwl_transform', 'name' => 'Add', 'config' => ['code' => 'payload.n + 1', 'destination' => 'enriched']],
+        ], [self::link('st', 'sd')]);
+
+        $context = $this->executor->execute(
+            [self::step('t', 'entity_change', null, 'Main'), self::step('call', 'sub_flow', ['subflow' => 20, 'log_event' => false], 'Call')],
+            [self::link('t', 'call')],
+            ['payload' => ['n' => 1]],
+            $this->savedFlow(1, 'Main')
+        );
+
+        self::assertSame(2, $context['enriched']);
+        self::assertSame(['flow-start', 'step', 'step', 'flow-finish'], $this->eventKinds());
+        self::assertSame(['step', 'Enrich', ['name' => 'Add', 'type' => 'dwl_transform']], $this->events[2]);
+    }
+
+    public function testAQuietForeachStillRecordsAFailure(): void
+    {
+        $this->subflow(21, 'Per item', [
+            ['id' => 'st', 'type' => 'subflow', 'name' => 'Entry'],
+            ['id' => 'bad', 'type' => 'dwl_transform', 'name' => 'Bad', 'config' => ['code' => 'nope(', 'destination' => 'x', 'log_event' => false]],
+        ], [self::link('st', 'bad')]);
+
+        try {
+            $this->executor->execute(
+                [self::step('t', 'cron'), self::step('loop', 'foreach', ['subflow' => 21, 'array' => 'items', 'item' => 'item', 'log_event' => false])],
+                [self::link('t', 'loop')],
+                [],
+                null,
+                null,
+                ['flowUuid' => 'u', 'items' => [1]]
+            );
+            self::fail('The failing iteration must abort the run.');
+        } catch (\RuntimeException) {
+        }
+
+        self::assertSame(['flow-start', 'step', 'flow-exception', 'flow-exception'], $this->eventKinds());
     }
 
     public function testForeachRunsTheSubflowPerElementWithLoopScopedVariables(): void

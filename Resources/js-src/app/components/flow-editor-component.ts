@@ -2274,7 +2274,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // optionally a `ready` promise while its catalog data (systems/connectors…) still loads.
         // Name-only types have none: their name input goes into the body instead of the first row.
         const typed = this.stepSettingsSections(step, $top, $body, $panel[0], $input, reposition);
-        const sections = typed ?? [];
+        const sections: SettingsSection[] = typed ?? [];
+        // Every non-trigger step gets the "Log event" switch on the actions row (left of the
+        // buttons); triggers record their run's boundaries and have none.
+        const logEvent = this.stepMeta[step.type].category === 'trigger' ? null : this.logEventSwitch(step.config || {});
+        if (logEvent) {
+            sections.push(logEvent.section);
+        }
         if (typed === null) {
             $body.append(
                 $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __('aaxis.ontology.flow_editor.step_name_label')}),
@@ -2286,10 +2292,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $columns.append($body, $side);
         $panel.append($top, $columns, $error);
 
+        // The actions row, set off from the fields by a full-width divider: the Log event switch
+        // on the left, Cancel/Confirm on the right.
         const $actions = $('<div/>', {'class': 'aaxis-flow-editor__settings-actions'});
         const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
         const $confirm = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.confirm')});
-        $actions.append($cancel, $confirm);
+        if (logEvent) {
+            $actions.append(logEvent.$switch);
+        }
+        $actions.append($('<div/>', {'class': 'aaxis-flow-editor__settings-buttons'}).append($cancel, $confirm));
         $panel.append($actions);
 
         $(document.body).append($backdrop, $panel);
@@ -2464,6 +2475,32 @@ class OntologyFlowEditorComponent extends BaseComponent {
         );
 
         return {$switch, isOn: () => $check.is(':checked')};
+    }
+
+    /**
+     * The "Log event" switch of a non-trigger step (config `log_event`): on by default; when off
+     * the run records none of the step's events (its step row, an Entity Write's data-upsert, the
+     * start/finish of the subflow runs a Call Subflow / Foreach invokes). The key is stored only
+     * when OFF, so steps left on keep their config — and their saved flows — unchanged.
+     */
+    private logEventSwitch(initial: Record<string, any>): {$switch: any; section: SettingsSection} {
+        const control = this.plainSwitch(initial.log_event !== false, 'step_log_event_hint');
+        control.$switch
+            .addClass('aaxis-flow-editor__settings-log')
+            .attr('data-role', 'log-event')
+            .append($('<span/>', {'class': 'aaxis-flow-editor__switch-text', text: __('aaxis.ontology.flow_editor.step_log_event_label')}));
+
+        return {
+            $switch: control.$switch,
+            section: {
+                error: () => '',
+                merge: config => {
+                    const merged = {...config};
+                    delete merged.log_event;
+                    return control.isOn() ? merged : {...merged, log_event: false};
+                }
+            }
+        };
     }
 
     /**

@@ -687,3 +687,55 @@ describe('OntologyFlowEditorComponent — Invoke PHP settings', () => {
         expect(calls.filter((u: string) => u === '/aaxis_ontology_flow_php_methods')).toHaveLength(1);
     });
 });
+
+describe('OntologyFlowEditorComponent — Log event switch', () => {
+    useFlowEditorEnv(FlowEditorComponent);
+
+    const logSwitch = (): any => $('.aaxis-flow-editor__settings-actions [data-role="log-event"]');
+
+    it('sits left of the buttons on every non-trigger step and stores log_event only when off', async () => {
+        const editor = await open(st('l', 'logger', 'log', 300, 0, {message: 'hi'}));
+        const $actions = $('.aaxis-flow-editor__settings-actions');
+
+        expect($actions.children().first().is('[data-role="log-event"]')).toBe(true);
+        expect($actions.children().last().hasClass('aaxis-flow-editor__settings-buttons')).toBe(true);
+        expect(logSwitch().text()).toBe(KEY('step_log_event_label'));
+        expect(logSwitch().find('input').prop('checked')).toBe(true);
+        logSwitch().find('input').prop('checked', false);
+        confirmSettings();
+        expect(configOf(editor, 'log')).toEqual({message: 'hi', message_dwl: false, log_event: false});
+        expect(tile('log').classList.contains('is-config-invalid')).toBe(false);
+
+        openSettings('log');
+        await flush();
+        expect(logSwitch().find('input').prop('checked')).toBe(false);
+        logSwitch().find('input').prop('checked', true);
+        confirmSettings();
+        expect(configOf(editor, 'log')).toEqual({message: 'hi', message_dwl: false});
+    });
+
+    it('gives a name-only step a config only while its events are off', async () => {
+        const editor = await open(st('e', 'email', 'mail', 300, 0));
+
+        logSwitch().find('input').prop('checked', false);
+        confirmSettings();
+        expect(configOf(editor, 'mail')).toEqual({log_event: false});
+
+        openSettings('mail');
+        await flush();
+        logSwitch().find('input').prop('checked', true);
+        confirmSettings();
+        expect(configOf(editor, 'mail')).toBeNull();
+    });
+
+    it('is not offered on triggers, whose buttons stay on the right', async () => {
+        createEditor({flow: flowRecord(1, 'F', [st('t', 'cron', 'tick', 0, 0, {enabled: true})])});
+        await flush();
+        openSettings('tick');
+        await flush();
+
+        expect(logSwitch().length).toBe(0);
+        expect($('.aaxis-flow-editor__settings-actions').children().length).toBe(1);
+        expect($('.aaxis-flow-editor__settings-buttons .btn-primary').length).toBe(1);
+    });
+});

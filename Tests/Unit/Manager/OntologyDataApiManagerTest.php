@@ -468,6 +468,17 @@ class OntologyDataApiManagerTest extends TestCase
         self::assertSame(['uuid' => self::UUID, 'seen' => ['A', 'B'], 'changed' => ['A']], $result);
     }
 
+    public function testSyncUpsertWithoutEventRecordingEmitsNothing(): void
+    {
+        $entity = $this->world(false, false, 'sku');
+        $this->oroWriter->method('update')->willReturn(['A']);
+        $this->events->expects(self::never())->method('emit');
+
+        $result = $this->manager->upsertRecordsSync($entity, [['sku' => 'A']], $this->flow(), self::UUID, false);
+
+        self::assertSame(['A'], $result['changed']);
+    }
+
     public function testSyncUpsertOfABucketBackedEntityWritesTheBucket(): void
     {
         $entity = $this->world();

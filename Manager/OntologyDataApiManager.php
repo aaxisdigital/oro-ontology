@@ -196,16 +196,19 @@ class OntologyDataApiManager
      *
      * @param array<int, array<int|string, mixed>> $records
      *
+     * @param bool                                 $recordEvent false = no data-upsert event (the
+     *                                                          writing step's "Log event" switch is off)
+     *
      * @return array{uuid: string, seen: array<int, string>, changed: array<int, string>}
      *         seen = every unique id in the batch; changed = the ids actually created or updated
      *         (unchanged records are excluded)
      *
      * @throws OntologyApiException
      */
-    public function upsertRecordsSync(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid = null): array
+    public function upsertRecordsSync(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid = null, bool $recordEvent = true): array
     {
         if ($this->isInternal($entity)) {
-            return $this->updateOroEntitySync($entity, $records, $flow, $uuid);
+            return $this->updateOroEntitySync($entity, $records, $flow, $uuid, $recordEvent);
         }
 
         [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid);
@@ -218,11 +221,7 @@ class OntologyDataApiManager
                 $payloads,
                 new \DateTimeImmutable('now', new \DateTimeZone('UTC'))
             );
-            $this->flowEvents->emit($flow, $uuid, 'data-upsert', [
-                'entity' => (string) $entity->getName(),
-                'uniqueIds' => $uniqueIds,
-                'changedIds' => $changed,
-            ]);
+            $this->recordUpsert($recordEvent, $flow, $uuid, $entity, $uniqueIds, $changed);
 
             return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
         }
@@ -255,13 +254,28 @@ class OntologyDataApiManager
         }
 
         // The write became real: one data-upsert event on the run's trail.
+        $this->recordUpsert($recordEvent, $flow, $uuid, $entity, $uniqueIds, $changed);
+
+        return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
+    }
+
+    /**
+     * The data-upsert event of a synchronous write — skipped when the writing step's "Log event"
+     * switch is off.
+     *
+     * @param array<int, string> $uniqueIds
+     * @param array<int, string> $changed
+     */
+    private function recordUpsert(bool $recordEvent, OntologyFlow $flow, string $uuid, OntologyEntity $entity, array $uniqueIds, array $changed): void
+    {
+        if (!$recordEvent) {
+            return;
+        }
         $this->flowEvents->emit($flow, $uuid, 'data-upsert', [
             'entity' => (string) $entity->getName(),
             'uniqueIds' => $uniqueIds,
             'changedIds' => $changed,
         ]);
-
-        return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
     }
 
     /**
@@ -277,17 +291,13 @@ class OntologyDataApiManager
      *
      * @throws OntologyApiException
      */
-    private function updateOroEntitySync(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid): array
+    private function updateOroEntitySync(OntologyEntity $entity, array $records, OntologyFlow $flow, ?string $uuid, bool $recordEvent): array
     {
         [$uuid, $uniqueIds, $payloads] = $this->prepareUpsertBatch($entity, $records, $uuid, false);
 
         $changed = $this->oroWriter->update($entity, $uniqueIds, $payloads);
 
-        $this->flowEvents->emit($flow, $uuid, 'data-upsert', [
-            'entity' => (string) $entity->getName(),
-            'uniqueIds' => $uniqueIds,
-            'changedIds' => $changed,
-        ]);
+        $this->recordUpsert($recordEvent, $flow, $uuid, $entity, $uniqueIds, $changed);
 
         return ['uuid' => $uuid, 'seen' => $uniqueIds, 'changed' => $changed];
     }

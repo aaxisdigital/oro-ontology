@@ -171,7 +171,12 @@ class FlowDebugExecutor
         // triggered (debug | schedule | endpoint | subflow | …) and — for debug/endpoint runs
         // with credentials — who.
         $isNested = ($runInfo['trigger'] ?? '') === 'subflow';
-        $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-start' : 'flow-start', self::startPayload($runInfo));
+        // A QUIET run was invoked by a sub_flow/foreach whose "Log event" switch is off: its
+        // subflow-start/-finish and its trigger's step row are dropped (failures still record).
+        $quiet = $isNested && ($runInfo['quiet'] ?? false) === true;
+        if (!$quiet) {
+            $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-start' : 'flow-start', self::startPayload($runInfo));
+        }
 
         // A CALL SUBFLOW run seeds the CALLER's context — the subflow reads and extends it, and
         // the caller continues with the result (shared-context semantics).
@@ -183,7 +188,7 @@ class FlowDebugExecutor
             // port has no link.
             for ($cursor = 0; $cursor < \count($order); $cursor++) {
                 $step = $order[$cursor];
-                $this->executeStepTracked($step, $context, $flow, $executionUuid);
+                $this->executeStepTracked($step, $context, $flow, $executionUuid, $quiet);
                 if ($step['type'] === 'choice') {
                     $order = $this->executionOrder($steps, $links, self::choiceResults($context));
                 }
@@ -197,7 +202,9 @@ class FlowDebugExecutor
             // or the flow would be blocked from ever being scheduled again.
             $this->touchLastFinished($flow);
         }
-        $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-finish' : 'flow-finish');
+        if (!$quiet) {
+            $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-finish' : 'flow-finish');
+        }
 
         return $context;
     }
@@ -220,7 +227,7 @@ class FlowDebugExecutor
      * @param array{id: string, type: string, name: string, config: array<string, mixed>|null} $step
      * @param array<string, mixed>                                                             $context
      */
-    private function executeStepTracked(array $step, array &$context, ?OntologyFlow $flow, string $executionUuid): void
+    private function executeStepTracked(array $step, array &$context, ?OntologyFlow $flow, string $executionUuid, bool $quietRun = false): void
     {
         try {
             $this->executeStep($step, $context, $flow, $executionUuid);
@@ -228,8 +235,37 @@ class FlowDebugExecutor
             throw new FlowStepFailure($e->getMessage(), $step['id'], $this->lastExecutedIds, $e);
         }
         $this->lastExecutedIds[] = $step['id'];
-        // Every executed step leaves one event — the run's step-by-step trail.
-        $this->flowEvents->emit($flow, $executionUuid, 'step', ['name' => $step['name'], 'type' => $step['type']]);
+        // Every executed step leaves one event — the run's step-by-step trail — unless its
+        // "Log event" switch is off.
+        if (self::logsEvents($step, $quietRun)) {
+            $this->flowEvents->emit($flow, $executionUuid, 'step', ['name' => $step['name'], 'type' => $step['type']]);
+        }
+    }
+
+    /**
+     * Whether an executed step records its events: the settings popup's "Log event" switch
+     * (config `log_event`, absent = on), offered on every non-trigger type for stable flows that
+     * would otherwise flood the Events page. It covers the step's own `step` row, an Entity
+     * Write's `data-upsert` and — for sub_flow/foreach — the subflow-start/-finish of the runs it
+     * invokes. Failures (flow-exception) are ALWAYS recorded, and an "Event" step's log-message is
+     * its purpose, not a trail row, so it stays. Triggers have no switch: theirs follows the run
+     * (dropped only in a QUIET nested run).
+     *
+     * @param array<string, mixed> $step
+     */
+    private static function logsEvents(array $step, bool $quietRun = false): bool
+    {
+        if (\in_array($step['type'] ?? null, OntologyFlow::TRIGGER_STEP_TYPES, true)) {
+            return !$quietRun;
+        }
+
+        return self::configLogsEvents($step['config'] ?? null);
+    }
+
+    /** The `log_event` switch of a step config (absent or not a config = on). */
+    private static function configLogsEvents(mixed $config): bool
+    {
+        return !\is_array($config) || ($config['log_event'] ?? true) !== false;
     }
 
     /**
@@ -434,10 +470,12 @@ class FlowDebugExecutor
                 )));
             }
         }
-        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
-            'name' => $step['name'],
-            'type' => $step['type'],
-        ]);
+        if (self::logsEvents($step, (bool) ($frame['quiet'] ?? false))) {
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
+                'name' => $step['name'],
+                'type' => $step['type'],
+            ]);
+        }
         $frame['index']++;
         if ($frame['kind'] !== 'flow') {
             $this->recordDebugTrail($trails, $frame, [$step['id']]);
@@ -496,12 +534,14 @@ class FlowDebugExecutor
         }
 
         $blob['frames'][] = $frame;
-        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
         $trigger = $subOrder[0];
-        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
-            'name' => $trigger['name'],
-            'type' => $trigger['type'],
-        ]);
+        if (!$frame['quiet']) {
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
+                'name' => $trigger['name'],
+                'type' => $trigger['type'],
+            ]);
+        }
 
         return $this->debugResponse($blob, $trigger, $subOrder, 'entered') + ['rootExecuted' => []];
     }
@@ -541,6 +581,8 @@ class FlowDebugExecutor
             'index' => 1, // the trigger is consumed by the ENTER tick itself
             'callerStepId' => $step['id'],
             'callerStepName' => $step['name'],
+            // The invoker's "Log event" switch off = the frame's boundary events are dropped.
+            'quiet' => !self::configLogsEvents($config),
         ], $subOrder];
     }
 
@@ -555,10 +597,12 @@ class FlowDebugExecutor
         $frames = &$blob['frames'];
         $caller = &$frames[\count($frames) - 1];
         $caller['index']++;
-        $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
-            'name' => $step['name'],
-            'type' => $step['type'],
-        ]);
+        if (self::logsEvents($step)) {
+            $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
+                'name' => $step['name'],
+                'type' => $step['type'],
+            ]);
+        }
         $callerOrder = $this->executionOrder($caller['steps'], $caller['links'], self::choiceResults($blob['context']));
         if (\count($frames) === 1 && $caller['index'] >= \count($callerOrder)) {
             $blob['done'] = true;
@@ -608,18 +652,23 @@ class FlowDebugExecutor
     {
         $context = &$blob['context'];
         $frame = &$blob['frames'][\count($blob['frames']) - 1];
-        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+        $quiet = (bool) ($frame['quiet'] ?? false);
+        if (!$quiet) {
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+        }
         $frame['iteration']++;
         $frame['index'] = 1;
         $context[$frame['itemVar']] = $frame['list'][$frame['iteration']];
         $context['index'] = $frame['iteration'];
-        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
         $subOrder = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
         $trigger = $subOrder[0];
-        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
-            'name' => $trigger['name'],
-            'type' => $trigger['type'],
-        ]);
+        if (!$quiet) {
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
+                'name' => $trigger['name'],
+                'type' => $trigger['type'],
+            ]);
+        }
         unset($frame, $context);
 
         return $this->debugResponse($blob, $trigger, $subOrder, 'reentered') + ['rootExecuted' => []];
@@ -635,7 +684,9 @@ class FlowDebugExecutor
     {
         $frames = &$blob['frames'];
         $frame = array_pop($frames);
-        $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+        if (!($frame['quiet'] ?? false)) {
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+        }
         if ($frame['kind'] === 'each') {
             self::restoreLoopScope($frame, $blob['context']);
         }
@@ -650,11 +701,13 @@ class FlowDebugExecutor
                 break;
             }
         }
-        $callerStep ??= ['id' => $callerStepId, 'name' => $callerStepId, 'type' => 'sub_flow'];
-        $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
-            'name' => $callerStep['name'],
-            'type' => $callerStep['type'],
-        ]);
+        $callerStep ??= ['id' => $callerStepId, 'name' => $callerStepId, 'type' => 'sub_flow', 'config' => null];
+        if (!($frame['quiet'] ?? false) && self::logsEvents($callerStep)) {
+            $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'step', [
+                'name' => $callerStep['name'],
+                'type' => $callerStep['type'],
+            ]);
+        }
         $caller['index']++;
 
         if (\count($frames) === 1 && $caller['index'] >= \count($callerOrder)) {
@@ -1212,7 +1265,7 @@ class FlowDebugExecutor
             $stampFlow = $flow ?? $this->dataApi->requireEnabledFlow(OntologyFlow::NAME_MANUAL);
             // Synchronous, stamped with the execution uuid (not a fresh batch one): the receipt
             // reports the write's REAL outcome and the event row completes on the spot.
-            $result = $this->dataApi->upsertRecordsSync($entity, $records, $stampFlow, $executionUuid);
+            $result = $this->dataApi->upsertRecordsSync($entity, $records, $stampFlow, $executionUuid, self::configLogsEvents($config));
         } catch (OntologyApiException $e) {
             throw self::stepFailure($stepName, $e->getMessage(), $e);
         }
@@ -1398,6 +1451,19 @@ class FlowDebugExecutor
     }
 
     /**
+     * The $runInfo of a run invoked by a sub_flow/foreach step: QUIET when the invoker's
+     * "Log event" switch is off ({@see logsEvents()}).
+     *
+     * @param array<string, mixed> $config the invoker's config
+     *
+     * @return array{trigger: string, quiet: bool}
+     */
+    private static function nestedRunInfo(array $config): array
+    {
+        return ['trigger' => 'subflow', 'quiet' => !self::configLogsEvents($config)];
+    }
+
+    /**
      * The "Call Subflow" step: runs the invoked subflow's WHOLE graph (from its Subflow trigger,
      * breadth-first, choices and all) over the CALLER's context, then hands the resulting context
      * back so the main flow continues at its next element. The callee inherits the caller's
@@ -1419,7 +1485,7 @@ class FlowDebugExecutor
         $outerTrail = $this->lastExecutedIds;
         $this->subflowStack[] = $id;
         try {
-            return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, ['trigger' => 'subflow']);
+            return $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, self::nestedRunInfo($config));
         } catch (\RuntimeException $e) {
             throw self::stepFailure($stepName, $e->getMessage(), $e);
         } finally {
@@ -1455,7 +1521,7 @@ class FlowDebugExecutor
                 $context[$itemVar] = $element;
                 $context['index'] = $index;
                 try {
-                    $context = $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, ['trigger' => 'subflow']);
+                    $context = $this->execute($subSteps, $subLinks, [], $target, $executionUuid, $context, self::nestedRunInfo($config));
                 } catch (\RuntimeException $e) {
                     throw new FlowExecutionFailure(sprintf('Step "%s" (iteration %d): %s', $stepName, $index, $e->getMessage()), 0, $e);
                 } finally {

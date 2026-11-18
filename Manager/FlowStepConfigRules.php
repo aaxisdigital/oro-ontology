@@ -38,7 +38,9 @@ final class FlowStepConfigRules
      */
     public static function isValid(mixed $type, array $config): bool
     {
-        return match ($type) {
+        // `log_event` (the settings popup's "Log event" switch, every non-trigger type): absent
+        // = on, bool when set.
+        return self::boolOk($config, 'log_event') && match ($type) {
             'cron' => self::scheduleOk($config),
             'entity_change' => self::entityChangeOk($config),
             // The remaining triggers carry only the enabled flag (bool when set; a missing flag
