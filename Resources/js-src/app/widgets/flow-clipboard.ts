@@ -3,7 +3,8 @@
  * selection into a JSON document and its "Paste" (right-click on empty canvas) reads one back, so
  * elements travel between tabs, flows and browser windows alike.
  *
- * Pure helpers only — the editor component owns the canvas side (placing tiles, links, selection).
+ * Pure helpers only — the editor component owns the canvas side (placing tiles, links, selection);
+ * the system clipboard itself is read and written through ./clipboard.
  */
 
 export const CLIPBOARD_FORMAT = 'aaxis-ontology-flow-steps';
@@ -192,34 +193,6 @@ export function pastedName(name: string, trigger: boolean, taken: Set<string>): 
             return candidate;
         }
     }
-}
-
-/** Writes text to the system clipboard; false when the browser refused. */
-export function writeClipboard(text: string): Promise<boolean> {
-    if (navigator.clipboard?.writeText) {
-        return navigator.clipboard.writeText(text).then(() => true, () => false);
-    }
-    // No async clipboard API (an insecure origin): the legacy hidden-textarea copy.
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    document.body.appendChild(textarea);
-    textarea.select();
-    let copied = false;
-    try {
-        copied = document.execCommand('copy');
-    } catch {
-        copied = false;
-    }
-    textarea.remove();
-    return Promise.resolve(copied);
-}
-
-/** Reads the system clipboard's text; null when the browser cannot or will not tell. */
-export function readClipboard(): Promise<string | null> {
-    if (!navigator.clipboard?.readText) {
-        return Promise.resolve(null);
-    }
-    return navigator.clipboard.readText().then(text => text, () => null);
 }
 
 function isPlainObject(value: any): boolean {

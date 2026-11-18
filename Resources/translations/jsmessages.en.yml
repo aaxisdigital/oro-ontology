@@ -163,6 +163,10 @@ aaxis:
             loading: 'Loading…'
             empty: 'No events found.'
             load_error: 'Could not load the events.'
+            summary_expand: 'Show the whole text'
+            summary_collapse: 'Show one line'
+            summary_copy: 'Copy to clipboard'
+            summary_copy_failed: 'The browser did not allow copying to the clipboard.'
         flow_view:
             name: 'Name'
             type: 'Type'

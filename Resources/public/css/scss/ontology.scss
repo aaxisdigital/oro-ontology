@@ -282,6 +282,39 @@
         font-size: 12.5px;
         color: #2b3a4a;
     }
+
+    // Expanded (the expand glyph): the whole text over several lines, its line breaks kept.
+    &__row.is-expanded &__summary {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+
+    // Expand / copy glyphs — shown only for a summary that does not fit its line (has-overflow,
+    // set by the component) or that is expanded.
+    &__tools {
+        display: none;
+        flex: 0 0 auto;
+        gap: 2px;
+    }
+
+    &__row.has-overflow &__tools,
+    &__row.is-expanded &__tools {
+        display: inline-flex;
+    }
+
+    &__tool {
+        padding: 0 3px;
+        border: 0;
+        background: transparent;
+        color: #8a98a6;
+        font-size: 12.5px;
+        line-height: 1;
+        cursor: pointer;
+
+        &:hover {
+            color: #2b3a4a;
+        }
+    }
 }
 
 // System Configuration → Settings: the read-only DB Usage table (DbUsageType widget).

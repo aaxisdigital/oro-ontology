@@ -373,6 +373,114 @@ describe('OntologyEventComponent', () => {
             expect($summary.attr('title')).toBe('x'.repeat(2000) + '…');
         });
 
+        describe('summaries that do not fit their line', () => {
+            const LONG = 'Step "Push": the connector responded HTTP 500 — a very long upstream explanation follows';
+
+            /** jsdom has no layout: a summary over 40 characters "overflows" its 300px line. */
+            function fakeLayout(): void {
+                vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockImplementation(function (this: HTMLElement) {
+                    return (this.textContent || '').length > 40 ? 900 : 100;
+                });
+                vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(300);
+            }
+
+            async function openWith(messages: string[]): Promise<FakeDialog> {
+                const {dialog} = openPopup(messages.map((message, i) => (
+                    {id: i, event: 'flow-exception', datetime: null, ms: null, payload: {message}}
+                )));
+                await flush();
+                return dialog;
+            }
+
+            afterEach(() => {
+                vi.restoreAllMocks();
+            });
+
+            it('offers expand and copy only where the text is cut or holds line breaks', async () => {
+                fakeLayout();
+                const dialog = await openWith(['short', LONG, 'two\nlines']);
+
+                expect(rows(dialog).map((_i: number, el: HTMLElement) => el.classList.contains('has-overflow')).get())
+                    .toEqual([false, true, true]);
+                const $tools = rows(dialog).eq(1).find('.aaxis-event-run__tool');
+                expect($tools.map((_i: number, el: HTMLElement) => el.dataset.role).get()).toEqual(['summary-expand', 'summary-copy']);
+                expect($tools.eq(0).attr('title')).toBe('aaxis.ontology.event_view.summary_expand');
+                expect($tools.eq(1).attr('aria-label')).toBe('aaxis.ontology.event_view.summary_copy');
+            });
+
+            it('expands the whole text over several lines and back', async () => {
+                fakeLayout();
+                const dialog = await openWith([LONG]);
+                const $row = rows(dialog).eq(0);
+                const $expand = $row.find('[data-role="summary-expand"]');
+
+                $expand.trigger('click');
+                expect($row.hasClass('is-expanded')).toBe(true);
+                expect($expand.find('.fa').hasClass('fa-compress')).toBe(true);
+                expect($expand.attr('title')).toBe('aaxis.ontology.event_view.summary_collapse');
+
+                $expand.trigger('click');
+                expect($row.hasClass('is-expanded')).toBe(false);
+                expect($expand.find('.fa').hasClass('fa-expand')).toBe(true);
+                expect($expand.attr('title')).toBe('aaxis.ontology.event_view.summary_expand');
+            });
+
+            it('copies the full message, confirming with a check mark for a moment', async () => {
+                const writeText = vi.fn(() => Promise.resolve());
+                vi.stubGlobal('navigator', {clipboard: {writeText}});
+                const timeout = vi.spyOn(window, 'setTimeout');
+                const dialog = await openWith([LONG]);
+                const $copy = rows(dialog).find('[data-role="summary-copy"]');
+
+                $copy.trigger('click');
+                await flush();
+
+                expect(writeText).toHaveBeenCalledWith(LONG);
+                expect($copy.find('.fa').hasClass('fa-check')).toBe(true);
+                (timeout.mock.calls.at(-1)![0] as () => void)();
+                expect($copy.find('.fa').hasClass('fa-files-o')).toBe(true);
+            });
+
+            it('flashes an error when the browser refuses the copy', async () => {
+                vi.stubGlobal('navigator', {clipboard: {writeText: () => Promise.reject(new Error('denied'))}});
+                const dialog = await openWith([LONG]);
+
+                rows(dialog).find('[data-role="summary-copy"]').trigger('click');
+                await flush();
+
+                expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', 'aaxis.ontology.event_view.summary_copy_failed');
+            });
+
+            it('re-checks on every resize of the list, keeps expanded rows, and stops watching on close', async () => {
+                let onResize: () => void = () => undefined;
+                const disconnect = vi.fn();
+                vi.stubGlobal('ResizeObserver', class {
+                    constructor(callback: () => void) {
+                        onResize = callback;
+                    }
+
+                    observe(): void {
+                        // the callback above is what matters
+                    }
+
+                    disconnect = disconnect;
+                });
+                const dialog = await openWith([LONG, 'short']);
+                expect(rows(dialog).eq(0).hasClass('has-overflow')).toBe(false); // no layout yet
+
+                fakeLayout();
+                onResize();
+                expect(rows(dialog).eq(0).hasClass('has-overflow')).toBe(true);
+                rows(dialog).eq(0).find('[data-role="summary-expand"]').trigger('click');
+                onResize();
+                expect(rows(dialog).eq(0).hasClass('is-expanded')).toBe(true);
+                expect(rows(dialog).eq(1).hasClass('has-overflow')).toBe(false);
+
+                dialog.close();
+                expect(disconnect).toHaveBeenCalled();
+            });
+        });
+
         it('says so when the run has no events', async () => {
             const {dialog} = openPopup([]);
             await flush();

@@ -994,7 +994,8 @@ west/north walk would ping-pong forever and overlap; so a link-free
 selection degrades to the old X ordering) and — only when every element after the first receives
 no line, none after the first is a trigger and none except the last is a Choice — Connect (chains
 the selection in sequence, port 0 re-wired if used). **COPY / PASTE** (2026-11-18, `widgets/flow-clipboard.ts` — pure helpers, the component only
-places tiles). Copy writes the selection to the SYSTEM clipboard as JSON:
+places tiles; the system clipboard is read/written through `widgets/clipboard.ts`,
+`readClipboard()`/`writeClipboard()`, shared with the Events page's copy buttons). Copy writes the selection to the SYSTEM clipboard as JSON:
 `{format: 'aaxis-ontology-flow-steps', version: 1, steps, links}`. Steps carry positions relative
 to the selection's top-left, deep-copied configs, anchor sides and `invalid`. Only links with
 BOTH ends selected travel. So copies move between tabs, flows and browser windows.
@@ -1279,7 +1280,14 @@ PREVIOUS event, computed from the endpoint's `ms` field (micro-precision epoch m
 `datetime` is second-precision and would render every step as +0s) — and instead of flow name +
 raw payload JSON each row carries a per-kind summary (`summarizeEvent()`): flow/subflow-start =
 trigger + user.name when present, data-upsert = entity + uniqueIds/changedIds counts, step =
-name (type), flow-exception/log-message = the message, finishes = nothing; the dialog opens with
+name (type), flow-exception/log-message = the message, finishes = nothing. A summary is one line
+with an ellipsis. When it is CUT (scrollWidth > clientWidth) or holds line breaks, the row gets
+`has-overflow` and shows two glyph buttons (2026-11-18):
+- expand (`summary-expand`, fa-expand ⇄ fa-compress) = `is-expanded`, the whole text pre-wrapped;
+- copy (`summary-copy`, fa-files-o → fa-check) = the full summary to the clipboard.
+
+`syncSummaryOverflow()` re-checks on a ResizeObserver over the list (disconnected in the dialog's
+onClose); expanded rows keep their buttons; the dialog opens with
 bodyClass `aaxis-event-run-host` — a flex-column body like the DWL playground's, so the list has
 NO viewport-based max-height of its own: it fills the panel, scrolls when the panel hits the
 dialog's 84vh cap, and GROWS when the user drags the resize handle) and **view flow**

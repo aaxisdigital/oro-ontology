@@ -10,7 +10,8 @@ import createDwlField from '../widgets/dwl-field';
 import createDwlInput from '../widgets/dwl-input';
 import {apiFetch, formatDateTime} from './component-support';
 import {highlightJson, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
-import {buildClipboardDoc, ClipboardDoc, parseClipboardDoc, pastedName, readClipboard, writeClipboard} from '../widgets/flow-clipboard';
+import {buildClipboardDoc, ClipboardDoc, parseClipboardDoc, pastedName} from '../widgets/flow-clipboard';
+import {readClipboard, writeClipboard} from '../widgets/clipboard';
 
 interface FlowStep {
     type: string;
