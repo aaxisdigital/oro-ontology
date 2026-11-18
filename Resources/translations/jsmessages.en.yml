@@ -423,6 +423,13 @@ aaxis:
             tab_open_no_match: 'Nothing matches the filter.'
             tab_open_disabled: 'disabled'
             tab_add: 'New flow in a new tab'
+            tab_save: 'Save this flow'
+            tab_save_all: 'Save all open flows'
+            tab_close_all: 'Close all tabs'
+            tab_close_all_question: 'Some open flows have unsaved changes. Save them before closing every tab?'
+            tab_toolbox: 'Show / hide the toolbox'
+            dont_save: "Don't save"
+            dialog_cancel: 'Cancel'
             sql_label: 'SQL expression'
             sql_bindings_label: 'Bindings'
             sql_required: 'Please enter the SQL expression.'

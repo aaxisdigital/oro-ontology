@@ -606,12 +606,26 @@ SAVED tab as `?tabs=<id,id,…>` in tab order — `syncTabsUrl()` on tab load/cl
 the URL; never-saved tabs cannot travel and are not listed). Tab title = the
 TRIGGER STEP's name ("unnamed — add a trigger" until one exists — the flow is NAMED BY ITS
 TRIGGER; there is no top-bar name display anymore), a • marks unsaved changes, × closes (confirm
-when dirty; the editor always keeps at least one tab). Two ICON ACTION tabs sit at the FAR RIGHT of the bar (`__tab--push-right` margin-left auto —
-away from the flow tabs so a close/switch click cannot slip onto them):
-folder = open any existing non-native flow in a NEW tab (picker over `aaxis_ontology_flow_list` —
+when dirty; the editor always keeps at least one tab). The bar holds TWO groups:
+`[data-role="tab-list"]` (`display: contents`) is re-rendered by `renderTabs()` on every
+syncDirty. `[data-role="tab-actions"]` is built ONCE (`buildTabActions()`, margin-left auto —
+away from the flow tabs so a close/switch click cannot slip onto them) so spinners and disabled
+states survive re-renders. Its state is synced by `syncTabActions()`: Save disabled while clean
+or `saving`, Save all while clean everywhere or `savingAll`, toolbox `is-active` while shown.
+The ICON ACTION buttons, in order:
+- folder = open any existing non-native flow in a NEW tab (picker over `aaxis_ontology_flow_list` —
 a full-width name filter + a Flows|Subflows tab pair whose COUNTS follow the filter, only the list
 scrolls and the popup is capped at ~60% of the window;
-an already-open flow just focuses its tab), + = a new empty flow tab. FLOW tabs are
+an already-open flow just focuses its tab);
+- + = a new empty flow tab;
+- floppy = **Save** (`data-role="save"`);
+- two stacked floppies = **Save all** (`save-all`; FA 4 has no such glyph);
+- **Close all** (`tab-close-all`, `closeAllTabs()`): leaves one fresh empty tab. With unsaved work
+  anywhere it asks first, in a Cancel / Don't save / Save dialog. Save runs `saveAll(onDone)` and
+  then closes, KEEPING OPEN only the tabs still dirty (their errors were flashed);
+- wrench = the **toolbox show/hide** toggle (`toolbox-toggle`).
+
+Save, Save all and the toolbox toggle MOVED here from the topbar (2026-11-18). FLOW tabs are
 DRAG-REORDERABLE (HTML5 drag; drop lands before/after the target by pointer half, indicators
 `is-drop-before/-after`; the active tab travels by identity and `syncTabsUrl()` persists the new
 order). Switching tabs closes any debug session. A TRIGGER IS REQUIRED TO SAVE (`structuralErrors`: `trigger_required` — blocks
@@ -625,11 +639,13 @@ Topbar fields are STACKED label-above-control (`__field` /
 icon + a `__btn-text` span that a `max-width: 1199px` viewport hides (icon-only mode, the `title`
 tooltips carry the labels — which is why syncDirty updates the cancel button's LABEL SPAN
 (`data-role="cancel-label"`) + title, never `.text()` on the button, which would wipe the icon).
-Toolbox show/hide toggle + **Organize** (hidden without steps:
+**Organize** (hidden without steps:
 lays every step out in execution order — BFS from the trigger/"Start here", unreachable steps
 appended in reading order — with one-tile gaps, wrapping rows before the viewport width, then
-scrolls to top-left) + cancel/save on the right (the toolbox title bar also carries a × that
-hides it). The draggable toolbox
+scrolls to top-left), Run Now, View source, History and the cancel button on the right. The toolbox
+title bar carries expand-all / collapse-all (`toolbox-expand-all` / `toolbox-collapse-all` →
+`collapseToolboxSections()`) and a × that hides it. The handle's drag guard skips ANY button
+inside it. The draggable toolbox
 (Triggers: cron/endpoint/entity change/Subflow (`subflow` — the ENTRY POINT of a callable
 subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call Subflow" action
 `sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop

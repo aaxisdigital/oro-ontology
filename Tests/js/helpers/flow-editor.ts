@@ -90,8 +90,8 @@ export function editorDom(): any {
                 <button type="button" class="aaxis-flow-editor__menu-item" data-role="debug-step" title="debug-step">debug-step</button>
             </div>
         </div>`;
-    const buttons = [button('toolbox-toggle'), button('organize'), runSplit,
-        ...['view-source', 'flow-history', 'cancel', 'save', 'save-all'].map(button)].join('');
+    // Toolbox toggle, Save and Save all live in the tab bar's action group (built by the component).
+    const buttons = [button('organize'), runSplit, ...['view-source', 'flow-history', 'cancel'].map(button)].join('');
     const sections = PALETTE.map(([category, items]) => `
         <div class="aaxis-flow-editor__toolbox-section">
             <div class="aaxis-flow-editor__toolbox-section-title">
@@ -113,7 +113,10 @@ export function editorDom(): any {
                     </div>
                     <div class="aaxis-flow-editor__toolbox" data-role="toolbox">
                         <div class="aaxis-flow-editor__toolbox-handle" data-role="toolbox-handle">
-                            Toolbox <button type="button" data-role="toolbox-hide"><span class="fa fa-times"></span></button>
+                            Toolbox
+                            <button type="button" data-role="toolbox-expand-all"><span class="fa fa-plus-square-o"></span></button>
+                            <button type="button" data-role="toolbox-collapse-all"><span class="fa fa-minus-square-o"></span></button>
+                            <button type="button" data-role="toolbox-hide"><span class="fa fa-times"></span></button>
                         </div>
                         <div class="aaxis-flow-editor__toolbox-body" data-role="toolbox-body">${sections}</div>
                     </div>

@@ -1413,10 +1413,6 @@
         .btn .fa {
             margin: 0;
         }
-
-        [data-role='toolbox-toggle'].is-active .fa {
-            color: #2b6cb0;
-        }
     }
 
     // Narrow viewports: the buttons drop their text and keep icon + title tooltip only.
@@ -1584,9 +1580,19 @@
         }
     }
 
-    // The first action tab pushes itself (and everything after) to the bar's right edge.
-    &__tab--push-right {
+    // The flow tabs lay out as direct children of the bar; the ACTION group (open, new, save,
+    // save all, close all, toolbox) pushes itself to the bar's right edge.
+    &__tab-list {
+        display: contents;
+    }
+
+    &__tab-actions {
+        display: flex;
+        align-items: flex-end;
+        gap: 2px;
+        flex: 0 0 auto;
         margin-left: auto;
+        padding-left: 12px;
     }
 
     // Drag-reorder drop indicators: a strong edge on the half where the tab would land.
@@ -1599,13 +1605,47 @@
     }
 
     &__tab--action {
+        position: relative;
         padding: 7px 10px;
         color: #2b6cb0;
 
-        &:hover {
+        &:hover:not(:disabled) {
             background: #eef1f4;
             color: #1b3a5b;
         }
+
+        &:disabled {
+            color: #b6c0c9;
+            cursor: default;
+        }
+
+        // The toolbox toggle while the toolbox is shown.
+        &.is-active {
+            background: #fff;
+            color: #1b3a5b;
+        }
+
+        // A save in flight: the spinner replaces the icon(s).
+        .aaxis-flow-editor__save-spinner {
+            margin-right: 0;
+        }
+
+        .aaxis-flow-editor__save-spinner ~ .fa {
+            display: none;
+        }
+    }
+
+    // "Save all": two floppies, the back one offset up-left and faded (no such glyph in FA 4).
+    &__save-all-back {
+        transform: translate(-2px, -2px);
+        opacity: 0.5;
+    }
+
+    &__save-all-front {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(calc(-50% + 2px), calc(-50% + 2px));
     }
 
     &__canvas-wrap {
@@ -2162,6 +2202,28 @@
     }
 
     // The × in the toolbox title bar.
+    // Header tools: expand all / collapse all sections, then hide.
+    &__toolbox-tools {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-left: auto;
+    }
+
+    &__toolbox-tool {
+        border: 0;
+        background: transparent;
+        padding: 0 2px;
+        color: #8a98a6;
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+
+        &:hover {
+            color: #2b3a4a;
+        }
+    }
+
     &__toolbox-hide {
         margin-left: auto;
         border: 0;
