@@ -27,6 +27,8 @@ class FlowStepValidator
     private const array DWL_FIELDS = [
         ['dwl_transform', 'code', null],
         ['invoke', 'body_content', 'body_dwl'],
+        // HTTP Request: the path is a single-line DWL expression while its toggle is on.
+        ['invoke', 'path', 'path_dwl'],
         ['entity_write', 'content', 'content_dwl'],
         ['file_write', 'content', 'content_dwl'],
         // File Operations: the path (all five) and the rename's new name are DWL-capable too.

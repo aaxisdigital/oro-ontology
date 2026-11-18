@@ -1815,9 +1815,16 @@ class FlowDebugExecutor
             $body = $this->renderDwl($stepName, $body, $context);
         }
 
+        // The path is literal text, or — `path_dwl` on — a DWL expression over the context that
+        // must yield non-empty text (e.g. "orders/" ++ payload.id).
+        $path = (string) ($config['path'] ?? '');
+        if (($config['path_dwl'] ?? false) === true) {
+            $path = $this->resolveDwlText($stepName, 'path', $path, true, $context);
+        }
+
         return [
             'method' => strtoupper((string) ($config['operation'] ?? 'get')) ?: 'GET',
-            'path' => (string) ($config['path'] ?? ''),
+            'path' => $path,
             'body' => $body,
             'body_type' => $bodyType,
         ];

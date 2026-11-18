@@ -660,6 +660,33 @@
     }
 }
 
+// Single-line "text or DWL" input (widgets/dwl-input.ts): a plain text input with the small
+// pure-text/DWL switch INSIDE its right end (the input reserves room for it). DWL mode shows the
+// text in the same code style as the multi-line field above.
+.aaxis-dwl-input {
+    position: relative;
+    min-width: 0;
+
+    .aaxis-dwl-input__input {
+        width: 100%;
+        box-sizing: border-box;
+        padding-right: 76px;
+    }
+
+    .aaxis-dwl-input__input--code {
+        background: #fbfcfe;
+        color: #1b3a5b;
+        font-family: monospace;
+    }
+
+    &__switch {
+        position: absolute;
+        top: 50%;
+        right: 10px;
+        transform: translateY(-50%);
+    }
+}
+
 // Version history dialog: fixed-height flex body so the version picker, search toolbar and copy
 // button stay pinned and only the JSON view scrolls. Without this the whole dialog body scrolls
 // and the copy button drops below the fold.

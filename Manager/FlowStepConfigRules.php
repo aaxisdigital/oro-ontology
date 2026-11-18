@@ -120,7 +120,7 @@ final class FlowStepConfigRules
     private static function connectorOk(array $config): bool
     {
         return self::selected($config, 'connector')
-            && self::filled($config, 'path')
+            && self::filled($config, 'path') && self::boolOk($config, 'path_dwl')
             && self::enumOk($config, 'operation', ['get', 'put', 'post', 'patch', 'delete'])
             && self::enumOk($config, 'body', ['empty', 'json', 'text', 'xml'])
             && self::boolOk($config, 'body_dwl');

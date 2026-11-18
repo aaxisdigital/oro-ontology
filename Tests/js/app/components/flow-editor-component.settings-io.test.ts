@@ -15,6 +15,11 @@ function options($select: any, attr: 'value' | 'text' = 'value'): string[] {
     return $select.find('option').map((_i: number, o: HTMLOptionElement) => (attr === 'value' ? o.value : o.text)).get();
 }
 
+/** The HTTP Request path: the text input of its single-line DWL field. */
+function pathInput(): any {
+    return field('path_label').find('.aaxis-dwl-input__input');
+}
+
 function visible($el: any): boolean {
     return $el.closest('.aaxis-flow-editor__settings-col').css('display') !== 'none';
 }
@@ -192,9 +197,9 @@ describe('OntologyFlowEditorComponent — connector-backed settings', () => {
         expect(field('operation_label').val()).toBe('post');
         expect(dwlTextarea('body_content_label').prop('disabled')).toBe(true);
         expect($('.aaxis-dwl-field').hasClass('aaxis-dwl-field--disabled')).toBe(true);
-        field('path_label').val(' /v1/orders ');
+        pathInput().val(' /v1/orders ');
         confirmSettings();
-        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/v1/orders', body: 'empty', destination: 'payload'});
+        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/v1/orders', path_dwl: false, body: 'empty', destination: 'payload'});
 
         openSettings('call');
         await flush();
@@ -208,7 +213,7 @@ describe('OntologyFlowEditorComponent — connector-backed settings', () => {
 
     it.each([
         ['no connector', () => field('connector_label').val('')],
-        ['no path', () => field('path_label').val(' ')],
+        ['no path', () => pathInput().val(' ')],
         ['no destination', () => field('destination_label').val('')]
     ])('marks an HTTP request red with %s', async (_label, edit) => {
         await open(st('h', 'invoke', 'call', 300, 0, {connector: '1', path: '/x', operation: 'get', body: 'empty'}));
@@ -232,7 +237,7 @@ describe('OntologyFlowEditorComponent — connector-backed settings', () => {
         expect($destination.attr('placeholder')).toBe(KEY('http_async_destination_placeholder'));
         confirmSettings();
 
-        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/x', body: 'empty', async: true});
+        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/x', path_dwl: false, body: 'empty', async: true});
         expect(tile('call').classList.contains('is-config-invalid')).toBe(false);
 
         // Reopened: still async and empty; switching it off brings a destination back (the
@@ -246,7 +251,26 @@ describe('OntologyFlowEditorComponent — connector-backed settings', () => {
         expect(field('destination_label').prop('disabled')).toBe(false);
         expect(field('destination_label').attr('placeholder')).toBe('');
         confirmSettings();
-        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/x', body: 'empty', destination: 'payload'});
+        expect(configOf(editor, 'call')).toEqual({connector: '1', operation: 'post', path: '/x', path_dwl: false, body: 'empty', destination: 'payload'});
+    });
+
+    it('takes the path as a single-line DWL expression when its switch is on', async () => {
+        const editor = await open(st('h', 'invoke', 'call', 300, 0, {connector: '1', path: '/x', operation: 'get', body: 'empty'}));
+        const $toggle = field('path_label').find('input[type="checkbox"]');
+
+        expect($toggle.prop('checked')).toBe(false);
+        expect(pathInput().hasClass('aaxis-dwl-input__input--code')).toBe(false);
+        pathInput().val(' "orders/" ++ payload.id ');
+        $toggle.prop('checked', true).trigger('change');
+        expect(pathInput().hasClass('aaxis-dwl-input__input--code')).toBe(true);
+        confirmSettings();
+        expect(configOf(editor, 'call')).toMatchObject({path: '"orders/" ++ payload.id', path_dwl: true});
+
+        openSettings('call');
+        await flush();
+        expect(field('path_label').find('input[type="checkbox"]').prop('checked')).toBe(true);
+        expect(pathInput().val()).toBe('"orders/" ++ payload.id');
+        expect(pathInput().hasClass('aaxis-dwl-input__input--code')).toBe(true);
     });
 
     it('gives back the destination typed before Async was switched on', async () => {
@@ -737,5 +761,71 @@ describe('OntologyFlowEditorComponent — Log event switch', () => {
         expect(logSwitch().length).toBe(0);
         expect($('.aaxis-flow-editor__settings-actions').children().length).toBe(1);
         expect($('.aaxis-flow-editor__settings-buttons .btn-primary').length).toBe(1);
+    });
+});
+
+describe('OntologyFlowEditorComponent — destination pre-filled from the name', () => {
+    useFlowEditorEnv(FlowEditorComponent);
+
+    const typeName = (name: string): void => {
+        field('step_name_label').val(name).trigger('input');
+    };
+
+    it('mirrors the name into a destination the step never stored, spaces and dashes as underscores', async () => {
+        const editor = await open(st('d', 'dwl_transform', 'shape', 300, 0));
+        expect(field('destination_label').val()).toBe('payload');
+
+        typeName('Load orders');
+        expect(field('destination_label').val()).toBe('Load_orders');
+        typeName(' Load - all  orders ');
+        expect(field('destination_label').val()).toBe('Load_all_orders');
+        typeName('');
+        expect(field('destination_label').val()).toBe('Load_all_orders');
+
+        typeName('rows');
+        dwlTextarea('dwl_code_label').val('payload');
+        confirmSettings();
+        expect(configOf(editor, 'rows')).toMatchObject({destination: 'rows'});
+    });
+
+    it('leaves a stored destination alone', async () => {
+        await open(st('r', 'entity_read', 'read', 300, 0, {destination: 'records', system: 'erp', entity: 'Order', mode: 'all'}));
+
+        typeName('Read orders');
+
+        expect(field('destination_label').val()).toBe('records');
+    });
+
+    it('stops once the destination is typed, and resumes when it is cleared', async () => {
+        await open(st('d', 'dwl_transform', 'shape', 300, 0));
+
+        typeName('first');
+        field('destination_label').val('mine');
+        typeName('second');
+        expect(field('destination_label').val()).toBe('mine');
+
+        field('destination_label').val('');
+        typeName('third-try');
+        expect(field('destination_label').val()).toBe('third_try');
+    });
+
+    it('does not fill the destination of an async HTTP request', async () => {
+        await open(st('h', 'invoke', 'call', 300, 0, {connector: '1', path: '/x', operation: 'post', body: 'empty', async: true}));
+
+        typeName('Push orders');
+
+        expect(field('destination_label').val()).toBe('');
+        field('http_async_label').find('input').prop('checked', false).trigger('change');
+        expect(field('destination_label').val()).toBe('payload');
+        typeName('Push orders now');
+        expect(field('destination_label').val()).toBe('Push_orders_now');
+    });
+
+    it('does nothing on steps without a destination', async () => {
+        await open(st('l', 'logger', 'log', 300, 0, {message: 'hi'}));
+
+        typeName('Log it');
+
+        expect($('[data-role="destination"]').length).toBe(0);
     });
 });

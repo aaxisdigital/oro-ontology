@@ -787,7 +787,11 @@ rejected by import (normalize fails on the unknown type).
 **invoke** ("HTTP Request", `httpRequestSection`) is a rest_api connector call, the response under
 the destination (executor: the `readConnector` arm, so operation/body/auth behave exactly like a
 rest_api reader): row 1 `Name | Connector (rest_api only — the catalog is filtered client-side) |
-Destination`, row 2 `Operation | Path | Body`, row 3 the Body-content DWL field ALWAYS visible but
+Destination`, row 2 `Operation | Path | Body` (the Path is a single-line DWL input,
+`widgets/dwl-input.ts`: config `path` + `path_dwl`, default off. While on, it is an expression over
+the context, e.g. `"orders/" ++ payload.id`, resolved through `resolveDwlText()` in
+`restRequest()`, so the async queue receives the RENDERED path. It must yield non-empty text and
+is DWL-checked on save), row 3 the Body-content DWL field ALWAYS visible but
 disabled (`.aaxis-dwl-field--disabled` + textarea/switch inert) while Body = Empty. The TYPE key
 stays `invoke` (only the label changed) so stored designs keep validating; validator arm:
 `(async || destinationOk) && boolOk(async) && connectorOk`, body_content DWL-checked via `stepDwlSnippets`.
@@ -1262,6 +1266,13 @@ oro-common's CLAUDE.md).
 GOTCHA: the queue consumers are LONG-RUNNING php processes — they keep executing the old code until
 restarted, so a change here needs `oro:message-queue:consume` restarted (plus a cache clear for the
 container, since the processor's constructor arguments changed).
+**Single-line DWL input** — `widgets/dwl-input.ts`, `createDwlInput({value, dwl, label?,
+placeholder?, maxlength?, inputClass?})` → `{$el, $input, $toggle, value(), isDwl()}`. It is the
+one-line sibling of the field below: a text input with the small pure-text/DWL switch INSIDE its
+right end (`.aaxis-dwl-input`, which reserves 76px of padding-right). Code style applies while the
+switch is on. The visible label stays the host's (e.g. a `settingsCol`), and the host stores the
+`<key>` + `<key>_dwl` pair. Used by the HTTP Request path; reach for it wherever a one-line value
+may be an expression.
 **DWL-toggled fields** render through ONE shared widget — `widgets/dwl-field.ts`,
 `createDwlField({label, value, dwl, fixed?, editorClass?, labelClass?, rowClass?, $tools?})`
 (local relative import; also exports `prettyPrintDwl`). The widget owns the title row — label
@@ -1280,6 +1291,12 @@ context at run time: the body result is sent as-is when a string and JSON-encode
 (`renderDwl()`); the writer content result IS the record(s) to write (`content_dwl` off keeps the
 literal context-key lookup). Both parse-validate on save via `stepDwlSnippets()` → the same 422
 `flow_manager.invalid_dwl`.
+**Destination from the name** (2026-11-18): every Destination input is built by
+`destinationInput()` and carries `data-role="destination"`. `prefillDestinationFromName()` mirrors
+the NAME input into it while the user types: trimmed, with runs of spaces/"-" turned into "_". It
+does so only while the destination is not the user's own: empty, the `payload` default of a step
+with no stored destination, or the value it filled itself. A stored or typed destination is never
+touched, and neither is a disabled one (async HTTP).
 **Settings loading**: sections doing catalog fetches (`systemEntitySection`, `entityIoSection`,
 `httpRequestSection`, `fileOpSection`) return a
 `ready` promise; `openStepSettings` overlays a spinner (`__settings-loading`) that blocks the whole

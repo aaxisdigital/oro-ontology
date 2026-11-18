@@ -648,6 +648,28 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
         self::assertContains('Content-Type: application/json', $request['options']['headers']);
     }
 
+    public function testHttpRequestPathFromADwlExpression(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'https://api']);
+        $this->responses[] = new MockResponse('{}');
+
+        $this->runStep('invoke', [
+            'destination' => 'resp', 'connector' => 7, 'path' => '"orders/" ++ payload.id ++ "?full=1"', 'path_dwl' => true,
+        ], ['id' => 42]);
+
+        self::assertSame('https://api/orders/42?full=1', $this->requests[0]['url']);
+    }
+
+    public function testAHttpRequestPathExpressionMustYieldText(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'https://api']);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Step "Step": the path expression must produce a non-empty text, got array.');
+
+        $this->runStep('invoke', ['destination' => 'resp', 'connector' => 7, 'path' => 'payload', 'path_dwl' => true], ['id' => 1]);
+    }
+
     /**
      * @dataProvider requestBodies
      */
@@ -903,6 +925,15 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
             ],
         ]], $this->queued);
         self::assertSame(['flow-start', 'step', 'step', 'flow-finish'], $this->eventKinds());
+    }
+
+    public function testAsyncHttpRequestQueuesTheRenderedPath(): void
+    {
+        $this->connector(7, 'rest_api', ['server' => 'h']);
+
+        $this->runStep('invoke', ['async' => true, 'connector' => 7, 'path' => '"orders/" ++ payload.id', 'path_dwl' => true], ['id' => 9]);
+
+        self::assertSame('orders/9', $this->queued[0][1]['path']);
     }
 
     public function testAsyncHttpRequestWithoutBodyQueuesNone(): void

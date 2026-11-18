@@ -7,6 +7,7 @@ import pageStateChecker from 'oronavigation/js/app/services/page-state-checker';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import createDwlField from '../widgets/dwl-field';
+import createDwlInput from '../widgets/dwl-input';
 import {apiFetch, formatDateTime} from './component-support';
 import {highlightJson, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 import {buildClipboardDoc, ClipboardDoc, parseClipboardDoc, pastedName, readClipboard, writeClipboard} from '../widgets/flow-clipboard';
@@ -2306,6 +2307,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         $columns.append($body, $side);
         $panel.append($top, $columns, $error);
+        this.prefillDestinationFromName($panel, $input, step.config?.destination);
 
         // The actions row, set off from the fields by a full-width divider: the Log event switch
         // on the left, Cancel/Confirm on the right.
@@ -2468,6 +2470,39 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     // --- Step settings: per-type configuration sections ---------------------------------
+
+    /** A step's Destination input (the context key its result is stored under; `payload` by default). */
+    private destinationInput(initial: Record<string, any>): any {
+        return $('<input/>', {
+            type: 'text', 'class': 'form-control', maxlength: 128, 'data-role': 'destination',
+            value: String(initial.destination || 'payload')
+        });
+    }
+
+    /**
+     * Facilitator: typing the step NAME pre-fills its Destination with the same text, spaces and
+     * "-" turned into "_" ("Load orders" → "Load_orders"). Only while the destination holds no
+     * value of its own: empty, the `payload` default of a step that never stored a destination,
+     * or what this helper filled in itself. A stored or typed destination is never overwritten.
+     * A disabled destination (async HTTP request) is left alone.
+     */
+    private prefillDestinationFromName($panel: any, $name: any, stored: unknown): void {
+        const $destination = $panel.find('[data-role="destination"]');
+        if (!$destination.length) {
+            return;
+        }
+        // The value counted as "not the user's": the default for a step without a stored destination.
+        let filled: string | null = typeof stored === 'string' && stored.trim() !== '' ? null : 'payload';
+        $name.on('input', () => {
+            const current = String($destination.val() || '');
+            const derived = String($name.val() || '').trim().replace(/[\s-]+/g, '_');
+            if ($destination.prop('disabled') || derived === '' || (current !== '' && current !== filled)) {
+                return;
+            }
+            $destination.val(derived).trigger('input');
+            filled = derived;
+        });
+    }
 
     private settingsLabel(key: string): any {
         return $('<label/>', {'class': 'aaxis-flow-editor__settings-label', text: __(`aaxis.ontology.flow_editor.${key}`)});
@@ -2694,10 +2729,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * reopening a saved step keeps the stored expression untouched.
      */
     private invokePhpSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        const $destination = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: String(initial.destination || 'payload')
-        });
+        const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
             this.settingsCol('destination_label', $destination)
@@ -3203,10 +3235,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * result lands under the destination. Syntax is validated server-side on save.
      */
     private dwlSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
-        const $destination = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: String(initial.destination || 'payload')
-        });
+        const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput),
             this.settingsCol('destination_label', $destination)
@@ -3307,10 +3336,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * extras), writers the Content field (context key, or a DWL expression via its toggle).
      */
     private entityIoSection(kind: 'reader' | 'writer', $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        const $destination = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: String(initial.destination || 'payload')
-        });
+        const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
             this.settingsCol('destination_label', $destination)
@@ -3468,10 +3494,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // rest_api connectors only — this step IS an HTTP call.
         const connectors = this.connectorPicker(['rest_api'], String(initial.connector || ''));
         const $connector = connectors.$select;
-        const $destination = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: String(initial.destination || 'payload')
-        });
+        const $destination = this.destinationInput(initial);
         const async = this.plainSwitch(initial.async === true, 'http_async_hint');
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
@@ -3508,13 +3531,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
         ['empty', 'json', 'text', 'xml'].forEach(b => $bodyType.append($('<option/>', {
             value: b, text: __(`aaxis.ontology.flow_editor.body_${b}`), selected: initial.body === b
         })));
-        const $path = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 255,
-            value: String(initial.path || '')
+        // The path: literal text, or — DWL switch on — a single-line expression over the context
+        // (e.g. "orders/" ++ payload.id), evaluated when the step runs.
+        const path = createDwlInput({
+            value: String(initial.path || ''),
+            dwl: initial.path_dwl === true,
+            label: __('aaxis.ontology.flow_editor.path_label'),
+            maxlength: 1024
         });
         $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('operation_label', $operation),
-            this.settingsCol('path_label', $path, 1.6),
+            this.settingsCol('path_label', path.$el, 1.6),
             this.settingsCol('body_label', $bodyType)
         ));
 
@@ -3544,7 +3571,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (String($connector.val() || '') === '') {
                     return __('aaxis.ontology.flow_editor.reader_connector_required');
                 }
-                if (String($path.val() || '').trim() === '') {
+                if (path.value().trim() === '') {
                     return __('aaxis.ontology.flow_editor.reader_path_required');
                 }
                 return async.isOn() ? '' : this.destinationError($destination);
@@ -3554,7 +3581,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     ...config,
                     connector: String($connector.val()),
                     operation: String($operation.val()),
-                    path: String($path.val() || '').trim(),
+                    path: path.value().trim(),
+                    path_dwl: path.isDwl(),
                     body: String($bodyType.val())
                 };
                 if (async.isOn()) {
@@ -3583,10 +3611,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Database connectors only — this step IS a SQL call.
         const connectors = this.connectorPicker(['database'], String(initial.connector || ''));
         const $connector = connectors.$select;
-        const $destination = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: String(initial.destination || 'payload')
-        });
+        const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
             this.settingsCol('connector_label', connectors.$el, 1.4),
@@ -3740,10 +3765,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // File-based connectors only — these steps talk to a storage.
         const connectors = this.connectorPicker(['file_system', 'sftp', 'bucket'], String(initial.connector || ''));
         const $connector = connectors.$select;
-        const $destination = $('<input/>', {
-            type: 'text', 'class': 'form-control', maxlength: 128,
-            value: String(initial.destination || 'payload')
-        });
+        const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
             this.settingsCol('connector_label', connectors.$el, 1.4),
