@@ -9,6 +9,7 @@ use Aaxis\Bundle\OntologyBundle\Manager\ConnectorTester;
 use Aaxis\Bundle\OntologyBundle\Tests\Unit\Controller\Fixtures\ControllerKit;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Oro\Bundle\SecurityBundle\Encoder\SymmetricCrypterInterface;
+use Oro\Component\MessageQueue\Client\MessageProducerInterface;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
@@ -20,6 +21,8 @@ class OntologyConfigControllerTest extends TestCase
 
     /** @var array<string, mixed> */
     private array $stored = [];
+
+    private MessageProducerInterface&MockObject $producer;
 
     protected function setUp(): void
     {
@@ -33,6 +36,8 @@ class OntologyConfigControllerTest extends TestCase
         $kit->set(ConnectorTester::class, $this->tester);
         $kit->set(ConfigManager::class, $config);
         $kit->set(SymmetricCrypterInterface::class, $crypter);
+        $this->producer = $this->createMock(MessageProducerInterface::class);
+        $kit->set(MessageProducerInterface::class, $this->producer);
         $this->controller = $kit->wire(new OntologyConfigController());
     }
 
@@ -122,11 +127,31 @@ class OntologyConfigControllerTest extends TestCase
         return ['empty' => [''], 'not json' => ['{oops'], 'config is not an object' => ['{"config":"x"}'], 'json scalar' => ['5']];
     }
 
+    public function testTheRunIndexRebuildIsQueued(): void
+    {
+        $this->producer->expects(self::once())->method('send')->with('aaxis_ontology_flow_runs_rebuild', []);
+
+        $response = $this->controller->flowRunsRebuildAction();
+
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame(['success' => true], ControllerKit::decode($response));
+    }
+
+    public function testARebuildThatCannotBeQueuedFails(): void
+    {
+        $this->producer->method('send')->willThrowException(new \RuntimeException('broker down'));
+
+        $response = $this->controller->flowRunsRebuildAction();
+
+        self::assertSame(500, $response->getStatusCode());
+        self::assertSame(['success' => false], ControllerKit::decode($response));
+    }
+
     public function testItSubscribesToTheServicesItUses(): void
     {
         $services = OntologyConfigController::getSubscribedServices();
 
-        foreach ([ConnectorTester::class, ConfigManager::class, SymmetricCrypterInterface::class] as $service) {
+        foreach ([ConnectorTester::class, ConfigManager::class, SymmetricCrypterInterface::class, MessageProducerInterface::class] as $service) {
             self::assertContains($service, $services);
         }
     }

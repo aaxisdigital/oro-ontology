@@ -317,6 +317,20 @@
     }
 }
 
+// System Configuration → Settings: the run index status + "Rebuild run index" button
+// (FlowRunIndexStatusType widget); status lines reuse the connector test's look.
+.aaxis-config-run-index {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 13px;
+
+    &__last {
+        color: #6b7a89;
+    }
+}
+
 // System Configuration → Settings: the read-only DB Usage table (DbUsageType widget).
 .aaxis-config-db-usage {
     border-collapse: collapse;

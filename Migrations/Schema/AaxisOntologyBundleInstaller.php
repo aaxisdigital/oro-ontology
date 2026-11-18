@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_13';
+        return 'v1_14';
     }
 
     #[\Override]
@@ -37,6 +37,7 @@ class AaxisOntologyBundleInstaller implements Installation
         $this->createDataTable($schema);
         $this->createDataHistoryTable($schema);
         $this->createDataEventsTable($schema);
+        FlowRunsTable::create($schema);
         $this->createFlowTable($schema);
 
         $this->addForeignKeys($schema);

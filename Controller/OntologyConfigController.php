@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Controller;
 
+use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowRunsRebuildTopic;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Manager\ConnectorTester;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Oro\Bundle\SecurityBundle\Attribute\AclAncestor;
 use Oro\Bundle\SecurityBundle\Attribute\CsrfProtection;
 use Oro\Bundle\SecurityBundle\Encoder\SymmetricCrypterInterface;
+use Oro\Component\MessageQueue\Client\MessageProducerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -58,6 +60,24 @@ class OntologyConfigController extends AbstractController
         ));
     }
 
+    /**
+     * Settings → "Rebuild run index": queues the rebuild (it runs in the background — on a bucket
+     * it lists days of keys); the page's run index status shows the outcome once it is done.
+     */
+    #[Route(path: '/config/api/flow-runs-rebuild', name: 'aaxis_ontology_config_flow_runs_rebuild', options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('oro_config_system')]
+    #[CsrfProtection]
+    public function flowRunsRebuildAction(): JsonResponse
+    {
+        try {
+            $this->container->get(MessageProducerInterface::class)->send(OntologyFlowRunsRebuildTopic::getName(), []);
+        } catch (\Throwable) {
+            return new JsonResponse(['success' => false], 500);
+        }
+
+        return new JsonResponse(['success' => true]);
+    }
+
     #[\Override]
     public static function getSubscribedServices(): array
     {
@@ -65,6 +85,7 @@ class OntologyConfigController extends AbstractController
             ConnectorTester::class,
             ConfigManager::class,
             SymmetricCrypterInterface::class,
+            MessageProducerInterface::class,
         ]);
     }
 }

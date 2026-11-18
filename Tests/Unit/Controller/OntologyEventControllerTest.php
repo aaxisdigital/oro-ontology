@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Controller;
 
 use Aaxis\Bundle\OntologyBundle\Controller\OntologyEventController;
-use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlowEvent;
 use Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex;
 use Aaxis\Bundle\OntologyBundle\Tests\Unit\Controller\Fixtures\ControllerKit;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -18,6 +18,7 @@ class OntologyEventControllerTest extends TestCase
 {
     private ControllerKit $kit;
     private BucketFlowEventStore&MockObject $store;
+    private FlowRunIndex&MockObject $runs;
     private OntologyEventController $controller;
 
     /** @var array<string, mixed> */
@@ -31,6 +32,9 @@ class OntologyEventControllerTest extends TestCase
         $config->method('get')->willReturnCallback(fn (string $key) => $this->config[$key] ?? null);
         $this->kit->set(BucketFlowEventStore::class, $this->store);
         $this->kit->set(ConfigManager::class, $config);
+        $this->runs = $this->createMock(FlowRunIndex::class);
+        $this->runs->method('cursor')->willReturn('2026-03-05 10:00:00.000000');
+        $this->kit->set(FlowRunIndex::class, $this->runs);
         $this->controller = $this->kit->wire(new OntologyEventController());
     }
 
@@ -47,108 +51,108 @@ class OntologyEventControllerTest extends TestCase
         return $entity;
     }
 
-    private static function flow(int $id, string $name): OntologyFlow
-    {
-        $flow = (new OntologyFlow())->setName($name);
-        (new \ReflectionProperty(OntologyFlow::class, 'id'))->setValue($flow, $id);
-
-        return $flow;
-    }
-
     public function testTheIndexPageHasNoData(): void
     {
         self::assertSame([], $this->controller->indexAction());
     }
 
-    // --- list: table backend ------------------------------------------------------------------
+    // --- list: the run index -------------------------------------------------------------------
 
-    public function testRunsAreAggregatedFromTheEventTable(): void
+    /**
+     * @return array<string, mixed>
+     */
+    private static function runRow(string $uuid, array $overrides = []): array
+    {
+        return $overrides + [
+            'flow_uuid' => $uuid, 'flow_id' => 3, 'flow_name' => 'Nightly', 'storage' => 'db',
+            'started_at' => '2026-03-04 05:06:07.5', 'finished_at' => '2026-03-04 05:06:09.25',
+            'finish_event' => 'flow-finish', 'elapsed_ms' => '1750', 'events' => '6',
+        ];
+    }
+
+    public function testRunsAreReadFromTheIndexOfTheTableBackend(): void
     {
         $this->store->method('isEnabled')->willReturn(false);
-        $this->kit->orm->connection->expects(self::once())->method('fetchAllAssociative')->with(self::stringContains('FROM aaxis_ontology_flow_events'))->willReturn([
-            [
-                'flow_uuid' => 'u-1', 'start_flow_id' => 3, 'any_flow_id' => 9, 'start_name' => 'Nightly', 'any_name' => 'Other',
-                'started_at' => '2026-03-04 05:06:07.500000', 'finished_at' => '2026-03-04 05:06:09.250000',
-                'finish_event' => 'flow-finish', 'events' => '6',
-            ],
-            [
-                'flow_uuid' => 'u-2', 'start_flow_id' => null, 'any_flow_id' => 9, 'start_name' => null, 'any_name' => 'Fallback',
-                'started_at' => '2026-03-04 05:00:00', 'finished_at' => '2026-03-04 05:00:01',
-                'finish_event' => 'flow-exception', 'events' => 2,
-            ],
-            [
-                'flow_uuid' => 'u-3', 'start_flow_id' => 4, 'any_flow_id' => 4, 'start_name' => 'Running one', 'any_name' => 'x',
-                'started_at' => '2026-03-04 04:00:00', 'finished_at' => null, 'finish_event' => null, 'events' => 1,
-            ],
-            [
-                'flow_uuid' => 'u-4', 'start_flow_id' => null, 'any_flow_id' => null, 'start_name' => null, 'any_name' => null,
-                'started_at' => '2026-03-04 03:00:00.000000', 'finished_at' => '2026-03-04 02:59:59.000000',
-                'finish_event' => 'something-else', 'events' => 1,
-            ],
-        ]);
+        $this->runs->expects(self::once())->method('runs')
+            ->with(FlowRunIndex::STORAGE_DB, self::matchesRegularExpression('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/'), null)
+            ->willReturn([
+                self::runRow('u-1'),
+                self::runRow('u-2', ['flow_id' => null, 'flow_name' => null, 'finished_at' => null, 'finish_event' => null, 'elapsed_ms' => null, 'events' => 1]),
+                self::runRow('u-3', ['finish_event' => 'flow-exception', 'elapsed_ms' => 0]),
+            ]);
+        $this->kit->orm->connection->expects(self::never())->method('fetchAllAssociative');
 
-        $records = ControllerKit::decode($this->controller->listAction())['records'];
+        $answer = ControllerKit::decode($this->controller->listAction(Request::create('/')));
 
+        self::assertSame('2026-03-05 10:00:00.000000', $answer['cursor']);
+        self::assertFalse($answer['incremental']);
         self::assertSame([
             'flowUuid' => 'u-1', 'flowId' => 3, 'flowName' => 'Nightly',
             'startedAt' => '2026-03-04T05:06:07+00:00', 'finishedAt' => '2026-03-04T05:06:09+00:00',
             'elapsedMs' => 1750, 'status' => 'success', 'events' => 6,
-        ], $records[0]);
-        // A run with no flow-start falls back to the first flow id / name seen on any of its events.
-        self::assertSame([9, 'Fallback', 'exception', 1000], [$records[1]['flowId'], $records[1]['flowName'], $records[1]['status'], $records[1]['elapsedMs']]);
-        // Still running: no finish time, so no elapsed time.
-        self::assertSame([null, null, 'running'], [$records[2]['finishedAt'], $records[2]['elapsedMs'], $records[2]['status']]);
-        // A finish that precedes the start never yields a negative elapsed time; unknown finish kinds read as running.
-        self::assertSame([0, 'running', null, null], [$records[3]['elapsedMs'], $records[3]['status'], $records[3]['flowId'], $records[3]['flowName']]);
+        ], $answer['records'][0]);
+        // Still running: no finish, no elapsed time, no flow known yet.
+        self::assertSame([null, null, null, null, 'running', 1], [
+            $answer['records'][1]['flowId'], $answer['records'][1]['flowName'], $answer['records'][1]['finishedAt'],
+            $answer['records'][1]['elapsedMs'], $answer['records'][1]['status'], $answer['records'][1]['events'],
+        ]);
+        self::assertSame(['exception', 0], [$answer['records'][2]['status'], $answer['records'][2]['elapsedMs']]);
     }
 
-    public function testAnEmptyEventTableListsNothing(): void
-    {
-        $this->store->method('isEnabled')->willReturn(false);
-        $this->kit->orm->connection->method('fetchAllAssociative')->willReturn([]);
-
-        self::assertSame(['records' => []], ControllerKit::decode($this->controller->listAction()));
-    }
-
-    // --- list: bucket backend -----------------------------------------------------------------
-
-    public function testRunsAreAggregatedFromTheBucketWithFlowNamesResolvedFromTheFlowsTable(): void
+    public function testBucketRunsCarryWhatTheirPopupNeeds(): void
     {
         $this->store->method('isEnabled')->willReturn(true);
-        $this->store->expects(self::once())->method('listRuns')->with(14)->willReturn([
-            ['flowUuid' => 'old', 'flowId' => 3, 'startedAtRaw' => '2026-03-04 05:00:00.000000', 'finishedAtRaw' => '2026-03-04 05:00:02.500000', 'finishEvent' => 'flow-finish', 'events' => 4],
-            ['flowUuid' => 'new', 'flowId' => 8, 'startedAtRaw' => '2026-03-05 09:00:00.000000', 'finishedAtRaw' => null, 'finishEvent' => null, 'events' => 1],
-            ['flowUuid' => 'bare', 'flowId' => null, 'startedAtRaw' => '2026-03-04 07:00:00.000000', 'finishedAtRaw' => '2026-03-04 07:00:01.000000', 'finishEvent' => 'flow-exception', 'events' => 2],
+        $this->runs->expects(self::once())->method('runs')->with(FlowRunIndex::STORAGE_BUCKET, self::anything(), null)->willReturn([
+            self::runRow('b-1', ['storage' => 'bucket']),
         ]);
-        $this->kit->orm->repository(OntologyFlow::class)->expects(self::once())->method('findBy')->with(['id' => [3, 8]])->willReturn([self::flow(3, 'Nightly')]);
 
-        $records = ControllerKit::decode($this->controller->listAction())['records'];
+        $record = ControllerKit::decode($this->controller->listAction(Request::create('/')))['records'][0];
 
-        // Newest run first; a deleted flow (id 8) and a bare run have no name.
-        self::assertSame(['new', 'bare', 'old'], array_column($records, 'flowUuid'));
         self::assertSame(
-            [
-                'flowUuid' => 'old', 'flowId' => 3, 'flowName' => 'Nightly',
-                'startedAt' => '2026-03-04T05:00:00+00:00', 'finishedAt' => '2026-03-04T05:00:02+00:00',
-                'elapsedMs' => 2500, 'status' => 'success', 'events' => 4,
-                'bucket' => true, 'startedAtRaw' => '2026-03-04 05:00:00.000000', 'finishedAtRaw' => '2026-03-04 05:00:02.500000',
-            ],
-            $records[2]
+            [true, '2026-03-04 05:06:07.5', '2026-03-04 05:06:09.25'],
+            [$record['bucket'], $record['startedAtRaw'], $record['finishedAtRaw']]
         );
-        self::assertSame([null, 'running', null], [$records[0]['flowName'], $records[0]['status'], $records[0]['elapsedMs']]);
-        self::assertSame([null, 'exception', 1000], [$records[1]['flowName'], $records[1]['status'], $records[1]['elapsedMs']]);
+    }
+
+    public function testARefreshAsksOnlyForTheRunsChangedSinceTheCursor(): void
+    {
+        $this->store->method('isEnabled')->willReturn(false);
+        $this->runs->expects(self::once())->method('runs')
+            ->with(FlowRunIndex::STORAGE_DB, self::anything(), '2026-03-05 09:59:55.123456')
+            ->willReturn([]);
+
+        $answer = ControllerKit::decode($this->controller->listAction(Request::create('/?since=2026-03-05%2009:59:55.123456')));
+
+        self::assertSame(['records' => [], 'cursor' => '2026-03-05 10:00:00.000000', 'incremental' => true], $answer);
+    }
+
+    public function testAMalformedCursorMeansAFullList(): void
+    {
+        $this->store->method('isEnabled')->willReturn(false);
+        $this->runs->expects(self::once())->method('runs')->with(self::anything(), self::anything(), null)->willReturn([]);
+
+        self::assertFalse(ControllerKit::decode($this->controller->listAction(Request::create("/?since=1'%20OR%201=1")))['incremental']);
     }
 
     /**
      * @dataProvider historyDaysProvider
      */
-    public function testTheBucketListingWindowDefaultsTo30Days(mixed $configured, int $expected): void
+    public function testTheListWindowFollowsTheHistoryDaysDefaultingTo30(mixed $configured, int $expected): void
     {
         $this->config['aaxis_ontology.flow_execution_history_days'] = $configured;
-        $this->store->method('isEnabled')->willReturn(true);
-        $this->store->expects(self::once())->method('listRuns')->with($expected)->willReturn([]);
+        $this->store->method('isEnabled')->willReturn(false);
+        $since = null;
+        $this->runs->method('runs')->willReturnCallback(function (string $storage, string $startedSince) use (&$since): array {
+            $since = $startedSince;
 
-        self::assertSame(['records' => []], ControllerKit::decode($this->controller->listAction()));
+            return [];
+        });
+
+        $this->controller->listAction(Request::create('/'));
+
+        $days = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->getTimestamp()
+            - (new \DateTimeImmutable($since, new \DateTimeZone('UTC')))->getTimestamp();
+        self::assertEqualsWithDelta($expected * 86400, $days, 5);
     }
 
     /**
@@ -157,17 +161,6 @@ class OntologyEventControllerTest extends TestCase
     public static function historyDaysProvider(): array
     {
         return ['set' => [7, 7], 'numeric string' => ['45', 45], 'unset' => [null, 30], 'zero' => [0, 30], 'negative' => [-3, 30]];
-    }
-
-    public function testNoFlowLookupIsMadeWhenNoRunHasAFlowId(): void
-    {
-        $this->store->method('isEnabled')->willReturn(true);
-        $this->store->method('listRuns')->willReturn([
-            ['flowUuid' => 'a', 'flowId' => null, 'startedAtRaw' => '2026-03-04 05:00:00.000000', 'finishedAtRaw' => null, 'finishEvent' => null, 'events' => 1],
-        ]);
-        $this->kit->orm->repository(OntologyFlow::class)->expects(self::never())->method('findBy');
-
-        self::assertCount(1, ControllerKit::decode($this->controller->listAction())['records']);
     }
 
     // --- run popup ----------------------------------------------------------------------------
@@ -231,6 +224,7 @@ class OntologyEventControllerTest extends TestCase
 
         self::assertContains(BucketFlowEventStore::class, $services);
         self::assertContains(ConfigManager::class, $services);
+        self::assertContains(FlowRunIndex::class, $services);
         self::assertContains(\Doctrine\Persistence\ManagerRegistry::class, $services);
     }
 }

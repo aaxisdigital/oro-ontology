@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Controller;
 
-use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlowEvent;
 use Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
 use Oro\Bundle\SecurityBundle\Attribute\Acl;
@@ -34,49 +34,65 @@ class OntologyEventController extends AbstractController
     }
 
     /**
-     * ONE ROW PER RUN (flow uuid): the root flow-start's flow/name/time, the finish time
-     * (flow-finish or flow-exception, whichever came last), and the event count — newest runs
-     * first. Runs with no flow-start (e.g. bare data-upserts from the async consumer) fall back
-     * to their earliest event.
+     * ONE ROW PER RUN (flow uuid), newest first, read from the run index ({@see FlowRunIndex} —
+     * kept current by the flow-event consumer, so nothing is aggregated here): the run's flow and
+     * name, start (the flow-start's time, else its earliest event), finish (the last flow-finish
+     * or flow-exception), stored elapsed time, status and event count.
+     *
+     * Only the runs of the active event backend (table, or bucket with "Use Bucket for Flow
+     * Events"), started within the last flow_execution_history_days days (30 when unset). With
+     * `since` (the `cursor` of a previous answer) only the runs changed after it come back — the
+     * page's Refresh merges them into what it already shows.
      */
     #[Route(path: '/events/api/list', name: 'aaxis_ontology_event_list', options: ['expose' => true], methods: ['GET'])]
     #[AclAncestor('aaxis_ontology_event_view')]
-    public function listAction(): JsonResponse
+    public function listAction(Request $request): JsonResponse
     {
-        $store = $this->container->get(BucketFlowEventStore::class);
-        if ($store->isEnabled()) {
-            return $this->listFromBucket($store);
-        }
+        $bucket = $this->container->get(BucketFlowEventStore::class)->isEnabled();
+        $days = (int) $this->container->get(ConfigManager::class)->get('aaxis_ontology.flow_execution_history_days');
+        $startedSince = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))
+            ->modify(sprintf('-%d days', $days > 0 ? $days : 30))
+            ->format('Y-m-d H:i:s');
+        $since = (string) $request->query->get('since', '');
+        $changedSince = preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{1,6})?$/', $since) === 1 ? $since : null;
 
-        $rows = $this->container->get(ManagerRegistry::class)->getConnection()->fetchAllAssociative(
-            "SELECT flow_uuid,
-                    (array_agg(flow_id ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS start_flow_id,
-                    (array_agg(flow_id ORDER BY id) FILTER (WHERE flow_id IS NOT NULL))[1] AS any_flow_id,
-                    (array_agg(flow_name ORDER BY id) FILTER (WHERE event = 'flow-start'))[1] AS start_name,
-                    (array_agg(flow_name ORDER BY id) FILTER (WHERE flow_name IS NOT NULL))[1] AS any_name,
-                    coalesce(min(datetime) FILTER (WHERE event = 'flow-start'), min(datetime)) AS started_at,
-                    max(datetime) FILTER (WHERE event IN ('flow-finish', 'flow-exception')) AS finished_at,
-                    (array_agg(event ORDER BY datetime DESC, id DESC) FILTER (WHERE event IN ('flow-finish', 'flow-exception')))[1] AS finish_event,
-                    count(*) AS events
-             FROM aaxis_ontology_flow_events
-             GROUP BY flow_uuid
-             ORDER BY coalesce(min(datetime) FILTER (WHERE event = 'flow-start'), min(datetime)) DESC"
-        );
+        $index = $this->container->get(FlowRunIndex::class);
+        // Taken BEFORE the read: whatever changes while it runs is fetched again next time.
+        $cursor = $index->cursor();
+        $rows = $index->runs($bucket ? FlowRunIndex::STORAGE_BUCKET : FlowRunIndex::STORAGE_DB, $startedSince, $changedSince);
 
         return new JsonResponse([
-            'records' => array_map(static fn (array $row): array => [
-                'flowUuid' => $row['flow_uuid'],
-                'flowId' => $row['start_flow_id'] ?? $row['any_flow_id'],
-                'flowName' => $row['start_name'] ?? $row['any_name'],
-                'startedAt' => self::atom($row['started_at']),
-                'finishedAt' => self::atom($row['finished_at']),
-                // Milliseconds between start and finish; null = still running (grid sorts on it).
-                'elapsedMs' => self::elapsedMs($row['started_at'], $row['finished_at']),
-                // How the run ended: which finish event came last (null = still running).
-                'status' => self::runStatus($row['finish_event'] ?? null),
-                'events' => (int) $row['events'],
-            ], $rows),
+            'records' => array_map(static fn (array $row): array => self::runRecord($row), $rows),
+            'cursor' => $cursor,
+            'incremental' => $changedSince !== null,
         ]);
+    }
+
+    /**
+     * @param array<string, mixed> $row one run index row
+     *
+     * @return array<string, mixed>
+     */
+    private static function runRecord(array $row): array
+    {
+        $record = [
+            'flowUuid' => $row['flow_uuid'],
+            'flowId' => $row['flow_id'] !== null ? (int) $row['flow_id'] : null,
+            'flowName' => $row['flow_name'],
+            'startedAt' => self::atom($row['started_at']),
+            'finishedAt' => self::atom($row['finished_at']),
+            // Milliseconds between start and finish; null = still running (grid sorts on it).
+            'elapsedMs' => $row['elapsed_ms'] !== null ? (int) $row['elapsed_ms'] : null,
+            // How the run ended: which finish event came last (null = still running).
+            'status' => self::runStatus($row['finish_event'] ?? null),
+            'events' => (int) $row['events'],
+        ];
+        if ($row['storage'] === FlowRunIndex::STORAGE_BUCKET) {
+            // The popup needs these to find the run's day folders (see runAction's bucket arm).
+            $record += ['bucket' => true, 'startedAtRaw' => $row['started_at'], 'finishedAtRaw' => $row['finished_at']];
+        }
+
+        return $record;
     }
 
     /** The FULL event list of one run (uuid), datetime ASC — the "view events" popup. */
@@ -145,45 +161,6 @@ class OntologyEventController extends AbstractController
         ]);
     }
 
-    /**
-     * The bucket arm of {@see listAction}: one row per run aggregated from the last
-     * flow_execution_history_days days' KEY listings (kind + micro-time live in the filenames —
-     * no object bodies are fetched here). Flow names resolve from the flows table by id (a
-     * deleted flow shows no name — bucket keys don't carry it).
-     */
-    private function listFromBucket(BucketFlowEventStore $store): JsonResponse
-    {
-        $days = (int) $this->container->get(ConfigManager::class)->get('aaxis_ontology.flow_execution_history_days');
-        $runs = $store->listRuns($days > 0 ? $days : 30);
-
-        $flowIds = array_values(array_unique(array_filter(array_column($runs, 'flowId'))));
-        $names = [];
-        if ($flowIds !== []) {
-            foreach ($this->container->get(ManagerRegistry::class)->getRepository(OntologyFlow::class)
-                         ->findBy(['id' => $flowIds]) as $flow) {
-                $names[(int) $flow->getId()] = $flow->getName();
-            }
-        }
-
-        $records = array_map(static fn (array $run): array => [
-            'flowUuid' => $run['flowUuid'],
-            'flowId' => $run['flowId'],
-            'flowName' => $run['flowId'] !== null ? ($names[$run['flowId']] ?? null) : null,
-            'startedAt' => self::atom($run['startedAtRaw']),
-            'finishedAt' => self::atom($run['finishedAtRaw']),
-            'elapsedMs' => self::elapsedMs($run['startedAtRaw'], $run['finishedAtRaw']),
-            'status' => self::runStatus($run['finishEvent']),
-            'events' => $run['events'],
-            // The popup needs these to find the run's day folders (see runAction's bucket arm).
-            'bucket' => true,
-            'startedAtRaw' => $run['startedAtRaw'],
-            'finishedAtRaw' => $run['finishedAtRaw'],
-        ], $runs);
-        usort($records, static fn (array $a, array $b): int => strcmp((string) $b['startedAt'], (string) $a['startedAt']));
-
-        return new JsonResponse(['records' => $records]);
-    }
-
     /** A UTC timestamp string as ATOM; null stays null. */
     private static function atom(?string $raw): ?string
     {
@@ -194,15 +171,6 @@ class OntologyEventController extends AbstractController
     private static function millis(?string $raw): ?float
     {
         return $raw !== null ? (float) date_create($raw, new \DateTimeZone('UTC'))->format('U.u') * 1000 : null;
-    }
-
-    /** Milliseconds between a run's start and finish; null while it is still running. */
-    private static function elapsedMs(?string $startedAt, ?string $finishedAt): ?int
-    {
-        $start = self::millis($startedAt);
-        $finish = self::millis($finishedAt);
-
-        return $start !== null && $finish !== null ? max(0, (int) round($finish - $start)) : null;
     }
 
     /** How a run ended, from its last finish event (anything else = still running). */
@@ -222,6 +190,7 @@ class OntologyEventController extends AbstractController
             ManagerRegistry::class,
             BucketFlowEventStore::class,
             ConfigManager::class,
+            FlowRunIndex::class,
         ]);
     }
 }

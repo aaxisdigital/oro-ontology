@@ -134,7 +134,7 @@ services:
             - '@oro_config.global'
             - '@Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter'
             - '@aaxis_ontology.cache'
-            - '@Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex'
 
     # Resolves + runs the flow whose Endpoint trigger matches an incoming API request
     # (the /api/aaxis/ontology/flow/... catch-all in Api/OntologyFlowApiController).
@@ -150,6 +150,36 @@ services:
             - '@Aaxis\Bundle\OntologyBundle\Manager\ScheduledFlowRunner'
         tags:
             - { name: console.command, command: 'aaxis:ontology:flows:run-due' }
+
+    # The run index (aaxis_ontology_flow_runs): one row per flow run, folded by the flow-event
+    # consumer — what the Events page and the stale-debug sweep read.
+    Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex:
+        public: true
+        arguments:
+            - '@doctrine'
+
+    # Upkeep of the flow-execution history: run index rebuild + out-of-sync flag, daily purge.
+    Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance:
+        public: true
+        arguments:
+            - '@doctrine'
+            - '@oro_config.global'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore'
+            - '@logger'
+
+    Aaxis\Bundle\OntologyBundle\Command\RebuildFlowRunsCommand:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
+        tags:
+            - { name: console.command, command: 'aaxis:ontology:flow-runs:rebuild' }
+
+    # Daily retention of the flow-execution history (Oro cron, 02:15).
+    Aaxis\Bundle\OntologyBundle\Command\PurgeFlowHistoryCommand:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
+        tags:
+            - { name: console.command, command: 'aaxis:ontology:flow-history:purge' }
 
     Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager:
         public: true
@@ -224,6 +254,13 @@ services:
     Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard: ~
 
     # System Configuration: read-only DB-usage widget (table sizes for the retention settings).
+    # Settings page: the run index's read-only status + "Rebuild run index" button.
+    Aaxis\Bundle\OntologyBundle\Form\Type\FlowRunIndexStatusType:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
+        tags:
+            - { name: form.type }
+
     Aaxis\Bundle\OntologyBundle\Form\Type\DbUsageType:
         arguments:
             - '@doctrine'
@@ -261,6 +298,8 @@ services:
             - '@doctrine'
             - '@logger'
             - '@Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex'
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
         tags:
             - { name: oro_message_queue.client.message_processor }
 
@@ -268,6 +307,18 @@ services:
     Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyHttpRequestTopic:
         tags:
             - { name: oro_message_queue.topic }
+
+    # Message queue: the Settings page's "Rebuild run index" (runs in the background).
+    Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowRunsRebuildTopic:
+        tags:
+            - { name: oro_message_queue.topic }
+
+    Aaxis\Bundle\OntologyBundle\Async\OntologyFlowRunsRebuildProcessor:
+        arguments:
+            - '@Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance'
+            - '@logger'
+        tags:
+            - { name: oro_message_queue.client.message_processor }
 
     Aaxis\Bundle\OntologyBundle\Async\OntologyHttpRequestProcessor:
         arguments:

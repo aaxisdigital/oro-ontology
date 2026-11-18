@@ -147,6 +147,46 @@ describe('OntologyEventComponent', () => {
             expect($el.find('[data-role="refresh"]').prop('disabled')).toBe(false);
         });
 
+        it('refreshes incrementally: only the runs changed since the cursor, merged into the rows shown', async () => {
+            const answers = [
+                {records: [run({flowUuid: 'a', startedAt: '2026-05-12T10:00:00+00:00'}), run({flowUuid: 'b', startedAt: '2026-05-12T09:00:00+00:00', status: 'running'})], cursor: 'C1', incremental: false},
+                {records: [run({flowUuid: 'b', startedAt: '2026-05-12T09:00:00+00:00', status: 'success'}), run({flowUuid: 'c', startedAt: '2026-05-12T11:00:00+00:00'})], cursor: 'C2', incremental: true},
+                {records: [], cursor: 'C3', incremental: true}
+            ];
+            const urls: string[] = [];
+            const {grid} = mount(undefined, {[LIST_URL]: (url: string) => {
+                urls.push(url);
+                return jsonResponse(answers[urls.length - 1]);
+            }});
+            await flush();
+
+            $el.find('[data-role="refresh"]').trigger('click');
+            await flush();
+            const merged = grid.setRows.mock.calls.at(-1)[0];
+            expect(merged.map((r: any) => r.flowUuid)).toEqual(['c', 'a', 'b']);
+            expect(merged[2].status).toBe('success');
+
+            $el.find('[data-role="refresh"]').trigger('click');
+            await flush();
+            expect(urls).toEqual([LIST_URL, `${LIST_URL}?since=C1`, `${LIST_URL}?since=C2`]);
+            expect(grid.setRows.mock.calls.at(-1)[0].map((r: any) => r.flowUuid)).toEqual(['c', 'a', 'b']);
+        });
+
+        it('replaces every row on a full (non-incremental) answer', async () => {
+            const answers = [
+                {records: [run({flowUuid: 'a'}), run({flowUuid: 'b'})], cursor: 'C1'},
+                {records: [run({flowUuid: 'z'})], cursor: 'C2', incremental: false}
+            ];
+            let call = 0;
+            const {grid} = mount(undefined, {[LIST_URL]: () => jsonResponse(answers[call++])});
+            await flush();
+
+            $el.find('[data-role="refresh"]').trigger('click');
+            await flush();
+
+            expect(grid.setRows.mock.calls.at(-1)[0].map((r: any) => r.flowUuid)).toEqual(['z']);
+        });
+
         it('wires the toolbar: refresh reloads, columns opens the settings', async () => {
             const {grid, fetchSpy} = mount();
             await flush();

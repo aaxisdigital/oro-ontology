@@ -40,6 +40,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique. **Version continuity** (v1_10): `aaxis_ontology_data_upsert` numbers records PAST whatever history survives for the unique id — insert starts at `max(history)+1`, update archives at `GREATEST(live, max(history)+1)` — because a re-created record restarting at version 1 used to CRASH this unique index on its first change (the pre-9582e03 purge deleted data but kept history; inside the async consumer that read as a logged error + a "no changes" event + a silently unchanged record). Never assume live version = history+1 |
 | `OntologyFlowEvent` | `aaxis_ontology_flow_events` | (v1_12 — REPLACED `OntologyDataEvent`/`aaxis_ontology_data_events`, dropped WITH its data) one row per flow-execution EVENT: flow_id/flow_uuid/flow_name (plain copies, NO FK — records survive flow rename/delete), `event` ∈ flow-start/flow-finish/subflow-start/subflow-finish/flow-exception/data-upsert/log-message/step, `datetime` TIMESTAMP(6) (microseconds — parallel consumers make insertion ids useless for ordering; the emit-time stamp is the truth; the ENTITY maps it as a STRING because Oro's global UTCDateTimeType hydrates `datetime` columns with a STRICT 'Y-m-d H:i:s' parse that rejects fractional seconds — the controller date_create()s the raw value for display, and mapping changes here need the doctrine.metadata.cache pools cleared), jsonb `payload`. Written ASYNCHRONOUSLY (topic `aaxis_ontology_flow_event` → `Async/OntologyFlowEventProcessor`, plain DBAL insert) so logging never blocks a run |
+| *(no entity — DBAL only)* | `aaxis_ontology_flow_runs` | (v1_14) the RUN INDEX, see "Run index" below: one row per run (PK flow_uuid), folded by the event consumer; what the Events page and the stale-debug sweep read |
 
 ## Data HTTP API (OAuth) — `Api/` + `Manager/OntologyDataApiManager`
 
@@ -198,9 +199,10 @@ Key facts:
 
 ## System Configuration: retention + Bucket (CONFIG ONLY so far)
 
-The Settings PAGE (Aaxis → Ontology → Settings; after Enabled) carries retention settings whose
-CONSUMING LOGIC IS NOT BUILT YET — knobs awaiting their features: `flow_execution_history_days`
-(30), `flow_version_history_days` (365) and `entity_version_history_days` (365). (The three archive booleans that briefly lived here —
+The Settings PAGE (Aaxis → Ontology → Settings; after Enabled) carries the retention settings.
+`flow_execution_history_days` (30; empty/0 = 30) IS ENFORCED since 2026-11-18: it bounds the Events
+page and drives the daily purge (see "Run index"). `flow_version_history_days` (365) and
+`entity_version_history_days` (365) are still knobs awaiting their features. (The three archive booleans that briefly lived here —
 flow/data "bucket archive after history days" and "allow UI view of archived data" — were REMOVED
 by request before any logic consumed them.) Below them sits **DB Usage** — a read-only `ui_only` field (`Form/Type/DbUsageType`,
 tagged form.type) listing `pg_total_relation_size` of aaxis_ontology_data/_data_history/_flow/
@@ -246,27 +248,19 @@ OFF; same no-migration rule — DB rows stop being shown while it's on). Layout:
 `{base_path}/flow-events/{yyyy}/{mm}/{dd}/{flow-id}-{run-uuid}/{YmdHis+micro}_{kind}_{rand}.json`
 — DATE-FIRST so every listing is bounded to a day window and bucket browsing lands on "what ran
 that day", one folder per RUN inside (a null flow id — bare consumer upserts — lands under `0-`).
-THE FILENAME CARRIES THE EVENT'S MICRO-TIMESTAMP AND KIND on purpose: the Events page's
-one-row-per-run aggregation (`BucketFlowEventStore::listRuns`, reading the last
-`flow_execution_history_days` days, 30 when unset) works from KEY LISTINGS ALONE — zero GETs;
-object bodies (`{flowId, flowUuid, flowName, event, datetime, payload}`) are fetched only when
+THE FILENAME CARRIES THE EVENT'S MICRO-TIMESTAMP AND KIND on purpose: the one-row-per-run
+aggregation (`BucketFlowEventStore::listRuns`) works from KEY LISTINGS ALONE — zero GETs. Since
+v1_14 the Events page no longer calls it on every load: bucket runs are listed from the run index
+(see "Run index"), and `listRuns` only feeds `aaxis:ontology:flow-runs:rebuild`. Object bodies (`{flowId, flowUuid, flowName, event, datetime, payload}`) are fetched only when
 one run's popup opens (`runEvents`, scanning the run's started..finished day range since a
 midnight-crossing run spans several day folders). Pieces: `Manager/BucketFlowEventStore` (client
 gained `isConfigured()`/`isEnabledFor($toggle)`/`listPrefixes()`; `isEnabled()` stays the
 entity-data toggle), the write branch in `Async/OntologyFlowEventProcessor` (constructor gained
-the store — RESTART CONSUMERS), and `OntologyEventController`'s two arms: `listFromBucket()`
-(flow names resolved from the flows table by id — a deleted flow shows none; rows carry
-`bucket: true` + `startedAtRaw`/`finishedAtRaw`) and runAction's `?bucket=1&flowId=&startedAt=&
-finishedAt=` branch, which event-component.ts sends for bucket rows. The minutely
-ABANDONED-DEBUG SWEEP has a bucket arm too: `sweepStaleDebugSessions` (runner constructor gained
-the store) calls `BucketFlowEventStore::staleDebugRuns($cutoff)` — key-listing aggregation over
-today+yesterday only (older stale sessions were swept on earlier minutes) for runs with a
-flow-start, no finish kind, and a last-event stamp before the cutoff; the debug trigger lives in
-the flow-start's PAYLOAD, so just the few candidates cost one GET each to confirm
-trigger === "debug". Rows mirror the SQL sweep's shape, so the termination loop (emitRaw
-flow-exception "debug-timeout" + mark the cached walk blob terminated) is shared; the emitted
-exception lands back in the run's bucket folder via the consumers, closing the run so the next
-sweep skips it. NOTE for probes: in CLI the BufferedMessageProducer has buffering DISABLED —
+the store — RESTART CONSUMERS), and the Events page: bucket rows of the index carry
+`bucket: true` + `startedAtRaw`/`finishedAtRaw`, which runAction's `?bucket=1&flowId=&startedAt=&
+finishedAt=` branch uses (event-component.ts sends it for bucket rows). The minutely
+ABANDONED-DEBUG SWEEP reads the run index for both backends (the bucket's own key-listing sweep,
+`staleDebugRuns`, was removed with v1_14). NOTE for probes: in CLI the BufferedMessageProducer has buffering DISABLED —
 emits send straight to the DBAL queue (no kernel.terminate flush needed, and calling
 flushBuffer() throws).
 
@@ -1124,8 +1118,9 @@ tick stamps `lastTickAt` into the blob; a step arriving after the window emits a
 event with message `debug-timeout` for the run, marks the blob `terminated` and 422s ("terminated
 by timeout — restart the debug"; every later step gets the same answer). Abandoned sessions
 (window closed, never stepped again) are swept by the MINUTELY scheduler
-(`ScheduledFlowRunner::sweepStaleDebugSessions`, runs before the due-flows pass): any uuid with a
-debug-triggered flow-start, NO finish/exception, and no event newer than the window gets the same
+(`ScheduledFlowRunner::sweepStaleDebugSessions`, runs before the due-flows pass): any run of the
+run index with trigger `debug`, NO finish/exception, and no event newer than the window
+(`FlowRunIndex::staleDebugRuns`, a partial index over exactly those rows) gets the same
 debug-timeout exception event, and its cached walk blob is marked terminated too. **Canvas marks**: every EXECUTED step keeps the AMBER `is-debug-active`
 class for the whole session (marks accumulate, cleared only on session start/close), a FAILED
 step turns RED (`is-debug-failed`, declared after amber so it wins) with the error text in the
@@ -1269,7 +1264,67 @@ records' `steps` by config KEY `subflow`, name-sorted), each navigating like Nav
 a disabled "No flow calls this subflow." child when none (or when the subflow was never saved —
 no id, no callers). The catalog copy is load-time — callers created in another window appear
 after a reload.
-The Events page shows ONE ROW PER RUN (GROUP BY flow_uuid server-side, `aaxis_ontology_event_list`):
+**Run index** (v1_14, 2026-11-18 — the Events page used to GROUP BY the WHOLE event table on every
+load and Refresh, and the debug sweep did the same every minute; both grew with the entire,
+never-pruned history). `aaxis_ontology_flow_runs` (`Migrations/Schema/FlowRunsTable`, shared by
+the installer and v1_14) holds one row per run:
+- identity: flow_id, flow_name, has_start, trigger, storage (db | bucket = where its events live);
+- times: start_at, first_event_at, started_at (= start_at ?? first_event_at), last_event_at,
+  finished_at, finish_event, elapsed_ms;
+- counters: events, and updated_at (the DB clock, the refresh cursor).
+
+`Manager/FlowRunIndex::record()` folds every stored event, table OR bucket, from the consumer, in
+one ORDER-INDEPENDENT upsert: LEAST/GREATEST on the times, events+1, and the flow-start names the
+run whenever it lands. It is BEST EFFORT: the event is already stored, so the message is ACKed
+anyway. The FIRST failure calls `FlowRunMaintenance::markStale()`, which raises the OUT-OF-SYNC
+flag: it writes the internal config value `flow_runs_index_stale_since` (a UTC time) and logs one
+error. Later failures find the flag raised and do nothing — no config write and no log line per
+event. A rebuild clears the flag only when the flag predates the rebuild's start.
+
+VALIDATED against braskem7's 70k events / 4.2k runs. `FlowRunsTable::BACKFILL_SQL` equals the old
+GROUP BY on every run, and replaying all events through `record()` in RANDOM order equals the
+backfill. Measured: list 53 ms → 0.45 ms, sweep 62 ms → 0.01 ms, backfill 127 ms (one-time,
+v1_14 post-query, table-stored runs only).
+
+UPKEEP lives in ONE service, `Manager/FlowRunMaintenance`, so the button, both commands and the
+consumer agree on backend, window and flag:
+- `rebuild(?days)` re-derives the ACTIVE backend's index. A bucket rebuild covers the history days
+  (or `days`); bucket names come from the flows table and the trigger stays unknown. It records
+  `flow_runs_index_last_rebuild` (JSON `{at, storage, runs, days}`).
+- `markStale()`, `staleSince()` and `lastRebuild()` read and write the out-of-sync state.
+- `purge()` drops the events with `datetime` < cutoff (cutoff = now − history days), in 10k
+  batches; the run rows whose `last_event_at` < cutoff (`FlowRunIndex::purgeBefore`); and, whenever
+  a bucket connection is CONFIGURED (toggle on or off), the bucket's day folders before the cutoff
+  day (`BucketFlowEventStore::purgeBefore`, which walks the year/month/day prefixes and skips newer
+  years and months). Each store is attempted independently, and a failure is logged with that
+  store's count reported as null.
+
+Entry points:
+- **Settings page**: `aaxis_ontology.flow_runs_index` (`ui_only`, `Form/Type/FlowRunIndexStatusType`,
+  twig block `aaxis_ontology_flow_runs_index_widget`, after the history days) shows "In sync." or
+  "Out of sync since …", plus the last rebuild. Its **Rebuild run index** button
+  (`flow-runs-index-component.ts` → `OntologyConfigController::flowRunsRebuildAction`, CSRF,
+  `oro_config_system`) QUEUES topic `aaxis_ontology_flow_runs_rebuild`
+  (`Async/OntologyFlowRunsRebuildProcessor`). It is async because a bucket rebuild lists days of
+  keys. The page shows the outcome after a reload.
+- `aaxis:ontology:flow-runs:rebuild [--days=N]` does the same rebuild in the foreground.
+- `aaxis:ontology:flow-history:purge` runs as an Oro cron job at `15 2 * * *` (register it with
+  `oro:cron:definitions:load`). It exits FAILURE when a store failed.
+
+A RUN WITHOUT A UUID is not indexed. The only possible source is a queued
+`aaxis_ontology_data_upsert` message lacking `uuid`, and every producer sets one. braskem7 has no
+such rows. The list endpoint:
+- returns only the ACTIVE backend's runs started within `flow_execution_history_days` (30 when
+  unset; the DB arm used to show the whole history — and the daily purge now removes the rest);
+- answers `{records, cursor, incremental}`;
+- with `?since=<cursor>` returns only the runs whose row changed after it. The cursor is the DB
+  clock − 5 s, taken BEFORE the read, so in-flight writes are re-fetched.
+
+event-component.ts keeps a uuid → run Map: the first load replaces it, Refresh sends the cursor
+and merges, sorted by startedAt desc. NEW CONSUMER DEPENDENCY: restart the consumers after
+deploying.
+
+The Events page shows ONE ROW PER RUN (from the run index, `aaxis_ontology_event_list`):
 columns Flow name | UUID | Started At (the flow-start event's time; falls back to the earliest
 event for start-less runs like bare consumer upserts) | Finished At (the LAST flow-finish or
 flow-exception) | Elapsed (server ships `elapsedMs`, the client humanizes; null = "Running") |

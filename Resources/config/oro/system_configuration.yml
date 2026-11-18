@@ -71,6 +71,16 @@ system_configuration:
                 label: aaxis.ontology.config.general.entity_version_history_days.label
                 tooltip: aaxis.ontology.config.general.entity_version_history_days.tooltip
                 required: false
+        aaxis_ontology.flow_runs_index:
+            ui_only: true
+            data_type: string
+            type: Aaxis\Bundle\OntologyBundle\Form\Type\FlowRunIndexStatusType
+            options:
+                label: aaxis.ontology.config.general.flow_runs_index.label
+                tooltip: aaxis.ontology.config.general.flow_runs_index.tooltip
+                required: false
+                # status + button — no "Use Default" wrapper (it would disable the button)
+                resettable: false
         aaxis_ontology.db_usage:
             ui_only: true
             data_type: string
@@ -383,6 +393,7 @@ system_configuration:
                                             - aaxis_ontology.flow_execution_history_days
                                             - aaxis_ontology.flow_version_history_days
                                             - aaxis_ontology.entity_version_history_days
+                                            - aaxis_ontology.flow_runs_index
                                             - aaxis_ontology.db_usage
                             aaxis_ontology_bucket:
                                 priority: 95

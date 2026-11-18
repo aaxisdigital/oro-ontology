@@ -38,6 +38,7 @@ services:
             - { name: container.service_subscriber }
             - { name: container.service_subscriber, id: oro_config.global, key: Oro\Bundle\ConfigBundle\Config\ConfigManager }
             - { name: container.service_subscriber, id: oro_security.encoder.default, key: Oro\Bundle\SecurityBundle\Encoder\SymmetricCrypterInterface }
+            - { name: container.service_subscriber, id: oro_message_queue.client.message_producer, key: Oro\Component\MessageQueue\Client\MessageProducerInterface }
 
     Aaxis\Bundle\OntologyBundle\Controller\OntologyEventController:
         calls:
@@ -46,6 +47,7 @@ services:
             - { name: container.service_subscriber }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore, key: Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore }
             - { name: container.service_subscriber, id: oro_config.global, key: Oro\Bundle\ConfigBundle\Config\ConfigManager }
+            - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex, key: Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex }
 
     Aaxis\Bundle\OntologyBundle\Controller\OntologyFlowController:
         calls:

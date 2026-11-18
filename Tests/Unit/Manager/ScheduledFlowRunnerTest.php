@@ -5,11 +5,10 @@ declare(strict_types=1);
 namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Manager;
 
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
-use Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Aaxis\Bundle\OntologyBundle\Manager\OntologyFlowEventEmitter;
 use Aaxis\Bundle\OntologyBundle\Manager\ScheduledFlowRunner;
-use Doctrine\DBAL\Connection;
 use Doctrine\Persistence\ManagerRegistry;
 use Doctrine\Persistence\ObjectRepository;
 use Oro\Bundle\ConfigBundle\Config\ConfigManager;
@@ -28,7 +27,7 @@ class ScheduledFlowRunnerTest extends TestCase
     private ConfigManager&MockObject $config;
     private OntologyFlowEventEmitter&MockObject $events;
     private CacheItemPoolInterface&MockObject $cache;
-    private BucketFlowEventStore&MockObject $bucket;
+    private FlowRunIndex&MockObject $runs;
     private ScheduledFlowRunner $runner;
     private \DateTimeImmutable $now;
 
@@ -42,7 +41,7 @@ class ScheduledFlowRunnerTest extends TestCase
         $this->config = $this->createMock(ConfigManager::class);
         $this->events = $this->createMock(OntologyFlowEventEmitter::class);
         $this->cache = $this->createMock(CacheItemPoolInterface::class);
-        $this->bucket = $this->createMock(BucketFlowEventStore::class);
+        $this->runs = $this->createMock(FlowRunIndex::class);
         $this->runner = new ScheduledFlowRunner(
             $this->doctrine,
             $this->executor,
@@ -50,7 +49,7 @@ class ScheduledFlowRunnerTest extends TestCase
             $this->config,
             $this->events,
             $this->cache,
-            $this->bucket
+            $this->runs
         );
         $this->now = new \DateTimeImmutable('2026-05-10 12:30:00', new \DateTimeZone('UTC'));
     }
@@ -204,21 +203,18 @@ class ScheduledFlowRunnerTest extends TestCase
     public function testTheDebugSweepIsOffWithoutATimeout(): void
     {
         $this->config->method('get')->with('aaxis_ontology.flow_debug_timeout_minutes')->willReturn(null);
-        $this->doctrine->expects(self::never())->method('getConnection');
-        $this->bucket->expects(self::never())->method('isEnabled');
+        $this->runs->expects(self::never())->method('staleDebugRuns');
         $this->withFlows([]);
 
         self::assertSame([], $this->runner->runDue($this->now));
     }
 
-    public function testTheSweepTerminatesStaleDebugSessionsFromTheTable(): void
+    public function testTheSweepTerminatesTheStaleDebugSessionsTheRunIndexReports(): void
     {
         $this->config->method('get')->willReturn('15');
-        $this->bucket->method('isEnabled')->willReturn(false);
-        $connection = $this->createMock(Connection::class);
-        $this->doctrine->method('getConnection')->willReturn($connection);
-        $connection->expects(self::once())->method('fetchAllAssociative')
-            ->with(self::stringContains('FROM aaxis_ontology_flow_events'), ['cutoff' => '2026-05-10 12:15:00'])
+        $this->doctrine->expects(self::never())->method('getConnection');
+        $this->runs->expects(self::once())->method('staleDebugRuns')
+            ->with(self::callback(fn (\DateTimeImmutable $cutoff): bool => $cutoff == $this->now->modify('-15 minutes')))
             ->willReturn([
                 ['flow_uuid' => 'ABC', 'flow_id' => '4', 'flow_name' => 'Debugged'],
                 ['flow_uuid' => 'def', 'flow_id' => null, 'flow_name' => null],
@@ -250,14 +246,10 @@ class ScheduledFlowRunnerTest extends TestCase
         ], $emitted);
     }
 
-    public function testTheSweepReadsTheBucketWhenFlowEventsLiveThere(): void
+    public function testAStaleSessionWhoseCachedWalkIsUnreadableIsOnlyClosed(): void
     {
         $this->config->method('get')->willReturn(30);
-        $this->bucket->method('isEnabled')->willReturn(true);
-        $this->bucket->expects(self::once())->method('staleDebugRuns')
-            ->with(self::callback(fn (\DateTimeImmutable $cutoff): bool => $cutoff == $this->now->modify('-30 minutes')))
-            ->willReturn([['flow_uuid' => 'u1', 'flow_id' => 2, 'flow_name' => 'F']]);
-        $this->doctrine->expects(self::never())->method('getConnection');
+        $this->runs->method('staleDebugRuns')->willReturn([['flow_uuid' => 'u1', 'flow_id' => 2, 'flow_name' => 'F']]);
         $this->events->expects(self::once())->method('emitRaw')->with(2, 'F', 'u1', 'flow-exception', ['message' => 'debug-timeout']);
         $item = $this->createMock(CacheItemInterface::class);
         $item->method('isHit')->willReturn(true);
@@ -272,7 +264,7 @@ class ScheduledFlowRunnerTest extends TestCase
     public function testASweepFailureIsLoggedAndSchedulingGoesOn(): void
     {
         $this->config->method('get')->willReturn(5);
-        $this->bucket->method('isEnabled')->willThrowException(new \RuntimeException('bucket down'));
+        $this->runs->method('staleDebugRuns')->willThrowException(new \RuntimeException('database down'));
         $this->logger->expects(self::once())->method('error')->with('Stale debug sweep failed.', self::anything());
         $this->events->expects(self::never())->method('emitRaw');
         $this->withFlows([self::flow('Fine', ['expression' => '* * * * *'])]);

@@ -194,56 +194,56 @@ class BucketFlowEventStoreTest extends TestCase
         self::assertSame(14, $count);
     }
 
-    public function testStaleDebugRunsFindsUnfinishedDebugSessionsPastTheCutoff(): void
+    // --- retention ------------------------------------------------------------------------------
+
+    public function testIsConfiguredAsksTheClient(): void
     {
-        $today = self::day(0);
-        $yesterday = self::day(1);
-        $key = static fn (\DateTimeImmutable $day, string $folder, string $time, string $kind): string => self::dayPrefix($day)
-            . $folder . '/' . self::stamp($day, $time) . '_' . $kind . '_000000.json';
+        $this->client->expects(self::once())->method('isConfigured')->willReturn(true);
 
-        $staleStart = $key($yesterday, '7-stale', '100000000000', 'flow-start');
-        $laterStart = $key($yesterday, '7-stale', '100500000000', 'flow-start');
-        $scheduledStart = $key($yesterday, '8-scheduled', '100000000000', 'flow-start');
-        $unreadableStart = $key($yesterday, '8-unreadable', '100000000000', 'flow-start');
-        $this->listings[self::dayPrefix($yesterday)] = [
-            $laterStart,
-            $staleStart,
-            $key($yesterday, '7-stale', '101000000000', 'step'),
-            $scheduledStart,
-            $unreadableStart,
-            $key($yesterday, '9-finished', '100000000000', 'flow-start'),
-            $key($yesterday, '9-finished', '100100000000', 'flow-exception'),
-            $key($yesterday, '9-nostart', '100000000000', 'step'),
-            'junk',
-        ];
-        $this->listings[self::dayPrefix($today)] = [
-            $key($today, '0-fresh', '000000000000', 'flow-start'),
-        ];
-        $this->bodies[$staleStart] = json_encode(['flowName' => 'Stale', 'payload' => ['trigger' => 'debug']]);
-        $this->bodies[$laterStart] = json_encode(['flowName' => 'Wrong', 'payload' => ['trigger' => 'debug']]);
-        $this->bodies[$scheduledStart] = json_encode(['flowName' => 'Sched', 'payload' => ['trigger' => 'schedule']]);
-        $this->bodies[$unreadableStart] = 'nope';
-        $this->bodies[$key($today, '0-fresh', '000000000000', 'flow-start')] = json_encode(['payload' => ['trigger' => 'debug']]);
-
-        // The cutoff falls between yesterday's sessions and today's: only yesterday's may be stale.
-        $cutoff = $today->setTimezone(new \DateTimeZone('Europe/Madrid'));
-
-        self::assertSame(
-            [['flow_uuid' => 'stale', 'flow_id' => 7, 'flow_name' => 'Stale']],
-            $this->store->staleDebugRuns($cutoff)
-        );
+        self::assertTrue($this->store->isConfigured());
     }
 
-    public function testStaleDebugRunsWithoutAFlowNameOrId(): void
+    public function testPurgeDeletesTheDayFoldersBeforeTheCutoffDaySkippingNewerYearsAndMonths(): void
     {
-        $yesterday = self::day(1);
-        $start = self::dayPrefix($yesterday) . '0-anon/' . self::stamp($yesterday, '100000000000') . '_flow-start_000000.json';
-        $this->listings[self::dayPrefix($yesterday)] = [$start];
-        $this->bodies[$start] = json_encode(['payload' => ['trigger' => 'debug']]);
+        $prefixes = [
+            'base/flow-events/' => ['base/flow-events/2025/', 'base/flow-events/2026/', 'base/flow-events/2027/', 'base/flow-events/junk/'],
+            'base/flow-events/2025/' => ['base/flow-events/2025/12/'],
+            'base/flow-events/2025/12/' => ['base/flow-events/2025/12/31/'],
+            'base/flow-events/2026/' => ['base/flow-events/2026/02/', 'base/flow-events/2026/03/', 'base/flow-events/2026/04/'],
+            'base/flow-events/2026/02/' => ['base/flow-events/2026/02/28/'],
+            'base/flow-events/2026/03/' => ['base/flow-events/2026/03/09/', 'base/flow-events/2026/03/10/', 'base/flow-events/2026/03/11/', 'base/flow-events/2026/03/xx/'],
+        ];
+        $listed = [];
+        $this->client->method('listPrefixes')->willReturnCallback(static function (string $prefix) use ($prefixes, &$listed): array {
+            $listed[] = $prefix;
 
-        self::assertSame(
-            [['flow_uuid' => 'anon', 'flow_id' => null, 'flow_name' => null]],
-            $this->store->staleDebugRuns(self::day(0))
-        );
+            return $prefixes[$prefix] ?? [];
+        });
+        $this->listings = [
+            'base/flow-events/2025/12/31/' => ['k1'],
+            'base/flow-events/2026/02/28/' => ['k2', 'k3'],
+            'base/flow-events/2026/03/09/' => ['k4'],
+            'base/flow-events/2026/03/10/' => ['keep'],
+        ];
+        $deleted = [];
+        $this->client->method('delete')->willReturnCallback(static function (string $key) use (&$deleted): void {
+            $deleted[] = $key;
+        });
+
+        // Cutoff on 2026-03-10 (any time, any zone resolving to that UTC day): that day stays.
+        $count = $this->store->purgeBefore(new \DateTimeImmutable('2026-03-10 22:30:00', new \DateTimeZone('UTC')));
+
+        self::assertSame(4, $count);
+        self::assertSame(['k1', 'k2', 'k3', 'k4'], $deleted);
+        self::assertNotContains('base/flow-events/2027/', $listed);
+        self::assertNotContains('base/flow-events/2026/04/', $listed);
+    }
+
+    public function testPurgeOfAnEmptyStoreDeletesNothing(): void
+    {
+        $this->client->method('listPrefixes')->willReturn([]);
+        $this->client->expects(self::never())->method('delete');
+
+        self::assertSame(0, $this->store->purgeBefore(new \DateTimeImmutable('2026-03-10', new \DateTimeZone('UTC'))));
     }
 }

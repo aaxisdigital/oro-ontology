@@ -25,6 +25,7 @@ class DbUsageType extends AbstractType
         'aaxis_ontology_flow',
         'aaxis_ontology_flow_history',
         'aaxis_ontology_flow_events',
+        'aaxis_ontology_flow_runs',
     ];
 
     public function __construct(private readonly ManagerRegistry $doctrine)

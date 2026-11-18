@@ -32,3 +32,35 @@
         </tbody>
     </table>
 {% endblock %}
+
+{% block aaxis_ontology_flow_runs_index_widget %}
+    <div class="aaxis-config-run-index"
+         data-page-component-module="aaxisontology/js/app/components/flow-runs-index-component">
+        {% if stale_since %}
+            <div class="aaxis-connector-test__line is-fail">
+                <span class="fa fa-exclamation-triangle" aria-hidden="true"></span>
+                <span>{{ 'aaxis.ontology.config.general.flow_runs_index.stale'|trans({'{{ since }}': stale_since|slice(0, 19)}) }}</span>
+            </div>
+        {% else %}
+            <div class="aaxis-connector-test__line is-ok">
+                <span class="fa fa-check-circle" aria-hidden="true"></span>
+                <span>{{ 'aaxis.ontology.config.general.flow_runs_index.in_sync'|trans }}</span>
+            </div>
+        {% endif %}
+        <div class="aaxis-config-run-index__last">
+            {% if last_rebuild %}
+                {{ 'aaxis.ontology.config.general.flow_runs_index.last_rebuild'|trans({
+                    '{{ at }}': last_rebuild.at|slice(0, 19),
+                    '{{ runs }}': last_rebuild.runs,
+                    '{{ storage }}': ('aaxis.ontology.config.general.flow_runs_index.storage_' ~ last_rebuild.storage)|trans
+                }) }}
+            {% else %}
+                {{ 'aaxis.ontology.config.general.flow_runs_index.never_rebuilt'|trans }}
+            {% endif %}
+        </div>
+        <button type="button" class="btn" data-role="flow-runs-rebuild">
+            {{ 'aaxis.ontology.config.general.flow_runs_index.button'|trans }}
+        </button>
+        <div class="aaxis-connector-test" data-role="flow-runs-rebuild-result" hidden></div>
+    </div>
+{% endblock %}

@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Async\Topic;
 
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyDataUpsertTopic;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowEventTopic;
+use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowRunsRebuildTopic;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyHttpRequestTopic;
 use Oro\Component\MessageQueue\Topic\AbstractTopic;
 use PHPUnit\Framework\TestCase;
@@ -67,6 +68,13 @@ class TopicsTest extends TestCase
             ],
             self::resolve(new OntologyHttpRequestTopic(), ['connector_id' => 7, 'method' => 'GET', 'path' => 'x', 'step' => 'S'])
         );
+    }
+
+    public function testTheRunIndexRebuildTopicCarriesNothing(): void
+    {
+        self::assertSame('aaxis_ontology_flow_runs_rebuild', OntologyFlowRunsRebuildTopic::getName());
+        self::assertStringContainsString('run index', OntologyFlowRunsRebuildTopic::getDescription());
+        self::assertSame([], self::resolve(new OntologyFlowRunsRebuildTopic(), []));
     }
 
     public function testTheHttpRequestTopicNeedsTheRequest(): void

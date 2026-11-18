@@ -28,6 +28,11 @@ class Configuration implements ConfigurationInterface
             // bucket under which archives land.
             'bucket_base_path' => ['type' => 'string', 'value' => 'aaxis-ontology'],
             'flow_execution_history_days' => ['type' => 'integer', 'value' => 30],
+            // Run index upkeep (INTERNAL — written only by Manager/FlowRunMaintenance, shown
+            // read-only on the Settings page): when the index first failed to take in an event
+            // ('' = in sync), and the last rebuild as JSON {at, storage, runs, days}.
+            'flow_runs_index_stale_since' => ['type' => 'string', 'value' => ''],
+            'flow_runs_index_last_rebuild' => ['type' => 'string', 'value' => ''],
             'flow_version_history_days' => ['type' => 'integer', 'value' => 365],
             'entity_version_history_days' => ['type' => 'integer', 'value' => 365],
             // Bucket (S3-compatible object storage). The two keys are stored ENCRYPTED by

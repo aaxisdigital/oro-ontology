@@ -7,6 +7,8 @@ namespace Aaxis\Bundle\OntologyBundle\Async;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowEventTopic;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlowEvent;
 use Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Component\MessageQueue\Client\TopicSubscriberInterface;
 use Oro\Component\MessageQueue\Consumption\MessageProcessorInterface;
@@ -19,6 +21,11 @@ use Psr\Log\LoggerInterface;
  * table is append-only log data, no ORM lifecycle needed). Malformed messages are rejected with
  * a log line; insert failures are rejected too and never retried into a poison loop (REJECT, not
  * requeue).
+ *
+ * Every stored event (table OR bucket) is then folded into its run's row of the run index
+ * ({@see FlowRunIndex}) — best effort: the event itself is already stored, so the message is still
+ * ACKed when that fails. The FIRST such failure marks the index out of sync (a read-only status
+ * on the Settings page, whose Rebuild button re-derives it); later ones add nothing.
  */
 class OntologyFlowEventProcessor implements MessageProcessorInterface, TopicSubscriberInterface
 {
@@ -26,6 +33,8 @@ class OntologyFlowEventProcessor implements MessageProcessorInterface, TopicSubs
         private readonly ManagerRegistry $doctrine,
         private readonly LoggerInterface $logger,
         private readonly BucketFlowEventStore $bucketEvents,
+        private readonly FlowRunIndex $runs,
+        private readonly FlowRunMaintenance $maintenance,
     ) {
     }
 
@@ -92,6 +101,7 @@ class OntologyFlowEventProcessor implements MessageProcessorInterface, TopicSubs
         // (independent backends — flipping the toggle migrates nothing either way).
         if ($this->bucketEvents->isEnabled()) {
             $this->bucketEvents->append($flowId, $flowName, $flowUuid, $event, $datetime, $payload);
+            $this->index($flowUuid, $flowId, $flowName, $event, $datetime, $payload, FlowRunIndex::STORAGE_BUCKET);
 
             return;
         }
@@ -101,5 +111,18 @@ class OntologyFlowEventProcessor implements MessageProcessorInterface, TopicSubs
              VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb))',
             [$flowId, $flowUuid, $flowName, $event, $datetime, json_encode($payload)]
         );
+        $this->index($flowUuid, $flowId, $flowName, $event, $datetime, $payload, FlowRunIndex::STORAGE_DB);
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     */
+    private function index(?string $flowUuid, ?int $flowId, ?string $flowName, string $event, string $datetime, array $payload, string $storage): void
+    {
+        try {
+            $this->runs->record($flowUuid, $flowId, $flowName, $event, $datetime, $payload, $storage);
+        } catch (\Throwable $e) {
+            $this->maintenance->markStale($e, $flowUuid);
+        }
     }
 }

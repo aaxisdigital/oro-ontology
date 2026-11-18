@@ -31,13 +31,23 @@ aaxis:
                 title: 'Settings'
                 flow_execution_history_days:
                     label: 'Flow execution history days'
-                    tooltip: 'How many days of flow execution events are kept.'
+                    tooltip: 'How many days of flow execution events are kept (empty or 0 = 30). The Events page lists the runs started within this window, and a daily job (02:15) removes older events and runs from the database and from the bucket.'
                 flow_version_history_days:
                     label: 'Flow version history days'
                     tooltip: 'How many days archived flow versions are kept.'
                 entity_version_history_days:
                     label: 'Entity version history days'
                     tooltip: 'How many days entity data record versions are kept.'
+                flow_runs_index:
+                    label: 'Run index (Events page)'
+                    tooltip: 'The Events page lists runs from a small index kept up to date as flow events are stored. If an event could not be added to it, the index is marked out of sync here; rebuilding re-derives it from the stored events (database, or the bucket while "Use Bucket for Flow Events" is on). The rebuild runs in the background.'
+                    in_sync: 'In sync.'
+                    stale: 'Out of sync since {{ since }} UTC: some flow events could not be added to the run index, so the Events page may miss or misreport runs. Rebuild the index.'
+                    last_rebuild: 'Last rebuild: {{ at }} UTC, {{ runs }} runs ({{ storage }}).'
+                    never_rebuilt: 'Never rebuilt.'
+                    storage_db: 'database'
+                    storage_bucket: 'bucket'
+                    button: 'Rebuild run index'
                 db_usage:
                     label: 'DB Usage'
                     col_table: 'Table'

@@ -45,6 +45,50 @@ class BucketFlowEventStore
     }
 
     /**
+     * Whether a bucket connection is configured at all — the RETENTION purge cleans the bucket's
+     * flow events whenever it can reach them, toggle on or off (a store used before the toggle
+     * was switched off must not keep its old events forever).
+     */
+    public function isConfigured(): bool
+    {
+        return $this->client->isConfigured();
+    }
+
+    /**
+     * Retention: deletes every event object of the UTC DAYS before the cutoff's day (whole day
+     * folders — the date-first layout makes that a walk of year/month/day prefixes, skipping
+     * every year and month that is not older). Returns how many objects were deleted.
+     */
+    public function purgeBefore(\DateTimeImmutable $cutoff): int
+    {
+        $limit = $cutoff->setTimezone(new \DateTimeZone('UTC'))->format(self::DAY_PATH);
+        $root = $this->rootPrefix();
+        $deleted = 0;
+        foreach ($this->client->listPrefixes($root) as $year) {
+            if (substr($year, \strlen($root), 4) > substr($limit, 0, 4)) {
+                continue;
+            }
+            foreach ($this->client->listPrefixes($year) as $month) {
+                if (substr($month, \strlen($root), 7) > substr($limit, 0, 7)) {
+                    continue;
+                }
+                foreach ($this->client->listPrefixes($month) as $day) {
+                    $date = substr($day, \strlen($root), 10);
+                    if (preg_match('#^\d{4}/\d{2}/\d{2}$#', $date) !== 1 || $date >= $limit) {
+                        continue;
+                    }
+                    foreach ($this->client->listKeys($day) as $key) {
+                        $this->client->delete($key);
+                        $deleted++;
+                    }
+                }
+            }
+        }
+
+        return $deleted;
+    }
+
+    /**
      * Stores one event. $datetime is the emitter's micro-precision stamp ('Y-m-d H:i:s.u', UTC);
      * an unparseable one falls back to now so an event can never be dropped over its clock.
      *
@@ -195,72 +239,6 @@ class BucketFlowEventStore
     }
 
     /**
-     * ABANDONED stepwise debug sessions, for the minutely sweep: runs (from today + yesterday —
-     * anything older was already swept on a previous minute) that HAVE a flow-start, have NO
-     * finish/exception, and whose last event predates the cutoff. The debug trigger lives in the
-     * flow-start's PAYLOAD, not the key, so only the few candidates cost a GET each (their
-     * earliest flow-start object) to confirm trigger === "debug". Rows mirror the SQL sweep's
-     * shape so the caller's termination loop is shared.
-     *
-     * @return list<array{flow_uuid: string, flow_id: int|null, flow_name: string|null}>
-     */
-    public function staleDebugRuns(\DateTimeImmutable $cutoff): array
-    {
-        $cutoffStamp = $cutoff->setTimezone(new \DateTimeZone('UTC'))->format('YmdHisu');
-        $runs = [];
-        $day = new \DateTimeImmutable('today', new \DateTimeZone('UTC'));
-        for ($i = 0; $i < 2; $i++, $day = $day->modify(self::PREVIOUS_DAY)) {
-            foreach ($this->parsedKeysOfDay($day) as $parsed) {
-                $this->trackSession($runs, $parsed);
-            }
-        }
-
-        $stale = [];
-        foreach ($runs as $uuid => $run) {
-            if ($run['startKey'] === null || $run['finished'] || $run['maxStamp'] >= $cutoffStamp) {
-                continue;
-            }
-            $start = $this->fetchJson($run['startKey']);
-            if ($start === null || (($start['payload']['trigger'] ?? null) !== 'debug')) {
-                continue;
-            }
-            $stale[] = [
-                'flow_uuid' => (string) $uuid,
-                'flow_id' => $run['flowId'],
-                'flow_name' => \is_string($start['flowName'] ?? null) ? $start['flowName'] : null,
-            ];
-        }
-
-        return $stale;
-    }
-
-    /**
-     * Folds one listed event key into its session's state: latest event, earliest flow-start
-     * (and its key) and whether the run was closed.
-     *
-     * @param array<string, array<string, mixed>>                                       $runs
-     * @param array{flowId: int|null, uuid: string, stamp: string, kind: string, key: string} $parsed
-     */
-    private function trackSession(array &$runs, array $parsed): void
-    {
-        $runs[$parsed['uuid']] ??= ['flowId' => $parsed['flowId'], 'startKey' => null, 'startStamp' => null,
-            'finished' => false, 'maxStamp' => ''];
-        $run = &$runs[$parsed['uuid']];
-        $run['flowId'] ??= $parsed['flowId'];
-        if ($parsed['stamp'] > $run['maxStamp']) {
-            $run['maxStamp'] = $parsed['stamp'];
-        }
-        if ($parsed['kind'] === 'flow-start'
-            && ($run['startStamp'] === null || $parsed['stamp'] < $run['startStamp'])) {
-            $run['startStamp'] = $parsed['stamp'];
-            $run['startKey'] = $parsed['key'];
-        }
-        if (\in_array($parsed['kind'], self::FINISH_KINDS, true)) {
-            $run['finished'] = true;
-        }
-    }
-
-    /**
      * The event keys of one UTC day, parsed (keys of any other shape are skipped).
      *
      * @return list<array{flowId: int|null, uuid: string, stamp: string, kind: string, key: string}>
@@ -282,9 +260,15 @@ class BucketFlowEventStore
 
     private function dayPrefix(string $dayPath): string
     {
+        return $this->rootPrefix() . $dayPath . '/';
+    }
+
+    /** "{base path}/flow-events/" — every event key lives under it. */
+    private function rootPrefix(): string
+    {
         $base = $this->client->basePath();
 
-        return ($base === '' ? '' : $base . '/') . self::ROOT . '/' . $dayPath . '/';
+        return ($base === '' ? '' : $base . '/') . self::ROOT . '/';
     }
 
     private function runPrefix(string $dayPath, ?int $flowId, ?string $uuid): string

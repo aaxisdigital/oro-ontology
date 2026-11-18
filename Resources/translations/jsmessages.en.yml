@@ -144,6 +144,10 @@ aaxis:
             search_next: 'Next match'
             empty: 'No data records found.'
             load_error: 'Could not load the data records.'
+        config:
+            flow_runs_index:
+                queued: 'Rebuild queued — it runs in the background. Reload this page in a moment to see the result above.'
+                queue_failed: 'The rebuild could not be queued. Try again.'
         event_view:
             flow: 'Flow'
             uuid: 'UUID'

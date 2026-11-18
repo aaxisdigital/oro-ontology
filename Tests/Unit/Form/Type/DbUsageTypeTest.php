@@ -20,6 +20,7 @@ class DbUsageTypeTest extends TestCase
         'aaxis_ontology_flow',
         'aaxis_ontology_flow_history',
         'aaxis_ontology_flow_events',
+        'aaxis_ontology_flow_runs',
     ];
 
     /**
@@ -89,7 +90,7 @@ class DbUsageTypeTest extends TestCase
             return $answer;
         });
 
-        self::assertSame(['—', '—', '—', '—', '—'], array_column($usage, 'size'));
+        self::assertSame(['—', '—', '—', '—', '—', '—'], array_column($usage, 'size'));
     }
 
     /**
@@ -108,7 +109,7 @@ class DbUsageTypeTest extends TestCase
     {
         $usage = $this->usage(static fn (string $table) => $table === 'aaxis_ontology_flow' ? null : 1024);
 
-        self::assertSame(['1.0 kb', '1.0 kb', '—', '1.0 kb', '1.0 kb'], array_column($usage, 'size'));
+        self::assertSame(['1.0 kb', '1.0 kb', '—', '1.0 kb', '1.0 kb', '1.0 kb'], array_column($usage, 'size'));
     }
 
     public function testItIsATextFieldWithItsOwnBlockPrefix(): void

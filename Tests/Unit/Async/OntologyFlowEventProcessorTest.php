@@ -7,6 +7,8 @@ namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Async;
 use Aaxis\Bundle\OntologyBundle\Async\OntologyFlowEventProcessor;
 use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyFlowEventTopic;
 use Aaxis\Bundle\OntologyBundle\Manager\BucketFlowEventStore;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowRunIndex;
+use Aaxis\Bundle\OntologyBundle\Manager\FlowRunMaintenance;
 use Doctrine\DBAL\Connection;
 use Doctrine\Persistence\ManagerRegistry;
 use Oro\Component\MessageQueue\Consumption\MessageProcessorInterface;
@@ -21,6 +23,8 @@ class OntologyFlowEventProcessorTest extends TestCase
     private Connection&MockObject $connection;
     private LoggerInterface&MockObject $logger;
     private BucketFlowEventStore&MockObject $bucket;
+    private FlowRunIndex&MockObject $runs;
+    private FlowRunMaintenance&MockObject $maintenance;
     private OntologyFlowEventProcessor $processor;
 
     protected function setUp(): void
@@ -31,7 +35,9 @@ class OntologyFlowEventProcessorTest extends TestCase
         $this->logger = $this->createMock(LoggerInterface::class);
         $this->bucket = $this->createMock(BucketFlowEventStore::class);
         $this->bucket->method('isEnabled')->willReturn(false);
-        $this->processor = new OntologyFlowEventProcessor($doctrine, $this->logger, $this->bucket);
+        $this->runs = $this->createMock(FlowRunIndex::class);
+        $this->maintenance = $this->createMock(FlowRunMaintenance::class);
+        $this->processor = new OntologyFlowEventProcessor($doctrine, $this->logger, $this->bucket, $this->runs, $this->maintenance);
     }
 
     private function process(mixed $body): string
@@ -103,6 +109,44 @@ class OntologyFlowEventProcessorTest extends TestCase
         self::assertSame($expectedRow, $call->args);
     }
 
+    public function testAStoredEventIsFoldedIntoItsRunIndexRow(): void
+    {
+        $this->connection->method('executeStatement')->willReturn(1);
+        $this->runs->expects(self::once())->method('record')->with(
+            'uuid-1',
+            5,
+            'Nightly',
+            'flow-start',
+            '2026-03-04 05:06:07.123456',
+            ['trigger' => 'debug'],
+            FlowRunIndex::STORAGE_DB
+        );
+
+        $this->process([
+            'flow_id' => 5, 'flow_uuid' => 'uuid-1', 'flow_name' => 'Nightly', 'event' => 'flow-start',
+            'datetime' => '2026-03-04 05:06:07.123456', 'payload' => ['trigger' => 'debug'],
+        ]);
+    }
+
+    public function testAnIndexFailureMarksTheIndexOutOfSyncAndTheStoredEventIsStillAcked(): void
+    {
+        $this->connection->method('executeStatement')->willReturn(1);
+        $failure = new \RuntimeException('deadlock');
+        $this->runs->method('record')->willThrowException($failure);
+        $this->maintenance->expects(self::once())->method('markStale')->with($failure, 'uuid-1');
+        $this->logger->expects(self::never())->method('error');
+
+        self::assertSame(MessageProcessorInterface::ACK, $this->process(['event' => 'step', 'flow_uuid' => 'uuid-1']));
+    }
+
+    public function testAnEventThatCouldNotBeStoredIsNotIndexed(): void
+    {
+        $this->connection->method('executeStatement')->willThrowException(new \RuntimeException('down'));
+        $this->runs->expects(self::never())->method('record');
+
+        self::assertSame(MessageProcessorInterface::REJECT, $this->process(['event' => 'step', 'flow_uuid' => 'uuid-1']));
+    }
+
     public function testMissingOrInvalidFieldsBecomeNullsAndDefaults(): void
     {
         $args = null;
@@ -171,9 +215,19 @@ class OntologyFlowEventProcessorTest extends TestCase
             '2026-03-04 05:06:07.000001',
             ['ok' => true]
         );
+        // The run index is a table in BOTH modes: bucket-stored runs are indexed too.
+        $this->runs->expects(self::once())->method('record')->with(
+            'uuid-1',
+            5,
+            'Nightly',
+            'flow-finish',
+            '2026-03-04 05:06:07.000001',
+            ['ok' => true],
+            FlowRunIndex::STORAGE_BUCKET
+        );
         $doctrine = $this->createMock(ManagerRegistry::class);
         $doctrine->expects(self::never())->method('getConnection');
-        $processor = new OntologyFlowEventProcessor($doctrine, $this->logger, $bucket);
+        $processor = new OntologyFlowEventProcessor($doctrine, $this->logger, $bucket, $this->runs, $this->maintenance);
         $message = $this->createMock(MessageInterface::class);
         $message->method('getBody')->willReturn([
             'flow_id' => 5, 'flow_name' => 'Nightly', 'flow_uuid' => 'uuid-1', 'event' => 'flow-finish',
@@ -191,7 +245,7 @@ class OntologyFlowEventProcessorTest extends TestCase
         $bucket->method('append')->willReturnCallback(function (?int $flowId, ?string $flowName, ?string $uuid, string $event, string $datetime, array $payload) use (&$captured): void {
             $captured = [$flowId, $flowName, $uuid, $event, $datetime, $payload];
         });
-        $processor = new OntologyFlowEventProcessor($this->createMock(ManagerRegistry::class), $this->logger, $bucket);
+        $processor = new OntologyFlowEventProcessor($this->createMock(ManagerRegistry::class), $this->logger, $bucket, $this->runs, $this->maintenance);
         $message = $this->createMock(MessageInterface::class);
         $message->method('getBody')->willReturn(['event' => 'step', 'flow_id' => 'x', 'payload' => 5]);
 
@@ -208,7 +262,7 @@ class OntologyFlowEventProcessorTest extends TestCase
         $bucket->method('isEnabled')->willReturn(true);
         $bucket->method('append')->willThrowException(new \RuntimeException('bucket down'));
         $this->logger->expects(self::once())->method('error');
-        $processor = new OntologyFlowEventProcessor($this->createMock(ManagerRegistry::class), $this->logger, $bucket);
+        $processor = new OntologyFlowEventProcessor($this->createMock(ManagerRegistry::class), $this->logger, $bucket, $this->runs, $this->maintenance);
         $message = $this->createMock(MessageInterface::class);
         $message->method('getBody')->willReturn(['event' => 'step']);
 

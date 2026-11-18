@@ -50,10 +50,16 @@ class OntologyEventComponent extends BaseComponent {
     private $el!: any;
     private grid!: DataGrid;
     private uuidFilterApplied!: boolean;
+    /** Every run shown, by uuid — Refresh merges the changed ones in. */
+    private runs!: Map<string, FlowRunRecord>;
+    /** The server's cursor from the last answer: Refresh asks only for runs changed after it. */
+    private cursor!: string | null;
 
     initialize(options: OntologyEventOptions): void {
         this.$el = options._sourceElement;
         this.uuidFilterApplied = false;
+        this.runs = new Map();
+        this.cursor = null;
 
         const actions: GridAction[] = [
             {
@@ -132,12 +138,28 @@ class OntologyEventComponent extends BaseComponent {
         }
     }
 
+    /**
+     * The first load fetches every run of the history window; later ones (Refresh) send the
+     * previous answer's cursor and receive only the runs created or changed since, merged into
+     * the rows already shown — new runs appear, running ones update, nothing is re-sent.
+     */
     private load(): void {
         this.setBusy(true);
-        fetch(routing.generate('aaxis_ontology_event_list'), {credentials: 'same-origin'})
+        const params = this.cursor !== null ? {since: this.cursor} : {};
+        fetch(routing.generate('aaxis_ontology_event_list', params), {credentials: 'same-origin'})
             .then(r => r.json())
-            .then((data: {records: FlowRunRecord[]}) => {
-                this.grid.setRows(data.records || []);
+            .then((data: {records?: FlowRunRecord[]; cursor?: string; incremental?: boolean}) => {
+                if (!data.incremental) {
+                    this.runs.clear();
+                }
+                (data.records || []).forEach(run => {
+                    if (run.flowUuid) {
+                        this.runs.set(run.flowUuid, run);
+                    }
+                });
+                this.cursor = data.cursor ?? null;
+                this.grid.setRows(Array.from(this.runs.values())
+                    .sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || ''))));
                 this.applyUuidFromUrl();
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.event_view.load_error')))
