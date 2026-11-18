@@ -352,7 +352,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
         const editor = createEditor({flow: simpleFlow()});
 
         contextMenu(tile('shape'));
-        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_flow_in'), MENU('menu_flow_out')]);
+        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_copy'), MENU('menu_flow_in'), MENU('menu_flow_out')]);
         expect(selectedNames()).toEqual(['shape']);
         clickMenu(MENU('menu_remove'));
 
@@ -365,7 +365,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
         const editor = createEditor({flow: flowRecord(1, 'F', [st('c', 'choice', 'pick', 200, 200, {expression: 'x'})])});
 
         contextMenu(tile('pick'));
-        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_start_here'), MENU('menu_flow_in'), MENU('menu_flow_true'), MENU('menu_flow_false')]);
+        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_copy'), MENU('menu_start_here'), MENU('menu_flow_in'), MENU('menu_flow_true'), MENU('menu_flow_false')]);
         expect(submenu(MENU('menu_flow_in'))).toEqual([
             {label: MENU('side_north'), disabled: false, active: false},
             {label: MENU('side_south'), disabled: true, active: false},
@@ -387,7 +387,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
         const editor = createEditor({flow: simpleFlow()});
 
         contextMenu(tile('nightly'));
-        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_flow_out')]);
+        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_copy'), MENU('menu_flow_out')]);
         expect(submenu(MENU('menu_flow_out')).every(c => !c.disabled)).toBe(true);
         clickSubmenu(MENU('menu_flow_out'), MENU('side_north'));
         expect(designOf(editor).steps[0].outSides).toEqual(['north']);
@@ -459,7 +459,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
         marquee(-10, -10, 900, 300);
 
         contextMenu(tile('a'));
-        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_align'), MENU('menu_connect')]);
+        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_copy'), MENU('menu_align'), MENU('menu_connect')]);
         clickMenu(MENU('menu_connect'));
 
         expect(linksOf(editor)).toEqual(['b:0->a', 'a:0->c']);
@@ -475,7 +475,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
 
         contextMenu(tile('a'));
 
-        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_align')]);
+        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_copy'), MENU('menu_align')]);
     });
 
     it('hides Connect when a later element carries the start marker', () => {
@@ -485,7 +485,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
 
         contextMenu(tile('a'));
 
-        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_align')]);
+        expect(menuLabels()).toEqual([MENU('menu_remove'), MENU('menu_copy'), MENU('menu_align')]);
     });
 
     it('re-targets the selection to a right-clicked tile outside it', () => {

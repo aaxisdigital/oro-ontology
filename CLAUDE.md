@@ -961,8 +961,8 @@ Other types configure only the name so far. **Selection**: click selects a tile,
 rubber-bands a multi-selection (macOS style, blue ring = selected), any outside click clears it;
 dragging a tile that belongs to a multi-selection moves the WHOLE selection (relative offsets
 preserved — the leader is clamped so the entire group stays on the canvas).
-**Right-click** on a tile opens a context menu: Remove (deletes the selection + its links); with a
-multi-selection also Align (DIRECTION-AWARE since the anchor-sides feature: each linked child is
+**Right-click** on a tile opens a context menu: Remove (deletes the selection + its links), Copy
+(see COPY / PASTE below); with a multi-selection also Align (DIRECTION-AWARE since the anchor-sides feature: each linked child is
 placed one tile-gap from its parent ALONG the parent's flow-out side for that link — east=right,
 south=below, … — so a green-east/red-south choice lays out as an L and all-default flows
 reproduce the old left-to-right row; chains walk BFS from their heads (heads by X, cycle fallback
@@ -972,7 +972,27 @@ sliding east past occupied cells, and an occupied target keeps advancing along I
 west/north walk would ping-pong forever and overlap; so a link-free
 selection degrades to the old X ordering) and — only when every element after the first receives
 no line, none after the first is a trigger and none except the last is a Choice — Connect (chains
-the selection in sequence, port 0 re-wired if used). Right-clicking a flow LINE offers Remove for
+the selection in sequence, port 0 re-wired if used). **COPY / PASTE** (2026-11-18, `widgets/flow-clipboard.ts` — pure helpers, the component only
+places tiles). Copy writes the selection to the SYSTEM clipboard as JSON:
+`{format: 'aaxis-ontology-flow-steps', version: 1, steps, links}`. Steps carry positions relative
+to the selection's top-left, deep-copied configs, anchor sides and `invalid`. Only links with
+BOTH ends selected travel. So copies move between tabs, flows and browser windows.
+Right-clicking the BARE canvas (`e.target === canvas()`; tiles and wires keep their own menus)
+offers Paste: `navigator.clipboard.readText()` → `parseClipboardDoc()`. That validation is
+STRICT, mirroring restoreFromDesign plus ≤1 trigger. Anything else opens a popup
+(`messageDialog`, `paste_invalid`); an unreadable clipboard (permission denied / no async API)
+opens `paste_unreadable`. Pasted elements:
+- land with their top-left at the click point, get fresh ids and their inner links remapped, and
+  end up SELECTED;
+- keep their names while free; a taken name becomes `name (copy)`, then `(copy 2)`, … trimmed to
+  64 characters (`pastedName`);
+- a TRIGGER is ALWAYS suffixed, because the flow is named after its trigger. Its candidates are
+  also checked against the catalog's other flow names.
+
+The canvas holds ONE trigger, so a copied trigger is LEFT OUT (warning flash) when one exists.
+A pasted trigger clears the "Start here" marker (restoreFromDesign rejects start + trigger).
+Pasted tiles do not avoid overlapping existing ones.
+Right-clicking a flow LINE offers Remove for
 that single connection (each wire ships an invisible 12px-wide hit twin — the only pointer-enabled
 part of the SVG layer — and highlights on hover). **Wire routing**: links are orthogonal polylines
 found by A* over the dot grid (cell = spacing, tiles inflated by one clearance cell are obstacles,

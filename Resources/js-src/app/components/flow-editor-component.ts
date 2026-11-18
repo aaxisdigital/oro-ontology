@@ -9,6 +9,7 @@ import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import createDwlField from '../widgets/dwl-field';
 import {apiFetch, formatDateTime} from './component-support';
 import {highlightJson, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
+import {buildClipboardDoc, ClipboardDoc, parseClipboardDoc, pastedName, readClipboard, writeClipboard} from '../widgets/flow-clipboard';
 
 interface FlowStep {
     type: string;
@@ -931,6 +932,20 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (step) {
                 this.openContextMenu(e.originalEvent as PointerEvent, step);
             }
+        });
+        // Right-click on EMPTY canvas (tiles and wires have their own menus): Paste, landing the
+        // copied group's top-left corner where the menu was opened.
+        this.$el.on('contextmenu.aaxisFlowEditor', '[data-role="canvas"]', (e: any) => {
+            if (e.target !== this.canvas()) {
+                return;
+            }
+            e.preventDefault();
+            const ev = e.originalEvent as PointerEvent;
+            const bounds = this.canvas().getBoundingClientRect();
+            const at = {x: ev.clientX - bounds.left, y: ev.clientY - bounds.top};
+            this.showMenuAt(ev, addItem => {
+                addItem(__('aaxis.ontology.flow_editor.menu_paste'), 'fa-clipboard', () => this.pasteFromClipboard(at));
+            });
         });
         this.$el.on('contextmenu.aaxisFlowEditor', '[data-role="start-group"]', (e: any) => {
             e.preventDefault();
@@ -4588,6 +4603,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         this.showMenuAt(e, (addItem, addSubmenu) => {
             addItem(__('aaxis.ontology.flow_editor.menu_remove'), 'fa-trash-o', () => this.removeSelection());
+            addItem(__('aaxis.ontology.flow_editor.menu_copy'), 'fa-files-o', () => this.copySelection());
             this.addSelectionMenuItems(step, ordered, addItem);
             if (ordered.length !== 1) {
                 return;
@@ -4723,6 +4739,104 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private removeSelection(): void {
         this.orderedSelection().forEach(step => this.removeStep(step));
         this.clearSelection();
+    }
+
+    // --- Copy / paste (system clipboard, see widgets/flow-clipboard) ---------------------------
+
+    /** "Copy": the selection (and the links between its elements) as JSON on the clipboard. */
+    private copySelection(): void {
+        const steps = this.orderedSelection();
+        if (!steps.length) {
+            return;
+        }
+        const text = JSON.stringify(buildClipboardDoc(steps, this.links), null, 2);
+        void writeClipboard(text).then(copied => {
+            if (copied) {
+                messenger.notificationFlashMessage('success', __('aaxis.ontology.flow_editor.copy_done', {count: steps.length}));
+            } else {
+                messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.copy_failed'));
+            }
+        });
+    }
+
+    /** "Paste": reads the clipboard; anything but a flow-elements copy gets an explanatory popup. */
+    private pasteFromClipboard(at: {x: number; y: number}): void {
+        void readClipboard().then(text => {
+            if (text === null) {
+                this.messageDialog(__('aaxis.ontology.flow_editor.menu_paste'), __('aaxis.ontology.flow_editor.paste_unreadable'));
+                return;
+            }
+            const doc = parseClipboardDoc(text, {
+                known: type => Boolean(this.stepMeta[type]),
+                trigger: type => this.stepMeta[type]?.category === 'trigger',
+                ports: portCount
+            });
+            if (doc === null) {
+                this.messageDialog(__('aaxis.ontology.flow_editor.menu_paste'), __('aaxis.ontology.flow_editor.paste_invalid'));
+                return;
+            }
+            this.pasteSteps(doc, at);
+        });
+    }
+
+    /**
+     * Places a parsed copy with its top-left corner at `at`: fresh ids, the copied links between
+     * the pasted elements, names made unique ({@see pastedName}). The canvas holds ONE trigger,
+     * so a copied trigger is left out (with a warning) when this canvas already has one. A pasted
+     * trigger replaces the sub-flow "Start here" marker, which exists only while there is none.
+     * The pasted group ends up selected, ready to be dragged into place.
+     */
+    private pasteSteps(doc: ClipboardDoc, at: {x: number; y: number}): void {
+        const isTrigger = (type: string): boolean => this.stepMeta[type].category === 'trigger';
+        const skipTrigger = this.findTrigger() !== null && doc.steps.some(s => isTrigger(s.type));
+        const steps = skipTrigger ? doc.steps.filter(s => !isTrigger(s.type)) : doc.steps;
+        if (skipTrigger) {
+            messenger.notificationFlashMessage('warning', __('aaxis.ontology.flow_editor.paste_trigger_skipped'));
+        }
+        if (!steps.length) {
+            return;
+        }
+
+        const taken = new Set(this.steps.map(s => s.name.toLowerCase()));
+        // The flow is named after its trigger, so a pasted trigger must not take another flow's name.
+        const selfId = Number((this.flow as any)?.id || 0);
+        const flowNames = (this.catalogFlowRecords || [])
+            .filter(f => f.id !== selfId && f.name)
+            .map(f => String(f.name).toLowerCase());
+        const ids: Record<string, string> = {};
+        const pasted = steps.map(source => {
+            const trigger = isTrigger(source.type);
+            const name = pastedName(source.name, trigger, trigger ? new Set([...taken, ...flowNames]) : taken);
+            taken.add(name.toLowerCase());
+            const config = source.config ? JSON.parse(JSON.stringify(source.config)) : null;
+            const step = this.addStep(source.type, at.x + source.x, at.y + source.y, name, undefined, config, this.sanitizeAnchors(source));
+            ids[source.id] = step.id;
+            if (source.invalid) {
+                this.markStepInvalid(step, true);
+            }
+            return step;
+        });
+        doc.links
+            .filter(l => ids[l.from] && ids[l.to])
+            .forEach(l => this.links.push({from: ids[l.from], fromPort: l.fromPort, to: ids[l.to]}));
+        if (this.findTrigger()) {
+            this.startId = null;
+        }
+        this.redrawLinks();
+        this.select(pasted);
+        this.syncDirty();
+    }
+
+    /** A one-message popup with a single OK button (e.g. an unusable clipboard on Paste). */
+    private messageDialog(title: string, message: string): void {
+        const dialog = new Dialog({title, width: '460px'});
+        const $content = dialog.open();
+        const $ok = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.ok')});
+        $ok.on('click', () => dialog.close());
+        $content.append($('<div/>', {'class': 'aaxis-ontology-confirm'}).append(
+            $('<p/>', {'class': 'aaxis-ontology-confirm__q', text: message}),
+            $('<div/>', {'class': 'aaxis-ontology-confirm__actions'}).append($ok)
+        ));
     }
 
     /**
