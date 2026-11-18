@@ -838,3 +838,111 @@ describe('OntologyFlowEditorComponent — destination pre-filled from the name',
         expect($('[data-role="destination"]').length).toBe(0);
     });
 });
+
+describe('OntologyFlowEditorComponent — HTTP Request layout and the connector combobox', () => {
+    useFlowEditorEnv(FlowEditorComponent);
+
+    const rowLabels = (): string[][] => $('.aaxis-flow-editor__settings .aaxis-flow-editor__settings-row').map((_i: number, row: HTMLElement) =>
+        [$(row).children('.aaxis-flow-editor__settings-col').map((_j: number, col: HTMLElement) => $(col).children('label').first().text()).get()]
+    ).get();
+
+    async function openWith(step: any, options: Record<string, any> = {}): Promise<any> {
+        const editor = createEditor({flow: flowRecord(1, 'F', [st('t', 'cron', 'tick', 0, 0, {enabled: true}), step]), ...options});
+        await flush();
+        openSettings(step.name);
+        await flush();
+        return editor;
+    }
+
+    const $filter = (): any => $('[data-role="connector-filter"]');
+    const listed = (): string[] => $('[data-role="connector-list"] .aaxis-flow-editor__combo-option').map((_i: number, el: HTMLElement) => el.textContent).get();
+
+    it('lays the HTTP Request out as Name | Connector, Operation | Body | Destination | Async, then Path', async () => {
+        mockFetch();
+        await openWith(st('h', 'invoke', 'call', 300, 0, {connector: '1'}));
+
+        expect(rowLabels().slice(0, 3)).toEqual([
+            [KEY('step_name_label'), KEY('connector_label')],
+            [KEY('operation_label'), KEY('body_label'), KEY('destination_label'), KEY('http_async_label')],
+            [KEY('path_label')]
+        ]);
+        const grows = $('.aaxis-flow-editor__settings-row').eq(1).children().map((_i: number, el: HTMLElement) => el.style.flex).get();
+        expect(grows.map((g: string) => Number.parseFloat(g))).toEqual([2.5, 2.5, 4, 1]);
+    });
+
+    it('shows the picked connector, filters by what is typed and picks with a click', async () => {
+        mockFetch();
+        const editor = await openWith(st('f', 'file_list', 'files', 300, 0, {connector: '3', path: '/'}));
+        expect($filter().val()).toBe('files (file_system · erp)');
+        expect($filter().attr('placeholder')).toBe(KEY('connector_filter_placeholder'));
+
+        $filter().trigger('focus');
+        expect(listed()).toEqual(['files (file_system · erp)', 'box (sftp)']); // the shown pick is no filter
+        $filter().val('BO').trigger('input');
+        expect(listed()).toEqual(['box (sftp)']);
+        $('[data-role="connector-list"] [data-value="4"]')[0].dispatchEvent(new MouseEvent('pointerdown', {bubbles: true, cancelable: true}));
+
+        expect(field('connector_label').val()).toBe('4');
+        expect($filter().val()).toBe('box (sftp)');
+        confirmSettings();
+        expect(configOf(editor, 'files').connector).toBe('4');
+    });
+
+    it('takes the first match on Enter, says when nothing matches, and restores the pick on blur', async () => {
+        vi.useFakeTimers();
+        mockFetch();
+        await openWith(st('f', 'file_list', 'files', 300, 0, {connector: '3', path: '/'}));
+
+        $filter().trigger('focus').val('zzz').trigger('input');
+        expect($('[data-role="connector-list"] .aaxis-flow-editor__combo-empty').text()).toBe(KEY('combo_no_match'));
+        $filter().trigger('blur');
+        vi.advanceTimersByTime(200);
+        expect($filter().val()).toBe('files (file_system · erp)');
+
+        $filter().trigger('focus').val('box').trigger('input');
+        $filter().trigger($.Event('keydown', {key: 'Enter'}));
+        expect(field('connector_label').val()).toBe('4');
+        vi.useRealTimers();
+    });
+
+    it('offers "Add new connector…" only when the user may create one', async () => {
+        mockFetch();
+        await openWith(st('h', 'invoke', 'call', 300, 0, {connector: '1'}));
+        $filter().trigger('focus');
+
+        expect($('[data-role="connector-add"]')).toHaveLength(0);
+    });
+
+    it('opens the create page in a new tab and, back here, picks the one new connector', async () => {
+        const spy = mockFetch();
+        const open = vi.spyOn(window, 'open').mockReturnValue(null);
+        await openWith(st('h', 'invoke', 'call', 300, 0, {connector: '1'}), {connectorCreateUrl: '/connectors/create'});
+        $filter().trigger('focus');
+        expect($('[data-role="connector-add"]').text()).toBe(KEY('connector_add'));
+
+        $('[data-role="connector-add"]')[0].dispatchEvent(new MouseEvent('pointerdown', {bubbles: true, cancelable: true}));
+        expect(open).toHaveBeenCalledWith('/connectors/create', '_blank');
+        expect(field('connector_label').val()).toBe('1'); // nothing picked by the action itself
+
+        routes.aaxis_ontology_connector_list = {body: {records: [...CONNECTOR_CATALOG.records, {id: 9, name: 'brand-new', type: 'rest_api'}]}};
+        window.dispatchEvent(new Event('focus'));
+        await flush();
+
+        expect(spy.mock.calls.filter((c: any[]) => String(c[0]).startsWith('/aaxis_ontology_connector_list'))).toHaveLength(2);
+        expect(field('connector_label').val()).toBe('9');
+        expect($filter().val()).toBe('brand-new (rest_api)');
+    });
+
+    it('keeps the current pick when coming back finds no single new connector', async () => {
+        mockFetch();
+        vi.spyOn(window, 'open').mockReturnValue(null);
+        await openWith(st('h', 'invoke', 'call', 300, 0, {connector: '1'}), {connectorCreateUrl: '/connectors/create'});
+        $filter().trigger('focus');
+        $('[data-role="connector-add"]')[0].dispatchEvent(new MouseEvent('pointerdown', {bubbles: true, cancelable: true}));
+
+        window.dispatchEvent(new Event('focus'));
+        await flush();
+
+        expect(field('connector_label').val()).toBe('1');
+    });
+});

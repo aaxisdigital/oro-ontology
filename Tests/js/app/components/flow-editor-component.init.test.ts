@@ -38,7 +38,7 @@ describe('OntologyFlowEditorComponent — loading a flow', () => {
         expect($root.find('[data-role="run-split"]').prop('hidden')).toBe(false);
         expect($root.find('[data-role="debug"]').prop('disabled')).toBe(false);
         expect($root.find('[data-role="flow-history"]').prop('disabled')).toBe(false);
-        expect($root.find('[data-role="organize"]').prop('hidden')).toBe(false);
+        expect($root.find('[data-role="organize"]').prop('disabled')).toBe(false);
         expect($root.find('[data-role="canvas"]')[0].style.getPropertyValue('--aaxis-flow-grid')).toBe('10px');
     });
 
@@ -78,7 +78,7 @@ describe('OntologyFlowEditorComponent — loading a flow', () => {
         expect(tileNames()).toEqual([]);
         expect(tabTitles()).toEqual(['aaxis.ontology.flow_editor.name_unset']);
         expect(root(editor).find('[data-role="run-split"]').prop('hidden')).toBe(true);
-        expect(root(editor).find('[data-role="organize"]').prop('hidden')).toBe(true);
+        expect(root(editor).find('[data-role="organize"]').prop('disabled')).toBe(true); // nothing to lay out
         expect(root(editor).find('[data-role="flow-history"]').prop('disabled')).toBe(true);
     });
 
@@ -200,6 +200,38 @@ describe('OntologyFlowEditorComponent — loading a flow', () => {
         $toggle.trigger('click');
         document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
         expect($menu.prop('hidden')).toBe(true);
+    });
+
+    it('opens Organize from the caret next to the toolbox toggle, one split menu at a time', () => {
+        const editor = createEditor({flow: simpleFlow()});
+        const $root = root(editor);
+        const $toolboxMenu = $root.find('[data-role="toolbox-menu"]');
+        const $runMenu = $root.find('[data-role="run-menu"]');
+
+        $root.find('[data-role="toolbox-menu-toggle"]').trigger('click');
+        expect([$toolboxMenu.prop('hidden'), $root.find('[data-role="toolbox-menu-toggle"]').attr('aria-expanded')]).toEqual([false, 'true']);
+        $root.find('[data-role="run-menu-toggle"]').trigger('click');
+        expect([$toolboxMenu.prop('hidden'), $runMenu.prop('hidden')]).toEqual([true, false]);
+
+        $root.find('[data-role="toolbox-menu-toggle"]').trigger('click');
+        $root.find('[data-role="organize"]').trigger('click');
+        expect($toolboxMenu.prop('hidden')).toBe(true);
+        $root.find('[data-role="toolbox-menu-toggle"]').trigger('click');
+        $root.find('[data-role="toolbox-menu-toggle"]').trigger('click');
+        expect($toolboxMenu.prop('hidden')).toBe(true);
+    });
+
+    it('keeps an open toolbox menu closable when running gets blocked meanwhile', () => {
+        const editor = createEditor({flow: simpleFlow()});
+        const $root = root(editor);
+        const $toolboxMenu = $root.find('[data-role="toolbox-menu"]');
+        $root.find('[data-role="toolbox-menu-toggle"]').trigger('click');
+
+        editor.markStepInvalid(editor.steps.find((s: any) => s.name === 'shape'), true); // closes the RUN menu
+
+        expect($toolboxMenu.prop('hidden')).toBe(false);
+        document.body.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));
+        expect($toolboxMenu.prop('hidden')).toBe(true);
     });
 
     it('keeps the run buttons\' own titles unless red steps block them', () => {

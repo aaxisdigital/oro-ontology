@@ -32,8 +32,8 @@ interface FlowRecord {
  *
  * Each editable row carries a checkbox at the start of its Name cell (inside the cell rather than
  * as a column of its own: the grid appends columns unknown to a SAVED layout at the end, and the
- * box belongs first). "Open all" opens every checked flow together in one editor, a tab each, in
- * the order they were checked.
+ * box belongs first). "Open" opens the checked flows together in one editor, a tab each, in the
+ * order they were checked ("Open (N)" when several are).
  */
 class OntologyFlowComponent extends BaseComponent {
     private $el!: any;
@@ -166,10 +166,13 @@ class OntologyFlowComponent extends BaseComponent {
         );
     }
 
-    /** "Open all" is available while at least one flow is checked, and counts them. */
+    /** "Open" is available while at least one flow is checked; several read "Open (N)". */
     private syncOpenSelected(): void {
-        this.$el.find('[data-role="open-selected"]').prop('disabled', this.picked.length === 0);
-        this.$el.find('[data-role="open-selected-count"]').text(this.picked.length ? `(${this.picked.length})` : '');
+        const count = this.picked.length;
+        this.$el.find('[data-role="open-selected"]').prop('disabled', count === 0);
+        this.$el.find('[data-role="open-selected-label"]').text(count > 1
+            ? __('aaxis.ontology.flow_view.open_count', {count: String(count)})
+            : __('aaxis.ontology.flow_view.open_button'));
     }
 
     /**
@@ -304,7 +307,7 @@ class OntologyFlowComponent extends BaseComponent {
         );
 
         const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
-        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.dialog_cancel')});
         const $submit = $('<button/>', {
             type: 'button', 'class': 'btn btn-primary', disabled: true,
             text: __('aaxis.ontology.flow_view.import_button')

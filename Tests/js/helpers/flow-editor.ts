@@ -76,16 +76,24 @@ export const PALETTE: Array<[string, Array<[string, string, string]>]> = [
 export function editorDom(): any {
     const button = (role: string, extra = ''): string =>
         `<button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action" data-role="${role}" title="${role}"${extra}><span class="fa fa-x"></span></button>`;
-    // Run Now as a split button: the caret opens a menu holding Debug (debug-step).
+    // Two split controls: the toolbox toggle (Organize in its caret menu) and Run Now (Debug).
+    const toolboxSplit = `
+        <div class="aaxis-flow-editor__split" data-role="toolbox-split">
+            ${button('toolbox-toggle')}
+            <button type="button" class="aaxis-flow-editor__tab" data-role="toolbox-menu-toggle" aria-expanded="false" title="toolbox-options"></button>
+            <div class="aaxis-flow-editor__menu" data-role="toolbox-menu" hidden>
+                <button type="button" class="aaxis-flow-editor__menu-item" data-role="organize" title="organize" disabled>organize</button>
+            </div>
+        </div>`;
     const runSplit = `
-        <div class="aaxis-flow-editor__run" data-role="run-split" hidden>
+        <div class="aaxis-flow-editor__split" data-role="run-split" hidden>
             ${button('debug')}
             <button type="button" class="aaxis-flow-editor__tab" data-role="run-menu-toggle" aria-expanded="false" title="run-options"></button>
             <div class="aaxis-flow-editor__menu" data-role="run-menu" hidden>
                 <button type="button" class="aaxis-flow-editor__menu-item" data-role="debug-step" title="debug-step">debug-step</button>
             </div>
         </div>`;
-    const canvasActions = [button('toolbox-toggle'), runSplit, button('organize', ' hidden')].join('');
+    const canvasActions = [toolboxSplit, runSplit].join('');
     const documentActions = [
         button('tab-add'), button('tab-open'), button('save', ' disabled'), button('save-all', ' disabled'),
         button('view-source'), button('flow-history', ' disabled'), button('tab-close-all')

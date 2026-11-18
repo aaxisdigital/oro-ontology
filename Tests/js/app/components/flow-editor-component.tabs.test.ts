@@ -61,8 +61,12 @@ describe('OntologyFlowEditorComponent — tabs', () => {
 
     it('keeps a stashed tab\'s unsaved changes and marks it dirty', () => {
         const editor = createEditor({flow: simpleFlow()});
+        expect(tab(0).attr('title')).toBeUndefined();
         dropFromToolbox('logger', 540, 440);
         expect(dirtyTabs()).toEqual([0]);
+        // A drawn dot (no glyph text), the tab saying it in words.
+        expect(tab(0).find('.aaxis-flow-editor__tab-dirty').text()).toBe('');
+        expect(tab(0).attr('title')).toBe(KEY('tab_unsaved'));
 
         root(editor).find('[data-role="tab-add"]').trigger('click');
         expect(dirtyTabs()).toEqual([0]);
@@ -83,6 +87,8 @@ describe('OntologyFlowEditorComponent — tabs', () => {
 
         tab(1).find('[data-role="tab-close"]').trigger('click');
         expect(FlowDialog.last().options.title).toBe(KEY('tab_close_title'));
+        // Cancel reads "Cancel" — not the settings popup's "Discard", which read as the action.
+        expect(FlowDialog.last().$content.find('.btn').not('.btn-primary').text()).toBe(KEY('dialog_cancel'));
         FlowDialog.last().$content.find('.btn').not('.btn-primary').trigger('click');
         expect(tabTitles()).toEqual(['nightly', 'schedule-1']);
 

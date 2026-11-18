@@ -489,6 +489,8 @@ interface FlowEditorOptions {
     gridSpacing?: number;
     stepSizeFactor?: number;
     listUrl?: string;
+    /** The connector create page — offered as "Add new connector…" in the connector pickers (null = not allowed). */
+    connectorCreateUrl?: string | null;
 }
 
 interface StepMeta {
@@ -507,6 +509,10 @@ interface PlacedStep extends FlowStep {
     /** Which side each output port leaves from (defaults: port 0 east; choice port 1 south). */
     outSides?: AnchorSide[];
 }
+
+/** The tab bar's split controls with a caret menu. */
+type SplitMenu = 'toolbox' | 'run';
+const SPLIT_MENUS: SplitMenu[] = ['toolbox', 'run'];
 
 /**
  * Flow editor page: a tab bar (one tab per open flow; every editor action as an icon at its
@@ -536,6 +542,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private $el!: any;
     private flow!: FlowRecord | null;
     private listUrl!: string;
+    private connectorCreateUrl!: string | null;
     private spacing!: number;
     private tileSize!: number;
     private stepMeta!: Record<string, StepMeta>;
@@ -557,6 +564,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     /** A single-tab Save is in flight (keeps its button disabled across re-syncs). */
     private saving!: boolean;
     private dirtyChecker!: () => boolean;
+    /** Where the pointer last was over the canvas (plane coordinates) — a keyboard paste lands there. */
+    private lastCanvasPoint!: {x: number; y: number} | null;
     private onOpenLinkBefore!: (e: any) => void;
     private onBeforeRefresh!: (queue: any[]) => void;
     // Sub-flow entry marker: the id of the step the flow "starts at" when there is no trigger,
@@ -655,6 +664,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.$el = options._sourceElement;
         this.flow = options.flow || null;
         this.listUrl = options.listUrl || routing.generate('aaxis_ontology_flows');
+        this.connectorCreateUrl = options.connectorCreateUrl || null;
         this.stepMeta = {};
         this.catalogEntities = null;
         this.catalogConnectors = null;
@@ -723,6 +733,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.debugVisiting = false;
         this.catalogFlowRecords = null;
         this.dirtyChecker = () => this.anyTabDirty();
+        this.lastCanvasPoint = null;
         pageStateChecker.registerChecker(this.dirtyChecker);
         $(window).on('beforeunload.aaxisFlowEditor', (e: any) => {
             if (this.anyTabDirty()) {
@@ -842,6 +853,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="organize"]', (e: any) => {
             e.preventDefault();
+            this.closeSplitMenu();
             this.closeContextMenu();
             this.clearSelection();
             this.organizeSteps();
@@ -849,24 +861,25 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
-            this.closeRunMenu();
+            this.closeSplitMenu();
             // Run Now: the whole flow in one request; the sidebar shows the result at the end.
             this.collectDebugInput(input => this.startDebugSession('run', input));
         });
-        // The caret next to Run Now opens its sub-options (Debug).
-        this.$el.on('click.aaxisFlowEditor', '[data-role="run-menu-toggle"]', (e: any) => {
+        // The carets next to the toolbox toggle and Run Now open their sub-options (Organize, Debug).
+        this.$el.on('click.aaxisFlowEditor', '[data-role="toolbox-menu-toggle"], [data-role="run-menu-toggle"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
-            if (this.$el.find('[data-role="run-menu"]').prop('hidden')) {
-                this.openRunMenu();
+            const name: SplitMenu = $(e.currentTarget).data('role') === 'run-menu-toggle' ? 'run' : 'toolbox';
+            if (this.$el.find(`[data-role="${name}-menu"]`).prop('hidden')) {
+                this.openSplitMenu(name);
             } else {
-                this.closeRunMenu();
+                this.closeSplitMenu(name);
             }
         });
         this.$el.on('click.aaxisFlowEditor', '[data-role="debug-step"]', (e: any) => {
             e.preventDefault();
             this.closeContextMenu();
-            this.closeRunMenu();
+            this.closeSplitMenu();
             // Debug: step-by-step in the sidebar — variables, stepper buttons, DWL evaluator.
             this.collectDebugInput(input => this.startDebugSession('step', input));
         });
@@ -955,6 +968,33 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.showMenuAt(ev, addItem => {
                 addItem(__('aaxis.ontology.flow_editor.menu_paste'), 'fa-clipboard', () => this.pasteFromClipboard(at));
             });
+        });
+        // KEYBOARD copy / paste (Cmd/Ctrl+C, Cmd/Ctrl+V) of flow elements. The browser's native
+        // clipboard events carry the text WITHOUT the async Clipboard API's permission prompt —
+        // the menu's Paste depends on that permission, which a browser may refuse. Text fields,
+        // selected text and open popups keep the browser's own copy/paste.
+        this.$el.on('pointermove.aaxisFlowEditor', '[data-role="canvas-viewport"]', (e: any) => {
+            const bounds = this.canvas().getBoundingClientRect();
+            this.lastCanvasPoint = {x: e.originalEvent.clientX - bounds.left, y: e.originalEvent.clientY - bounds.top};
+        });
+        $(document).on('copy.aaxisFlowClipboard', (e: any) => {
+            const event = (e.originalEvent || e) as ClipboardEvent;
+            const steps = this.orderedSelection();
+            if (!steps.length || !event.clipboardData || !this.ownsClipboardEvent(event)
+                || (window.getSelection()?.toString() || '') !== '') {
+                return;
+            }
+            event.clipboardData.setData('text/plain', JSON.stringify(buildClipboardDoc(steps, this.links), null, 2));
+            event.preventDefault();
+            messenger.notificationFlashMessage('success', __('aaxis.ontology.flow_editor.copy_done', {count: steps.length}));
+        });
+        $(document).on('paste.aaxisFlowClipboard', (e: any) => {
+            const event = (e.originalEvent || e) as ClipboardEvent;
+            if (!event.clipboardData || !this.ownsClipboardEvent(event)) {
+                return;
+            }
+            event.preventDefault();
+            this.pasteText(event.clipboardData.getData('text/plain'), this.keyboardPastePoint());
         });
         this.$el.on('contextmenu.aaxisFlowEditor', '[data-role="start-group"]', (e: any) => {
             e.preventDefault();
@@ -1759,7 +1799,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
             });
             $tab.append($('<span/>', {'class': 'aaxis-flow-editor__tab-title', text: this.tabTitle(tab, active)}));
             if (this.tabDirty(tab, active)) {
-                $tab.append($('<span/>', {'class': 'aaxis-flow-editor__tab-dirty', 'aria-hidden': 'true', text: '•'}));
+                // A drawn dot (not a "•" glyph, whose height depends on the font) so it centres
+                // on the title like the close ×. The tab's title attribute says it in words.
+                $tab.append($('<span/>', {'class': 'aaxis-flow-editor__tab-dirty', 'aria-hidden': 'true'}));
+                $tab.attr('title', __('aaxis.ontology.flow_editor.tab_unsaved'));
             }
             $tab.append($('<span/>', {
                 'class': 'fa fa-times aaxis-flow-editor__tab-close', 'data-role': 'tab-close',
@@ -3170,16 +3213,29 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
-     * A connector select limited to `types`, with a refresh button beside it. The connector
-     * catalog is a page-load snapshot ({@see connectorCatalog}), so a connector created or renamed
-     * in another tab only shows up after the button DROPS the cache and re-fetches it — which also
-     * refreshes every panel opened afterwards. The current selection survives a refresh while that
-     * connector still exists; a failed refresh keeps the options already shown (and flashes the
-     * usual catalog error). `ready` settles once the first fill is done, success or not.
+     * A connector picker limited to `types`: a type-to-filter combobox (part of the name narrows
+     * the list, Enter takes the first match) ending with "Add new connector…" when the user may
+     * create one, plus a refresh button. The connector catalog is a page-load snapshot
+     * ({@see connectorCatalog}), so a connector created or renamed in another tab only shows up
+     * after the button DROPS the cache and re-fetches it — which also refreshes every panel opened
+     * afterwards. "Add new connector…" opens the create page in a new tab and refreshes on coming
+     * back, selecting the new connector when exactly one appeared. The current selection survives
+     * a refresh while that connector still exists; a failed refresh keeps the options already
+     * shown (and flashes the usual catalog error). `ready` settles once the first fill is done,
+     * success or not. `$select` (hidden) holds the value.
      */
     private connectorPicker(types: string[], initialId: string): {$select: any; $el: any; ready: Promise<any>} {
-        const $select = $('<select/>', {'class': 'form-control', disabled: true});
+        // The VALUE lives in a hidden <select> (what the sections read, validate and store — their
+        // configs are unchanged); in front of it a type-to-filter combobox lists the connectors
+        // and ends with "Add new connector…" when the user may create one.
+        const $select = $('<select/>', {'class': 'form-control', 'data-role': 'connector-select', hidden: true, disabled: true});
         $select.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')}));
+        const $filter = $('<input/>', {
+            type: 'text', 'class': 'form-control', 'data-role': 'connector-filter', autocomplete: 'off', spellcheck: false,
+            placeholder: __('aaxis.ontology.flow_editor.loading'), disabled: true,
+            'aria-label': __('aaxis.ontology.flow_editor.connector_label')
+        });
+        const $list = $('<div/>', {'class': 'aaxis-flow-editor__combo-list', 'data-role': 'connector-list', hidden: true});
         const refreshLabel = __('aaxis.ontology.flow_editor.connector_refresh');
         const $refresh = $('<button/>', {
             type: 'button',
@@ -3191,37 +3247,130 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }).append($('<i/>', {'class': 'fa fa-refresh', 'aria-hidden': 'true'}));
         let loaded = false;
 
-        const fill = (current: string): Promise<any> => this.connectorCatalog()
+        const choices = (): {value: string; label: string}[] => $select.find('option').toArray()
+            .filter((o: HTMLOptionElement) => o.value !== '')
+            .map((o: HTMLOptionElement) => ({value: o.value, label: o.text}));
+        const selectedLabel = (): string => choices().find(c => c.value === String($select.val() || ''))?.label || '';
+        const pick = (value: string): void => {
+            $select.val(value).trigger('change');
+            $list.prop('hidden', true);
+        };
+        const renderList = (): void => {
+            const typed = String($filter.val() || '');
+            // The text showing the current pick is not a filter: then the whole list opens.
+            const query = typed === selectedLabel() ? '' : typed.trim().toLowerCase();
+            const current = String($select.val() || '');
+            const shown = choices().filter(c => query === '' || c.label.toLowerCase().includes(query));
+            $list.empty();
+            if (!shown.length) {
+                $list.append($('<div/>', {'class': 'aaxis-flow-editor__combo-empty', text: __('aaxis.ontology.flow_editor.combo_no_match')}));
+            }
+            shown.forEach(c => $list.append($('<button/>', {
+                type: 'button', 'class': 'aaxis-flow-editor__combo-option' + (c.value === current ? ' is-selected' : ''),
+                'data-value': c.value, text: c.label
+            }).on('pointerdown', (e: any) => {
+                // pointerdown, not click: the input's blur hides the list before a click lands.
+                e.preventDefault();
+                pick(c.value);
+            })));
+            if (this.connectorCreateUrl) {
+                $list.append($('<button/>', {
+                    type: 'button', 'class': 'aaxis-flow-editor__combo-option aaxis-flow-editor__combo-option--add',
+                    'data-role': 'connector-add'
+                }).append(
+                    $('<i/>', {'class': 'fa fa-plus', 'aria-hidden': 'true'}),
+                    $('<span/>', {text: __('aaxis.ontology.flow_editor.connector_add')})
+                ).on('pointerdown', (e: any) => {
+                    e.preventDefault();
+                    $list.prop('hidden', true);
+                    addNew();
+                }));
+            }
+        };
+
+        const fill = (current: string, adoptNewFrom: Set<string> | null = null): Promise<any> => this.connectorCatalog()
             .then((data: {records?: {id: number; name: string; type: string; systemName?: string}[]}) => {
                 $select.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.choose_placeholder')}));
-                (data.records || []).filter(c => types.includes(c.type)).forEach(c => {
+                const records = (data.records || []).filter(c => types.includes(c.type));
+                records.forEach(c => {
                     $select.append($('<option/>', {
                         value: String(c.id),
                         text: `${c.name} (${c.type}${c.systemName ? ' · ' + c.systemName : ''})`,
                         selected: String(c.id) === current
                     }));
                 });
+                // Back from "Add new connector…": exactly one connector that was not there before
+                // is the one just created — take it.
+                const fresh = adoptNewFrom ? records.filter(c => !adoptNewFrom.has(String(c.id))) : [];
+                if (fresh.length === 1) {
+                    $select.val(String(fresh[0].id)).trigger('change');
+                }
                 loaded = true;
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')))
             .finally(() => {
                 $select.prop('disabled', !loaded);
+                $filter.prop('disabled', !loaded)
+                    .attr('placeholder', __(loaded ? 'aaxis.ontology.flow_editor.connector_filter_placeholder' : 'aaxis.ontology.flow_editor.loading'))
+                    .val(selectedLabel());
                 $refresh.prop('disabled', false).find('i').removeClass('fa-spin');
             });
 
-        $refresh.on('click', () => {
+        const refresh = (adoptNew: boolean): void => {
             // Before the first successful load the select holds only "Loading…" — keep the
             // step's stored connector as the one to reselect.
             const current = loaded ? String($select.val() || '') : initialId;
+            const known = adoptNew ? new Set(choices().map(c => c.value)) : null;
             this.catalogConnectors = null;
             $select.prop('disabled', true);
+            $filter.prop('disabled', true);
             $refresh.prop('disabled', true).find('i').addClass('fa-spin');
-            fill(current);
+            fill(current, known);
+        };
+        // "Add new connector…": the create page opens in a new browser tab; coming back to this
+        // one re-fetches the list (and picks the new connector when it is the only new one).
+        const addNew = (): void => {
+            window.open(String(this.connectorCreateUrl), '_blank');
+            $(window).off('focus.aaxisFlowConnectorAdd').one('focus.aaxisFlowConnectorAdd', () => {
+                if (document.body.contains($filter.get(0))) {
+                    refresh(true);
+                }
+            });
+        };
+
+        $refresh.on('click', () => refresh(false));
+        $select.on('change', () => $filter.val(selectedLabel()));
+        $filter.on('focus input', () => {
+            if ($filter.is(':focus')) {
+                renderList();
+                $list.prop('hidden', false);
+            }
+        });
+        $filter.on('keydown', (e: any) => {
+            if (e.key === 'Enter') {
+                // The first option matching what was typed.
+                e.preventDefault();
+                const first = $list.find('[data-value]').first();
+                if (first.length) {
+                    pick(String(first.data('value')));
+                }
+                $filter.trigger('blur');
+            }
+        });
+        $filter.on('blur', () => {
+            window.setTimeout(() => {
+                $list.prop('hidden', true);
+                $filter.val(selectedLabel());
+            }, 120);
         });
 
         return {
             $select,
-            $el: $('<div/>', {'class': 'aaxis-flow-editor__connector-picker'}).append($select, $refresh),
+            $el: $('<div/>', {'class': 'aaxis-flow-editor__connector-picker'}).append(
+                $('<div/>', {'class': 'aaxis-flow-editor__combo aaxis-flow-editor__connector-combo'}).append($filter, $list),
+                $select,
+                $refresh
+            ),
             ready: fill(initialId)
         };
     }
@@ -3577,11 +3726,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const $connector = connectors.$select;
         const $destination = this.destinationInput(initial);
         const async = this.plainSwitch(initial.async === true, 'http_async_hint');
+        // Rows: Name | Connector (50/50) · Operation | Body | Destination | Async (25/25/40/10) ·
+        // Path alone (a request path or a DWL expression can be long).
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
-            this.settingsCol('step_name_label', $nameInput, 1.2),
-            this.settingsCol('connector_label', connectors.$el, 1.4),
-            this.settingsCol('destination_label', $destination),
-            this.settingsCol('http_async_label', async.$switch, 0.4)
+            this.settingsCol('step_name_label', $nameInput, 1),
+            this.settingsCol('connector_label', connectors.$el, 1)
         ));
 
         // While Async is on the Destination is empty and inert; the name it held comes back when
@@ -3620,11 +3769,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
             label: __('aaxis.ontology.flow_editor.path_label'),
             maxlength: 1024
         });
-        $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
-            this.settingsCol('operation_label', $operation),
-            this.settingsCol('path_label', path.$el, 1.6),
-            this.settingsCol('body_label', $bodyType)
-        ));
+        $body.append(
+            $('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+                this.settingsCol('operation_label', $operation, 2.5),
+                this.settingsCol('body_label', $bodyType, 2.5),
+                this.settingsCol('destination_label', $destination, 4),
+                this.settingsCol('http_async_label', async.$switch, 1)
+            ),
+            $('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(this.settingsCol('path_label', path.$el))
+        );
 
         const bodyContent = createDwlField({
             label: __('aaxis.ontology.flow_editor.body_content_label'),
@@ -4032,10 +4185,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Debug is only offered for flows that contain a REAL trigger (not a sub-flow start).
         this.$el.find('[data-role="run-split"]').prop('hidden', !this.findTrigger());
         if (!this.findTrigger()) {
-            this.closeRunMenu();
+            this.closeSplitMenu('run');
         }
         this.syncDebugButtons();
-        this.$el.find('[data-role="organize"]').prop('hidden', this.steps.length === 0);
+        // Organize (the toolbox caret's item) needs something to lay out.
+        this.$el.find('[data-role="organize"]').prop('disabled', this.steps.length === 0);
     }
 
     /** Small confirm dialog (Cancel / <confirmLabel>) used by the trigger/start interplays. */
@@ -4046,7 +4200,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const $body = $('<div/>', {'class': 'aaxis-ontology-confirm'});
         $body.append($('<p/>', {'class': 'aaxis-ontology-confirm__q', text: question}));
         const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
-        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.dialog_cancel')});
         const $confirm = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: confirmLabel});
         $actions.append($cancel, $confirm);
         $body.append($actions);
@@ -4865,24 +5019,59 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-    /** "Paste": reads the clipboard; anything but a flow-elements copy gets an explanatory popup. */
+    /**
+     * The menu's "Paste": reads the clipboard through the async API (a browser may refuse it — the
+     * popup then points to Cmd/Ctrl+V, which needs no permission).
+     */
     private pasteFromClipboard(at: {x: number; y: number}): void {
         void readClipboard().then(text => {
             if (text === null) {
                 this.messageDialog(__('aaxis.ontology.flow_editor.menu_paste'), __('aaxis.ontology.flow_editor.paste_unreadable'));
                 return;
             }
-            const doc = parseClipboardDoc(text, {
-                known: type => Boolean(this.stepMeta[type]),
-                trigger: type => this.stepMeta[type]?.category === 'trigger',
-                ports: portCount
-            });
-            if (doc === null) {
-                this.messageDialog(__('aaxis.ontology.flow_editor.menu_paste'), __('aaxis.ontology.flow_editor.paste_invalid'));
-                return;
-            }
-            this.pasteSteps(doc, at);
+            this.pasteText(text, at);
         });
+    }
+
+    /** Pastes clipboard text; anything but a flow-elements copy gets an explanatory popup. */
+    private pasteText(text: string, at: {x: number; y: number}): void {
+        const doc = parseClipboardDoc(text, {
+            known: type => Boolean(this.stepMeta[type]),
+            trigger: type => this.stepMeta[type]?.category === 'trigger',
+            ports: portCount
+        });
+        if (doc === null) {
+            this.messageDialog(__('aaxis.ontology.flow_editor.menu_paste'), __('aaxis.ontology.flow_editor.paste_invalid'));
+            return;
+        }
+        this.pasteSteps(doc, at);
+    }
+
+    /**
+     * Whether a document copy/paste is the EDITOR's to handle: the page shows this editor, focus is
+     * not in a text field (those keep their own clipboard), and no popup (step settings, a
+     * dialog, a form modal, an open menu) is in front of the canvas.
+     */
+    private ownsClipboardEvent(event: ClipboardEvent): boolean {
+        const target = event.target as Element | null;
+        const active = document.activeElement;
+        const editable = (el: Element | null): boolean => el !== null
+            && $(el).closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]').length > 0;
+        return document.body.contains(this.$el.get(0))
+            && !editable(target instanceof Element ? target : null)
+            && !editable(active)
+            && $('.aaxis-flow-editor__settings, .aaxis-dialog, .aaxis-rfm').length === 0;
+    }
+
+    /** A keyboard paste lands where the pointer last was over the canvas, else the visible top-left. */
+    private keyboardPastePoint(): {x: number; y: number} {
+        if (this.lastCanvasPoint) {
+            return this.lastCanvasPoint;
+        }
+        const viewport = this.canvasViewport();
+        const margin = this.tileSize / 2;
+
+        return {x: viewport.scrollLeft + margin, y: viewport.scrollTop + margin};
     }
 
     /**
@@ -5144,7 +5333,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $content.append($form);
 
         const $actions = $('<div/>', {'class': 'aaxis-ontology-confirm__actions'});
-        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.cancel')});
+        const $cancel = $('<button/>', {type: 'button', 'class': 'btn', text: __('aaxis.ontology.flow_editor.dialog_cancel')});
         const $run = $('<button/>', {type: 'button', 'class': 'btn btn-primary', text: __('aaxis.ontology.flow_editor.debug_run')});
         $actions.append($cancel, $run);
         $content.append($actions);
@@ -5200,34 +5389,47 @@ class OntologyFlowEditorComponent extends BaseComponent {
             el.setAttribute('title', invalid ? __('aaxis.ontology.flow_editor.invalid_steps_blocked') : el.dataset.title);
         });
         if (blocked) {
-            this.closeRunMenu();
+            this.closeSplitMenu('run');
         }
         // History compares against ARCHIVED revisions — meaningless until the flow is saved.
         this.$el.find('[data-role="flow-history"]').prop('disabled', !this.flow?.id);
     }
 
-    /** Opens Run Now's sub-options; an outside click or Escape closes them again. */
-    private openRunMenu(): void {
-        this.$el.find('[data-role="run-menu"]').prop('hidden', false);
-        this.$el.find('[data-role="run-menu-toggle"]').attr('aria-expanded', 'true');
+    /**
+     * Opens a split control's sub-options (`toolbox` → Organize, `run` → Debug), closing the
+     * other; an outside click or Escape closes it again.
+     */
+    private openSplitMenu(name: SplitMenu): void {
+        this.closeSplitMenu();
+        this.$el.find(`[data-role="${name}-menu"]`).prop('hidden', false);
+        this.$el.find(`[data-role="${name}-menu-toggle"]`).attr('aria-expanded', 'true');
         $(document)
-            .off('.aaxisFlowRunMenu')
-            .on('pointerdown.aaxisFlowRunMenu', (e: any) => {
-                if (!$(e.target).closest('[data-role="run-split"]').length) {
-                    this.closeRunMenu();
+            .on('pointerdown.aaxisFlowSplitMenu', (e: any) => {
+                if (!$(e.target).closest(`[data-role="${name}-split"]`).length) {
+                    this.closeSplitMenu(name);
                 }
             })
-            .on('keydown.aaxisFlowRunMenu', (e: any) => {
+            .on('keydown.aaxisFlowSplitMenu', (e: any) => {
                 if (e.key === 'Escape') {
-                    this.closeRunMenu();
+                    this.closeSplitMenu(name);
                 }
             });
     }
 
-    private closeRunMenu(): void {
-        $(document).off('.aaxisFlowRunMenu');
-        this.$el?.find('[data-role="run-menu"]').prop('hidden', true);
-        this.$el?.find('[data-role="run-menu-toggle"]').attr('aria-expanded', 'false');
+    /** Closes one split menu, or both; the outside-click/Escape handlers go once none is open. */
+    private closeSplitMenu(name?: SplitMenu): void {
+        const $root = this.$el;
+        if ($root) {
+            (name ? [name] : SPLIT_MENUS).forEach(menu => {
+                $root.find(`[data-role="${menu}-menu"]`).prop('hidden', true);
+                $root.find(`[data-role="${menu}-menu-toggle"]`).attr('aria-expanded', 'false');
+            });
+        }
+        const anyOpen = $root !== undefined
+            && SPLIT_MENUS.some(menu => $root.find(`[data-role="${menu}-menu"]`).prop('hidden') === false);
+        if (!anyOpen) {
+            $(document).off('.aaxisFlowSplitMenu');
+        }
     }
 
     // --- View source / Flow history --------------------------------------------------------
@@ -6140,6 +6342,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return;
         }
         this.$el.off('.aaxisFlowEditor');
+        $(document).off('.aaxisFlowClipboard');
         if (this.ghostDrag) {
             // el is null while a toolbox drag is armed but has not passed the drag threshold.
             this.ghostDrag.el?.remove();
@@ -6154,7 +6357,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.marqueeDrag = null;
         }
         this.closeContextMenu();
-        this.closeRunMenu();
+        this.closeSplitMenu();
         this.panelDrag = null;
         this.stepDrag = null;
         $(window).off('resize.aaxisFlowEditor');

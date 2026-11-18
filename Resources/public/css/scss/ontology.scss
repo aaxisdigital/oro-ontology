@@ -72,38 +72,6 @@
     }
 }
 
-// Data View payload cell
-.aaxis-data-payload {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 100%;
-
-    &__text {
-        flex: 0 1 auto;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-family: monospace;
-        font-size: 12px;
-        color: #5c6b7a;
-    }
-
-    &__preview {
-        flex: 0 0 auto;
-        border: 0;
-        background: transparent;
-        padding: 0 2px;
-        color: #2b6cb0;
-        cursor: pointer;
-
-        &:hover {
-            color: #1b3a5b;
-        }
-    }
-}
-
 // Flow import dialog: every problem found in the file, listed inside the alert box.
 .aaxis-flow-import__errors {
     margin: 0;
@@ -1621,10 +1589,10 @@
     // Fill the viewport below Oro's page chrome so the canvas gets all remaining height.
     min-height: calc(100vh - 230px);
 
-    // Run Now as a split control in the tab bar's canvas group: the play button plus a caret
-    // opening its sub-options (Debug), joined into one piece. The menu reuses the canvas context
-    // menu's look, anchored under the control instead of at the pointer.
-    &__run {
+    // SPLIT controls in the tab bar's canvas group (toolbox | Organize, Run Now | Debug): the main
+    // button plus a caret opening its sub-options, joined into one piece. The menu reuses the
+    // canvas context menu's look, anchored under the control instead of at the pointer.
+    &__split {
         position: relative;
         display: inline-flex;
         align-items: flex-end;
@@ -1634,18 +1602,18 @@
         }
     }
 
-    &__tab.aaxis-flow-editor__run-main {
+    &__tab.aaxis-flow-editor__split-main {
         border-top-right-radius: 0;
     }
 
-    &__tab.aaxis-flow-editor__run-caret {
+    &__tab.aaxis-flow-editor__split-caret {
         margin-left: -1px;
         padding-left: 6px;
         padding-right: 6px;
         border-top-left-radius: 0;
     }
 
-    &__menu.aaxis-flow-editor__run-menu {
+    &__menu.aaxis-flow-editor__split-menu {
         position: absolute;
         top: calc(100% + 4px);
         left: 0;
@@ -1764,10 +1732,14 @@
         text-overflow: ellipsis;
     }
 
+    // Unsaved-changes marker: a drawn 7px dot, centred by the tab's flex row (a "•" glyph sat
+    // wherever its font put it, off the title/× line).
     &__tab-dirty {
-        color: #b45309;
-        font-size: 16px;
-        line-height: 0;
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #b45309;
     }
 
     &__tab-close {
@@ -2371,9 +2343,14 @@
         }
     }
 
-    &__menu-item--disabled {
+    &__menu-item--disabled,
+    &__menu-item:disabled {
         color: #b6c0c9;
         cursor: default;
+
+        .fa {
+            color: #b6c0c9;
+        }
 
         &:hover {
             background: transparent;
@@ -2709,6 +2686,30 @@
         .form-control {
             flex: 1 1 auto;
             min-width: 0;
+        }
+
+        // The value-holding select behind the combobox (Oro's .form-control display would beat
+        // the bare [hidden] attribute).
+        select[hidden] {
+            display: none;
+        }
+    }
+
+    &__connector-combo {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    // The combobox list's last entry: "Add new connector…", set apart from the connectors.
+    &__combo-option--add {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-top: 1px solid #eef1f4;
+        color: #2b6cb0;
+
+        .fa {
+            font-size: 11px;
         }
     }
 

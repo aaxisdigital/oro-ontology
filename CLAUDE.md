@@ -301,6 +301,10 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
 
 ### Data View: deep link + version history dialog
 
+- **No payload column** (removed 2026-11-18): the grid lists system, entity, unique id (+ hidden
+  uuid/version) and updated; the record CONTENT is read through the per-row **Versions** action
+  (full JSON, diff, search). The list endpoint still ships `payload` — the Update action preloads
+  it into the Add Data modal.
 - **Cross-page deep links** follow one pattern: source grid action → `routing.generate(<page route>)`
   + a `?<key>=<name>` query → target page calls `grid.setFilter()` once after its first load.
   Systems → Entities uses `?system=` (filters `systemName`); Entities → Data View uses `?entity=`.
@@ -589,8 +593,10 @@ built-in `type = native` rows do nothing, enforced again by the editor page + up
 names align). It sits INSIDE the Name cell rather than in its own column ON PURPOSE: DataGrid
 appends columns unknown to a SAVED layout (gridKey `ontology-flow-view`, saved on any page-size or
 column change) at the END, so a new first column would land last for most users. Clicks on it
-never open the row (row click ignores inputs/labels). The page toolbar's **Open all**
-(`open-selected`, before Import; disabled while nothing is checked, `(N)` count) opens ONE editor
+never open the row (row click ignores inputs/labels). The page toolbar's **Open**
+(`open-selected`, before Import; disabled while nothing is checked; the component owns the whole
+label `[data-role="open-selected-label"]`: "Open" for one, "Open (N)" for several — ONE text
+node, since the flex button swallowed the space between two spans) opens ONE editor
 with every checked flow as a tab, in the order they were CHECKED: `editor/{first}?tabs=a,b,c` —
 the editor's own restore-tabs URL (`restoreTabsFromUrl`). Checks survive grid re-renders (the
 component holds `picked`), and a reload drops ids that are gone. cmd/ctrl+click opens it in a new
@@ -655,8 +661,10 @@ SAVED tab as `?tabs=<id,id,…>` in tab order — `syncTabsUrl()` on tab load/cl
 `restoreTabsFromUrl()` at init reopens them from the flow catalog (parsed BEFORE anything rewrites
 the URL; never-saved tabs cannot travel and are not listed). Tab title = the
 TRIGGER STEP's name ("unnamed — add a trigger" until one exists — the flow is NAMED BY ITS
-TRIGGER; there is no top-bar name display anymore), a • marks unsaved changes, × closes (confirm
-when dirty; the editor always keeps at least one tab). THERE IS NO TOP BAR (removed 2026-11-18):
+TRIGGER; there is no top-bar name display anymore), a drawn 7px dot (`__tab-dirty`, empty span —
+a "•" glyph sat off the title/× line; the tab's title says `tab_unsaved`) marks unsaved changes,
+× closes (confirm when dirty, its Cancel labelled `dialog_cancel`; the editor always keeps at
+least one tab). THERE IS NO TOP BAR (removed 2026-11-18):
 the tab bar is the editor's only chrome. Left, `[data-role="tab-list"]` — the one part that
 SCROLLS sideways (`overflow-x: auto`; its -1px margin + 1px padding keep the active tab's
 border-covering -1px inside the scroll box), re-rendered by `renderTabs()` on every syncDirty
@@ -664,9 +672,17 @@ border-covering -1px inside the scroll box), re-rendered by `renderTabs()` on ev
 TWIG markup (Flow/editor.html.twig, labels in the `messages` domain), so spinners and disabled
 states survive re-renders and the absolutely-positioned Run menu is never clipped. Every action is
 an icon-only `__tab--action` (titles are the labels) in two `__tab-group`s, 14px apart:
-- CANVAS tools (`canvas-actions`): wrench = toolbox show/hide (`toolbox-toggle`, `is-active` while
-  shown) · the Run Now split (`run-split`: play + caret, Debug in its menu — see Debug / Run Now) ·
-  Organize (`organize`, hidden without steps);
+- CANVAS tools (`canvas-actions`): two SPLIT controls (`.aaxis-flow-editor__split`: main button +
+  caret + `__split-menu`, the context-menu look anchored under it):
+  - `toolbox-split`: wrench = toolbox show/hide (`toolbox-toggle`, `is-active` while shown), and
+    behind its caret (`toolbox-menu-toggle` → `toolbox-menu`) **Organize** (`organize`, a menu
+    item DISABLED without steps);
+  - `run-split`: Run Now, Debug behind its caret (see Debug / Run Now).
+
+  `openSplitMenu(name)` / `closeSplitMenu(name?)` drive both (`SplitMenu` = 'toolbox' | 'run'):
+  opening one closes the other, an outside pointerdown or Escape closes it (document handlers
+  `.aaxisFlowSplitMenu`, dropped only once NO menu is open — closing the run menu because a red
+  step blocked running must not strand an open toolbox menu without its handlers);
 - DOCUMENT tools (`document-actions`), in order:
   - empty page (fa-file-o) = a new empty flow tab (`tab-add`);
   - folder = open any existing non-native flow in a NEW tab (`tab-open`; picker over
@@ -772,12 +788,22 @@ is ~1.5s of kernel boot (measured; the queries themselves are trivial) — so op
 took seconds, every time. Consequences to keep in mind: a **failed** fetch is deliberately NOT cached
 (the field resets so the next open retries), and the catalogs are a **page-load snapshot** — an
 entity/subflow created in another tab won't appear until the editor page is reloaded. CONNECTORS
-have an escape hatch: every connector select (HTTP Request, SQL Query, File Operations) is built by
-`connectorPicker(types, initialId)`, which pairs it with a refresh button
-(`data-role="connector-refresh"`, fa-refresh, `connector_refresh` jsmessage) that nulls
+have an escape hatch: every connector picker (HTTP Request, SQL Query, File Operations) is built by
+`connectorPicker(types, initialId)`. It is a TYPE-TO-FILTER COMBOBOX (`connector-filter` input +
+`connector-list`, `.aaxis-flow-editor__combo` like the subflow picker; options pick on POINTERDOWN,
+Enter takes the first match, blur restores the picked label; the text showing the current pick
+is no filter, so focusing lists everything) in front of a HIDDEN `<select>` (`connector-select`)
+that still holds the value — the sections read/validate/store it exactly as before, and the
+`[hidden]` select needs an explicit `display: none` because Oro's `.form-control` display beats
+the attribute. The list ends with **"Add new connector…"** (`connector-add`) when the editor got
+`connectorCreateUrl` (twig: `path('aaxis_ontology_connector_create')` only when
+`is_granted('aaxis_ontology_connector_create')` — the route is not exposed to JS): it opens the
+create page in a NEW browser tab and, on the window's next `focus`, refreshes the list and
+SELECTS the new connector when exactly one id of the allowed types appeared. Beside it a refresh
+button (`data-role="connector-refresh"`, fa-refresh, `connector_refresh` jsmessage) nulls
 `catalogConnectors` and re-fetches — so later panels get the fresh list too. The selection survives
 the refresh while the connector still exists (before a first successful load, the step's stored id
-is the one reselected); a failed refresh keeps the options already shown. Add new connector selects
+is the one reselected); a failed refresh keeps the options already shown. Add new connector pickers
 through `connectorPicker`, and new panel data sources through the same accessors rather than a
 bare `fetch`.
 
@@ -862,12 +888,13 @@ keys dropped, in BOTH `steps` and `design.steps`. Old EXPORT files carrying thos
 rejected by import (normalize fails on the unknown type).
 **invoke** ("HTTP Request", `httpRequestSection`) is a rest_api connector call, the response under
 the destination (executor: the `readConnector` arm, so operation/body/auth behave exactly like a
-rest_api reader): row 1 `Name | Connector (rest_api only — the catalog is filtered client-side) |
-Destination`, row 2 `Operation | Path | Body` (the Path is a single-line DWL input,
+rest_api reader): row 1 `Name | Connector` (50/50; rest_api only — the catalog is filtered
+client-side), row 2 `Operation | Body | Destination | Async` (25/25/40/10), row 3 the `Path`
+alone (a single-line DWL input,
 `widgets/dwl-input.ts`: config `path` + `path_dwl`, default off. While on, it is an expression over
 the context, e.g. `"orders/" ++ payload.id`, resolved through `resolveDwlText()` in
 `restRequest()`, so the async queue receives the RENDERED path. It must yield non-empty text and
-is DWL-checked on save), row 3 the Body-content DWL field ALWAYS visible but
+is DWL-checked on save), then the Body-content DWL field ALWAYS visible but
 disabled (`.aaxis-dwl-field--disabled` + textarea/switch inert) while Body = Empty. The TYPE key
 stays `invoke` (only the label changed) so stored designs keep validating; validator arm:
 `(async || destinationOk) && boolOk(async) && connectorOk`, body_content DWL-checked via `stepDwlSnippets`.
@@ -1059,12 +1086,21 @@ places tiles; the system clipboard is read/written through `widgets/clipboard.ts
 to the selection's top-left, deep-copied configs, anchor sides and `invalid`. Only links with
 BOTH ends selected travel. So copies move between tabs, flows and browser windows.
 Right-clicking the BARE canvas (`e.target === canvas()`; tiles and wires keep their own menus)
-offers Paste: `navigator.clipboard.readText()` → `parseClipboardDoc()`. That validation is
-STRICT, mirroring restoreFromDesign plus ≤1 trigger. Anything else opens a popup
-(`messageDialog`, `paste_invalid`); an unreadable clipboard (permission denied / no async API)
-opens `paste_unreadable`. Pasted elements:
-- land with their top-left at the click point, get fresh ids and their inner links remapped, and
-  end up SELECTED;
+offers Paste: `navigator.clipboard.readText()` → `pasteText()` → `parseClipboardDoc()`. That
+validation is STRICT, mirroring restoreFromDesign plus ≤1 trigger. Anything else opens a popup
+(`messageDialog`, `paste_invalid`); an unreadable clipboard (the async API's permission refused /
+missing) opens `paste_unreadable`, which points to Cmd/Ctrl+V.
+**KEYBOARD** (2026-11-18 — Cmd/Ctrl+V used to do nothing, "paste not working"): document `copy` /
+`paste` handlers (`.aaxisFlowClipboard`, removed in dispose) use the NATIVE clipboard events,
+which carry the text WITHOUT the async API's permission prompt. Copy writes the selection's doc
+into `clipboardData` (only with tiles selected and no text selected); paste lands at the last
+pointer position over the canvas (`lastCanvasPoint`, tracked by pointermove on the viewport),
+else the visible top-left. `ownsClipboardEvent()` leaves the browser's own copy/paste to text
+fields (target or focus in input/textarea/select/contenteditable) and to open popups (settings
+panel, `.aaxis-dialog`, `.aaxis-rfm`). Known limit: Safari may fire no `copy` without a page
+selection. Pasted elements:
+- land with their top-left at the click (or keyboard paste) point, get fresh ids and their inner
+  links remapped, and end up SELECTED;
 - keep their names while free; a taken name becomes `name (copy)`, then `(copy 2)`, … trimmed to
   64 characters (`pastedName`);
 - a TRIGGER is ALWAYS suffixed, because the flow is named after its trigger. Its candidates are
@@ -1110,14 +1146,14 @@ validated; corrupted/outdated → warning flash + empty canvas; NULL → rebuilt
 exists (synced in `updateReachability`): the Run Now button (`data-role="debug"`) plus a caret
 (`run-menu-toggle`) opening a small menu (`run-menu`, styled like the canvas context menu, anchored
 under Run Now) that holds **Debug** (`data-role="debug-step"`). The menu closes on an outside
-pointerdown, on Escape, or when an item is picked (`openRunMenu`/`closeRunMenu`, document handlers
-namespaced `.aaxisFlowRunMenu`). The buttons are DISABLED only while a step is red or a session is
+pointerdown, on Escape, or when an item is picked (`openSplitMenu('run')` / `closeSplitMenu`,
+shared with the toolbox split — see the tab bar). The buttons are DISABLED only while a step is red or a session is
 already open (`syncDebugButtons()`). A DISABLED flow still runs manually: the trigger's Enabled
 switch gates only the AUTOMATIC runs. The server never checked the root flow's flag on these
 endpoints. A sub_flow/foreach that calls a DISABLED subflow still FAILS, which is the stated
 subflow rule. The twig titles are preserved (swapped for the red-steps reason only while that
-blocks). Tests: context-menu probes must target `body > .aaxis-flow-editor__menu` — the run menu
-shares the class. Both collect the trigger
+blocks). Tests: context-menu probes must target `body > .aaxis-flow-editor__menu` — the split
+menus share the class. Both collect the trigger
 input via `collectDebugInput()` (cron/endpoint run immediately, entity_change asks for its event
 first) and then open the **debugger SIDEBAR** (`data-role="debugger"`, left of the design area in
 `__canvas-wrap`) instead of popups — `startDebugSession(mode, input)` SNAPSHOTS the canvas
@@ -1684,6 +1720,11 @@ calls `initialize()` — so TS field initializers (`private foo = {}`) run **aft
 (fields are `undefined` during it, and the initializer then overwrites anything `initialize()`
 assigned). Declare fields as `private foo!: T;` and assign them at the top of `initialize()`
 (see `flow-editor-component.ts`). Plain classes (e.g. the DataGrid widget) are unaffected.
+
+⚠️ **`tsc` does not catch a missing method on `this` in these components**: Oro's `BaseComponent`
+is typed `any`, so every `this.whatever` type-checks. Hit once (2026-11-18): a docblock that lost
+its closing `*/` swallowed a whole method into the comment, `tsc` stayed green, and only the
+Vitest suite failed (`this.connectorPicker is not a function`). Run the tests, not just `tsc`.
 
 `.ts` sources live in `Resources/js-src/`; the `.js` in `Resources/public/js/` is **generated** by
 `tsc` (CommonBundle's `TypeScriptCompiler`, wired in `services.yml` and run on `oro:assets:build` via

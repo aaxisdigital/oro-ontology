@@ -506,7 +506,7 @@ describe('OntologyFlowEditorComponent — context menus', () => {
 
         expect(tileNames()).toEqual([]);
         expect(designOf(editor).links).toEqual([]);
-        expect(root(editor).find('[data-role="organize"]').prop('hidden')).toBe(true);
+        expect(root(editor).find('[data-role="organize"]').prop('disabled')).toBe(true);
     });
 
     it('aligns chains along each parent\'s out side, then the loose steps to the east', () => {

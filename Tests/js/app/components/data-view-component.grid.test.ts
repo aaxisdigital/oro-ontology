@@ -23,7 +23,7 @@ describe('OntologyDataViewComponent — grid, loading and version lookup', () =>
 
             expect(grid.mount).toHaveBeenCalledWith($el.find('[data-role="list"]'));
             expect(grid.options.columns.map((c: any) => c.key)).toEqual(
-                ['system', 'entity', 'uniqueId', 'uuid', 'version', 'updatedAt', 'payload']
+                ['system', 'entity', 'uniqueId', 'uuid', 'version', 'updatedAt']
             );
             expect(grid.options.gridKey).toBe('ontology-data-view');
             expect(grid.options.preferencesUrl).toBe('/aaxis_common_grid_preference_get?gridKey=ontology-data-view');
@@ -52,25 +52,10 @@ describe('OntologyDataViewComponent — grid, loading and version lookup', () =>
             expect(grid.column('updatedAt').render(record({updatedAt: null}))).toBe('');
         });
 
-        it('previews a long payload truncated to 60 characters and copies the whole thing', () => {
-            const {grid} = mountDataView();
-            const long = 'x'.repeat(80);
-
-            const $short = grid.column('payload').render(record({payload: '{"a":1}'}));
-            const $long = grid.column('payload').render(record({payload: long}));
-
-            expect($short.text()).toBe('{"a":1}');
-            expect($short.hasClass('aaxis-data-payload__text')).toBe(true);
-            expect($long.text()).toBe('x'.repeat(60) + '…');
-            expect(grid.column('payload').copyValue(record({payload: long}))).toBe(long);
-            expect(grid.column('payload').copyValue(record({payload: null}))).toBe('');
-            expect(grid.column('payload').sortable).toBe(false);
-        });
-
-        it('renders an exactly 60-character payload in full', () => {
+        it('has no payload column (the Versions action shows payloads with its own tools)', () => {
             const {grid} = mountDataView();
 
-            expect(grid.column('payload').render(record({payload: 'y'.repeat(60)})).text()).toBe('y'.repeat(60));
+            expect(grid.options.columns.some((c: any) => c.key === 'payload')).toBe(false);
         });
     });
 

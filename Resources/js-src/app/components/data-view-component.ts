@@ -110,11 +110,6 @@ class OntologyDataViewComponent extends BaseComponent {
                 {
                     key: 'updatedAt', label: __('aaxis.ontology.data_view.updated_at'), type: 'datetime',
                     width: '190px', render: (row: DataRecord) => formatDateTime(row.updatedAt)
-                },
-                {
-                    key: 'payload', label: __('aaxis.ontology.data_view.payload'), type: 'json',
-                    sortable: false, copyValue: (row: DataRecord) => String(row.payload || ''),
-                    render: (row: DataRecord) => this.renderPayload(row)
                 }
             ],
             actions: [
@@ -1015,13 +1010,6 @@ class OntologyDataViewComponent extends BaseComponent {
         if (entity !== null && entity.trim() !== '') {
             this.grid.setFilter('entity', {operator: 'equals', value: entity.trim()});
         }
-    }
-
-    private renderPayload(row: DataRecord): any {
-        const text = String(row.payload || '');
-        const short = text.length > 60 ? text.slice(0, 60) + '…' : text;
-        // No preview here — the per-record "Versions" history shows the full payload with more tools.
-        return $('<span/>', {'class': 'aaxis-data-payload__text', text: short});
     }
 
     /**

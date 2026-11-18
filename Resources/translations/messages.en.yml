@@ -405,6 +405,7 @@ aaxis:
             debug: 'Debug'
             run_now: 'Run Now'
             run_options: 'More run options'
+            toolbox_options: 'More canvas options'
             organize: 'Organize'
             tab_toolbox: 'Show / hide the toolbox'
             tab_add: 'New flow in a new tab'
@@ -450,5 +451,5 @@ aaxis:
         flow_view:
             add_button: 'Add Flow'
             import_button: 'Import Flow'
-            open_all_button: 'Open all'
-            open_all_title: 'Open every checked flow together in the editor, one tab each'
+            open_button: 'Open'
+            open_title: 'Open the checked flows in the editor, one tab each'

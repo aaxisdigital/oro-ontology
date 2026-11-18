@@ -58,7 +58,7 @@ describe('OntologyFlowComponent', () => {
         const pick = (id: number, on = true) => $el.find(`[data-role="flow-pick"][data-flow-id="${id}"]`).prop('checked', on).trigger('change');
 
         function mountPicking(records = LIST) {
-            const extra = '<button data-role="open-selected" disabled></button><span data-role="open-selected-count"></span>';
+            const extra = '<button data-role="open-selected" disabled><span data-role="open-selected-label">Open</span></button>';
             $el = pageElement(extra);
             const fetchSpy = stubFetch({[LIST_URL]: jsonResponse({records})});
             const component: any = new (FlowComponent as any)({_sourceElement: $el});
@@ -77,21 +77,21 @@ describe('OntologyFlowComponent', () => {
             expect(grid.column('name').render(flow({name: null})).find('.aaxis-flow-pick__name').text()).toBe('');
         });
 
-        it('enables Open all while something is checked, counting the checked flows', async () => {
+        it('reads "Open" for none (disabled) or one checked flow, "Open (N)" for several', async () => {
             const {grid} = mountPicking();
             await flush();
             renderNames(grid, LIST);
-            expect($open().prop('disabled')).toBe(true);
-            expect($el.find('[data-role="open-selected-count"]').text()).toBe('');
+            const label = () => $el.find('[data-role="open-selected-label"]').text();
+            expect([$open().prop('disabled'), label()]).toEqual([true, 'aaxis.ontology.flow_view.open_button']);
 
             pick(5);
+            expect([$open().prop('disabled'), label()]).toEqual([false, 'aaxis.ontology.flow_view.open_button']);
             pick(3);
-            expect($open().prop('disabled')).toBe(false);
-            expect($el.find('[data-role="open-selected-count"]').text()).toBe('(2)');
+            expect([$open().prop('disabled'), label()]).toEqual([false, 'aaxis.ontology.flow_view.open_count']);
 
             pick(5, false);
             pick(3, false);
-            expect($open().prop('disabled')).toBe(true);
+            expect([$open().prop('disabled'), label()]).toEqual([true, 'aaxis.ontology.flow_view.open_button']);
         });
 
         it('opens the checked flows in one editor, as tabs in the order they were checked', async () => {
@@ -134,7 +134,7 @@ describe('OntologyFlowComponent', () => {
             $el.find('[data-role="refresh"]').trigger('click');
             await flush();
 
-            expect($el.find('[data-role="open-selected-count"]').text()).toBe('(1)');
+            expect($el.find('[data-role="open-selected-label"]').text()).toBe('aaxis.ontology.flow_view.open_button'); // one left
         });
 
         it('stops reacting to the checkboxes once disposed', async () => {

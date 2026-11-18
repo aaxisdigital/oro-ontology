@@ -22,13 +22,14 @@
                             aria-label="{{ 'aaxis.common.grid.columns_title'|trans }}">
                         <span class="fa fa-cog" aria-hidden="true"></span>
                     </button>
-                    {# Opens every flow checked in the grid together, one editor tab each (the
-                       component enables it while something is checked and fills in the count). #}
+                    {# Opens the flows checked in the grid together, one editor tab each. The component
+                       enables it while something is checked and owns the whole label: "Open", or
+                       "Open (N)" for several (one text node — the button lays out as flex, which
+                       would swallow a space between two spans). #}
                     <button type="button" class="btn aaxis-ontology-sys__add" data-role="open-selected" disabled
-                            title="{{ 'aaxis.ontology.flow_view.open_all_title'|trans }}">
+                            title="{{ 'aaxis.ontology.flow_view.open_title'|trans }}">
                         <span class="fa fa-folder-open-o" aria-hidden="true"></span>
-                        {{ 'aaxis.ontology.flow_view.open_all_button'|trans }}
-                        <span data-role="open-selected-count"></span>
+                        <span data-role="open-selected-label">{{ 'aaxis.ontology.flow_view.open_button'|trans }}</span>
                     </button>
                     {# Creates a flow from a JSON exported elsewhere; sits before "Add Flow".
                        Gated on the same permission the import endpoint requires. #}

@@ -5,7 +5,7 @@ import FlowEditorComponent from '../../../../Resources/js-src/app/components/flo
 import {CLIPBOARD_FORMAT, CLIPBOARD_VERSION} from '../../../../Resources/js-src/app/widgets/flow-clipboard';
 import {
     client, clickMenu, configOf, contextMenu, createEditor, designOf, FlowDialog, flowRecord, flush, linksOf, marquee,
-    menuLabels, mockFetch, positionOf, selectedNames, st, tile, tileNames, useFlowEditorEnv
+    menuLabels, mockFetch, pointer, positionOf, selectedNames, st, tile, tileNames, useFlowEditorEnv
 } from '../../helpers/flow-editor';
 
 vi.mock('aaxiscommon/js/app/widgets/dialog', async () => (await import('../../helpers/flow-editor')).dialogModule());
@@ -181,5 +181,113 @@ describe('OntologyFlowEditorComponent — copy / paste', () => {
 
         expect(FlowDialog.last().$content.text()).toContain(KEY('paste_unreadable'));
         expect($('[data-role="step"]').length).toBe(0);
+    });
+});
+
+/** Fires a native clipboard event (what Cmd/Ctrl+C / V produce) at `target`. */
+function clipboardEvent(type: 'copy' | 'paste', target: EventTarget, text = ''): {event: Event; setData: ReturnType<typeof vi.fn>} {
+    const setData = vi.fn();
+    const event = new Event(type, {bubbles: true, cancelable: true});
+    Object.defineProperty(event, 'clipboardData', {value: {getData: (format: string) => (format === 'text/plain' ? text : ''), setData}});
+    target.dispatchEvent(event);
+    return {event, setData};
+}
+
+describe('OntologyFlowEditorComponent — keyboard copy / paste', () => {
+    useFlowEditorEnv(FlowEditorComponent);
+
+    const flowWithLog = () => flowRecord(1, 'F', [
+        st('t', 'cron', 'tick', 0, 0, {enabled: true}),
+        st('a', 'logger', 'log', 200, 100, {message: 'hi'})
+    ], [{from: 't', fromPort: 0, to: 'a'}]);
+
+    it('copies the selected elements on Cmd/Ctrl+C, without any clipboard permission', () => {
+        createEditor({flow: flowWithLog()});
+        marquee(150, 50, 400, 300);
+
+        const {event, setData} = clipboardEvent('copy', document.body);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(JSON.parse(setData.mock.calls[0][1]).steps.map((s: any) => s.name)).toEqual(['log']);
+        expect(setData.mock.calls[0][0]).toBe('text/plain');
+        expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('success', KEY('copy_done'));
+    });
+
+    it('leaves Cmd/Ctrl+C alone with nothing selected, with text selected, or in a text field', () => {
+        createEditor({flow: flowWithLog()});
+        expect(clipboardEvent('copy', document.body).event.defaultPrevented).toBe(false);
+
+        marquee(150, 50, 400, 300);
+        const $input = $('<input type="text">').appendTo(document.body);
+        expect(clipboardEvent('copy', $input[0]).event.defaultPrevented).toBe(false);
+        $input.remove();
+
+        vi.spyOn(window, 'getSelection').mockReturnValue({toString: () => 'some text'} as any);
+        expect(clipboardEvent('copy', document.body).event.defaultPrevented).toBe(false);
+    });
+
+    it('pastes on Cmd/Ctrl+V where the pointer last was over the canvas', () => {
+        createEditor({flow: flowRecord(1, 'F', [st('t', 'cron', 'tick', 0, 0, {enabled: true})])});
+        pointer(document.querySelector('[data-role="canvas-viewport"]')!, 'pointermove', ...client(300, 200));
+
+        const {event} = clipboardEvent('paste', document.body, copyDoc([{id: 'a', type: 'logger', name: 'log', x: 0, y: 0, config: {message: 'hi'}}]));
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(tileNames()).toEqual(['tick', 'log']);
+        expect(positionOf('log')).toEqual([300, 200]);
+        expect(selectedNames()).toEqual(['log']);
+    });
+
+    it('pastes at the visible top-left when the pointer never crossed the canvas', () => {
+        createEditor({flow: flowRecord(1, 'F', [st('t', 'cron', 'tick', 0, 0, {enabled: true})])});
+        const viewport = document.querySelector('[data-role="canvas-viewport"]') as HTMLElement;
+        viewport.scrollLeft = 400;
+        viewport.scrollTop = 200;
+
+        clipboardEvent('paste', document.body, copyDoc([{id: 'a', type: 'logger', name: 'log', x: 0, y: 0}]));
+
+        const [x, y] = positionOf('log');
+        expect(x).toBeGreaterThanOrEqual(400);
+        expect(y).toBeGreaterThanOrEqual(200);
+    });
+
+    it('explains a clipboard that holds no flow elements', () => {
+        createEditor({flow: flowWithLog()});
+
+        clipboardEvent('paste', document.body, 'just some text');
+
+        expect(FlowDialog.last().$content.text()).toContain(KEY('paste_invalid'));
+        expect(tileNames()).toEqual(['tick', 'log']);
+    });
+
+    it('leaves Cmd/Ctrl+V to text fields and to open popups', () => {
+        createEditor({flow: flowWithLog()});
+        const doc = copyDoc([{id: 'a', type: 'logger', name: 'other', x: 0, y: 0}]);
+
+        const $input = $('<textarea></textarea>').appendTo(document.body);
+        expect(clipboardEvent('paste', $input[0], doc).event.defaultPrevented).toBe(false);
+        $input.remove();
+
+        const $popup = $('<div class="aaxis-flow-editor__settings"></div>').appendTo(document.body);
+        expect(clipboardEvent('paste', document.body, doc).event.defaultPrevented).toBe(false);
+        $popup.remove();
+
+        expect(tileNames()).toEqual(['tick', 'log']);
+    });
+
+    it('points to Cmd/Ctrl+V when the menu Paste may not read the clipboard', async () => {
+        vi.stubGlobal('navigator', {clipboard: {readText: vi.fn(() => Promise.reject(new Error('denied')))}});
+        createEditor({flow: flowWithLog()});
+
+        await pasteAt(500, 300);
+
+        expect(FlowDialog.last().$content.text()).toContain(KEY('paste_unreadable'));
+    });
+
+    it('stops listening once disposed', () => {
+        const editor = createEditor({flow: flowWithLog()});
+        editor.dispose();
+
+        expect(clipboardEvent('paste', document.body, copyDoc([{id: 'a', type: 'logger', name: 'x', x: 0, y: 0}])).event.defaultPrevented).toBe(false);
     });
 });
