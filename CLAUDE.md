@@ -670,7 +670,9 @@ SCROLLS sideways (`overflow-x: auto`; its -1px margin + 1px padding keep the act
 border-covering -1px inside the scroll box), re-rendered by `renderTabs()` on every syncDirty
 (`renderTabs()` re-creates the list if the markup lacks it). Right, `[data-role="tab-actions"]` —
 TWIG markup (Flow/editor.html.twig, labels in the `messages` domain), so spinners and disabled
-states survive re-renders and the absolutely-positioned Run menu is never clipped. Every action is
+states survive re-renders and the absolutely-positioned Run menu is never clipped. Keep template
+logic OUT of a button's content (Save all has its own `{% if %}` branch around the whole button):
+Sonar's Web:S7927 reads `{% … %}` inside a button as visible text missing from its aria-label. Every action is
 an icon-only `__tab--action` (titles are the labels) in two `__tab-group`s, 14px apart:
 - CANVAS tools (`canvas-actions`): two SPLIT controls (`.aaxis-flow-editor__split`: main button +
   caret + `__split-menu`, the context-menu look anchored under it):
@@ -1626,7 +1628,8 @@ system/entity, missing connector, failed request) abort with a 422 naming the st
 NATIVE `<select>`s in the bundle's popups (step settings, the Erase popup's filter, the Flow
 History version picker) use the `aaxis-select-arrow` SCSS mixin (top of ontology.scss): the
 browser's own arrow sits ~4px from the right border, so the mixin drops it (`appearance: none`)
-and draws a chevron 14px in. Give any new native select in a popup the mixin; Select2-upgraded
+and draws a chevron 14px in (declarations only: a nested `&` in a mixin is Sonar css:S8776, and
+the default cursor matches Oro's own native selects). Give any new native select in a popup the mixin; Select2-upgraded
 combos (RecordFormModal, the Add Data modal) draw their own arrow and need nothing.
 Gotcha fixed here once: a textarea's initial value must be set via jQuery `.val()` — a `value`
 key in the `$('<textarea/>', {...})` creation map is silently ignored.

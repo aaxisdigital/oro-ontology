@@ -61,31 +61,51 @@ class BucketFlowEventStore
      */
     public function purgeBefore(\DateTimeImmutable $cutoff): int
     {
-        $limit = $cutoff->setTimezone(new \DateTimeZone('UTC'))->format(self::DAY_PATH);
-        $root = $this->rootPrefix();
         $deleted = 0;
-        foreach ($this->client->listPrefixes($root) as $year) {
-            if (substr($year, \strlen($root), 4) > substr($limit, 0, 4)) {
-                continue;
-            }
-            foreach ($this->client->listPrefixes($year) as $month) {
-                if (substr($month, \strlen($root), 7) > substr($limit, 0, 7)) {
-                    continue;
-                }
-                foreach ($this->client->listPrefixes($month) as $day) {
-                    $date = substr($day, \strlen($root), 10);
-                    if (preg_match('#^\d{4}/\d{2}/\d{2}$#', $date) !== 1 || $date >= $limit) {
-                        continue;
-                    }
-                    foreach ($this->client->listKeys($day) as $key) {
-                        $this->client->delete($key);
-                        $deleted++;
-                    }
-                }
+        foreach ($this->dayPrefixesBefore($cutoff->setTimezone(new \DateTimeZone('UTC'))->format(self::DAY_PATH)) as $day) {
+            foreach ($this->client->listKeys($day) as $key) {
+                $this->client->delete($key);
+                $deleted++;
             }
         }
 
         return $deleted;
+    }
+
+    /**
+     * The day folders strictly before $limit ('Y/m/d'), never listing inside a year or month
+     * that is not older.
+     *
+     * @return \Generator<int, string>
+     */
+    private function dayPrefixesBefore(string $limit): \Generator
+    {
+        $root = $this->rootPrefix();
+        foreach ($this->prefixesUpTo($root, $root, substr($limit, 0, 4)) as $year) {
+            foreach ($this->prefixesUpTo($year, $root, substr($limit, 0, 7)) as $month) {
+                foreach ($this->client->listPrefixes($month) as $day) {
+                    $date = substr($day, \strlen($root), 10);
+                    if (preg_match('#^\d{4}/\d{2}/\d{2}$#', $date) === 1 && $date < $limit) {
+                        yield $day;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The sub-folders of $parent whose date part (after $root) is not after $bound — a year
+     * ('Y') or a month ('Y/m').
+     *
+     * @return \Generator<int, string>
+     */
+    private function prefixesUpTo(string $parent, string $root, string $bound): \Generator
+    {
+        foreach ($this->client->listPrefixes($parent) as $prefix) {
+            if (substr($prefix, \strlen($root), \strlen($bound)) <= $bound) {
+                yield $prefix;
+            }
+        }
     }
 
     /**

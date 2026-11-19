@@ -536,7 +536,7 @@ class OntologyDataApiManager
             if (!$allowAutoCreate) {
                 throw OntologyApiException::unknownSystem($systemName);
             }
-            $system = $this->createSystem($systemName);
+            $system = $this->persistNew((new OntologySystem())->setName($systemName)->setEnabled(true));
         } elseif (!$system->isEnabled()) {
             throw OntologyApiException::disabledSystem($systemName);
         }
@@ -548,7 +548,13 @@ class OntologyDataApiManager
                 throw OntologyApiException::unknownEntity($systemName, $entityName);
             }
 
-            return $this->createEntity($system, $entityName);
+            $uniqueAttribute = (string) $this->configManager->get('aaxis_ontology.api_auto_create_unique_attribute');
+
+            return $this->persistNew((new OntologyEntity())
+                ->setSystem($system)
+                ->setName($entityName)
+                ->setUniqueAttribute($uniqueAttribute !== '' ? $uniqueAttribute : 'id')
+                ->setEnabled(true));
         }
 
         if (!$entity->isEnabled()) {
@@ -558,29 +564,22 @@ class OntologyDataApiManager
         return $entity;
     }
 
-    private function createSystem(string $name): OntologySystem
+    /**
+     * Stores a system or entity the API just auto-created (see {@see resolveEntity}).
+     *
+     * @template T of OntologySystem|OntologyEntity
+     *
+     * @param T $record
+     *
+     * @return T
+     */
+    private function persistNew(OntologySystem|OntologyEntity $record): OntologySystem|OntologyEntity
     {
-        $system = (new OntologySystem())->setName($name)->setEnabled(true);
-        $em = $this->doctrine->getManagerForClass(OntologySystem::class);
-        $em->persist($system);
+        $em = $this->doctrine->getManagerForClass($record::class);
+        $em->persist($record);
         $em->flush();
 
-        return $system;
-    }
-
-    private function createEntity(OntologySystem $system, string $name): OntologyEntity
-    {
-        $uniqueAttribute = (string) $this->configManager->get('aaxis_ontology.api_auto_create_unique_attribute');
-        $entity = (new OntologyEntity())
-            ->setSystem($system)
-            ->setName($name)
-            ->setUniqueAttribute($uniqueAttribute !== '' ? $uniqueAttribute : 'id')
-            ->setEnabled(true);
-        $em = $this->doctrine->getManagerForClass(OntologyEntity::class);
-        $em->persist($entity);
-        $em->flush();
-
-        return $entity;
+        return $record;
     }
 
     /**

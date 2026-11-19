@@ -207,9 +207,6 @@ class EntityRecordEraser
 
     private function connection(): Connection
     {
-        /** @var Connection $connection */
-        $connection = $this->doctrine->getConnection();
-
-        return $connection;
+        return $this->doctrine->getConnection();
     }
 }

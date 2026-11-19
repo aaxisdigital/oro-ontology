@@ -7,7 +7,7 @@ describe('dwl-input — single-line text or DWL field', () => {
 
         expect(field.$el.hasClass('aaxis-dwl-input')).toBe(true);
         expect(field.$input.is('input[type="text"].form-control.aaxis-dwl-input__input')).toBe(true);
-        expect(field.$el.find('.aaxis-dwl-input__switch').find(field.$toggle).length).toBe(1);
+        expect(field.$el.find('.aaxis-dwl-input__switch').find(field.$toggle)).toHaveLength(1);
         expect(field.$el.find('.aaxis-flow-editor__switch-text').text()).toBe('aaxis.ontology.flow_editor.dwl_toggle_label');
         expect(field.value()).toBe('/v1/orders');
         expect(field.isDwl()).toBe(false);

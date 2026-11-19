@@ -767,9 +767,9 @@ describe('OntologyFlowEditorComponent — Log event switch', () => {
         openSettings('tick');
         await flush();
 
-        expect(logSwitch().length).toBe(0);
-        expect($('.aaxis-flow-editor__settings-actions').children().length).toBe(1);
-        expect($('.aaxis-flow-editor__settings-buttons .btn-primary').length).toBe(1);
+        expect(logSwitch()).toHaveLength(0);
+        expect($('.aaxis-flow-editor__settings-actions').children()).toHaveLength(1);
+        expect($('.aaxis-flow-editor__settings-buttons .btn-primary')).toHaveLength(1);
     });
 });
 
@@ -835,7 +835,7 @@ describe('OntologyFlowEditorComponent — destination pre-filled from the name',
 
         typeName('Log it');
 
-        expect($('[data-role="destination"]').length).toBe(0);
+        expect($('[data-role="destination"]')).toHaveLength(0);
     });
 });
 

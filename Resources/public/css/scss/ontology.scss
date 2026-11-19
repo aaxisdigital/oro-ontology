@@ -1,7 +1,9 @@
 /* @theme: admin.oro; */
 
 // Native selects in the bundle's popups: the browser's own arrow sits ~4px from the right border,
-// so it is drawn here instead, with the same inset as the text on the left side.
+// so it is drawn here instead, with the same inset as the text on the left side. Declarations
+// only: a nested `&` rule here has no enclosing selector (Sonar css:S8776), and the default
+// cursor is what Oro's own native selects show.
 @mixin aaxis-select-arrow {
     appearance: none;
     padding-right: 34px;
@@ -9,11 +11,6 @@
     background-repeat: no-repeat;
     background-position: right 14px center;
     background-size: 10px 6px;
-    cursor: pointer;
-
-    &:disabled {
-        cursor: default;
-    }
 }
 
 // --- Page shell (shared by System & Entity pages) ---------------------------

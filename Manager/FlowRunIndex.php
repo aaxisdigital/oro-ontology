@@ -72,6 +72,8 @@ class FlowRunIndex
             updated_at = EXCLUDED.updated_at
         SQL;
 
+    private const string DELETE_RUNS = 'DELETE FROM ' . FlowRunsTable::NAME;
+
     private const string COLUMNS = 'flow_uuid, flow_id, flow_name, storage, started_at, finished_at, finish_event, elapsed_ms, events';
 
     public function __construct(
@@ -176,7 +178,7 @@ class FlowRunIndex
         $total = 0;
         do {
             $deleted = (int) $connection->executeStatement(
-                'DELETE FROM ' . FlowRunsTable::NAME . ' WHERE flow_uuid IN (SELECT flow_uuid FROM '
+                self::DELETE_RUNS . ' WHERE flow_uuid IN (SELECT flow_uuid FROM '
                 . FlowRunsTable::NAME . ' WHERE last_event_at < :cutoff LIMIT ' . self::PURGE_BATCH . ')',
                 ['cutoff' => $cutoff]
             );
@@ -192,7 +194,7 @@ class FlowRunIndex
         $connection = $this->connection();
 
         return (int) $connection->transactional(static function (Connection $connection): int {
-            $connection->executeStatement('DELETE FROM ' . FlowRunsTable::NAME . ' WHERE storage = :storage', ['storage' => self::STORAGE_DB]);
+            $connection->executeStatement(self::DELETE_RUNS . ' WHERE storage = :storage', ['storage' => self::STORAGE_DB]);
 
             return (int) $connection->executeStatement(FlowRunsTable::BACKFILL_SQL);
         });
@@ -211,7 +213,7 @@ class FlowRunIndex
         $connection = $this->connection();
 
         return (int) $connection->transactional(function (Connection $connection) use ($runs, $names): int {
-            $connection->executeStatement('DELETE FROM ' . FlowRunsTable::NAME . ' WHERE storage = :storage', ['storage' => self::STORAGE_BUCKET]);
+            $connection->executeStatement(self::DELETE_RUNS . ' WHERE storage = :storage', ['storage' => self::STORAGE_BUCKET]);
             foreach ($runs as $run) {
                 $this->insertBucketRun($connection, $run, $names);
             }
@@ -275,9 +277,6 @@ class FlowRunIndex
 
     private function connection(): Connection
     {
-        /** @var Connection $connection */
-        $connection = $this->doctrine->getConnection();
-
-        return $connection;
+        return $this->doctrine->getConnection();
     }
 }

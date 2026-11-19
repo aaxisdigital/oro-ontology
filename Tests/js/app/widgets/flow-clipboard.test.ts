@@ -107,6 +107,6 @@ describe('flow-clipboard — pastedName', () => {
         const name = pastedName('x'.repeat(64), true, new Set());
 
         expect(name).toBe(`${'x'.repeat(57)} (copy)`);
-        expect(name.length).toBe(64);
+        expect(name).toHaveLength(64);
     });
 });

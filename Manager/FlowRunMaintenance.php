@@ -275,10 +275,7 @@ class FlowRunMaintenance
 
     private function connection(): Connection
     {
-        /** @var Connection $connection */
-        $connection = $this->doctrine->getConnection();
-
-        return $connection;
+        return $this->doctrine->getConnection();
     }
 
     private function purgeEventTable(string $cutoff): int

@@ -180,7 +180,7 @@ describe('OntologyFlowEditorComponent — copy / paste', () => {
         await pasteAt(400, 300);
 
         expect(FlowDialog.last().$content.text()).toContain(KEY('paste_unreadable'));
-        expect($('[data-role="step"]').length).toBe(0);
+        expect($('[data-role="step"]')).toHaveLength(0);
     });
 });
 

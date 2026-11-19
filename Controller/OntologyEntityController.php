@@ -244,13 +244,15 @@ class OntologyEntityController extends AbstractOntologyController
         $eraser = $this->container->get(EntityRecordEraser::class);
         try {
             $filter = RecordFilter::parse($request->query->all());
-            if (!$request->query->getBoolean('rows')) {
-                return new JsonResponse(['success' => true, 'total' => $eraser->count($entity, $filter)]);
+            if ($request->query->getBoolean('rows')) {
+                $page = max(1, $request->query->getInt('page', 1));
+                $pageSize = max(1, min($request->query->getInt('pageSize', 10), EntityRecordEraser::MAX_PAGE_SIZE));
+                $body = ['page' => $page, 'pageSize' => $pageSize] + $eraser->preview($entity, $filter, $page, $pageSize);
+            } else {
+                $body = ['total' => $eraser->count($entity, $filter)];
             }
-            $page = max(1, $request->query->getInt('page', 1));
-            $pageSize = max(1, min($request->query->getInt('pageSize', 10), EntityRecordEraser::MAX_PAGE_SIZE));
 
-            return new JsonResponse(['success' => true, 'page' => $page, 'pageSize' => $pageSize] + $eraser->preview($entity, $filter, $page, $pageSize));
+            return new JsonResponse(['success' => true] + $body);
         } catch (\InvalidArgumentException $e) {
             return new JsonResponse(['success' => false, 'message' => $e->getMessage()], 422);
         }

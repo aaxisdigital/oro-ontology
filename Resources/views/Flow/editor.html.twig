@@ -80,18 +80,28 @@
                             {role: 'tab-add', icon: 'fa-file-o', label: 'aaxis.ontology.flow_editor.tab_add'},
                             {role: 'tab-open', icon: 'fa-folder-open-o', label: 'aaxis.ontology.flow_editor.tab_open'},
                             {role: 'save', icon: 'fa-floppy-o', label: 'aaxis.ontology.flow_editor.tab_save', disabled: true},
-                            {role: 'save-all', icon: 'fa-floppy-o aaxis-flow-editor__save-all-back', label: 'aaxis.ontology.flow_editor.tab_save_all', disabled: true},
+                            {role: 'save-all', label: 'aaxis.ontology.flow_editor.tab_save_all'},
                             {role: 'view-source', icon: 'fa-code', label: 'aaxis.ontology.flow_editor.view_source'},
                             {role: 'flow-history', icon: 'fa-history', label: 'aaxis.ontology.flow_editor.history', disabled: true},
                             {role: 'tab-close-all', icon: 'fa-times', label: 'aaxis.ontology.flow_editor.tab_close_all', class: 'aaxis-flow-editor__tab--leave'}
                         ] %}
                         <div class="aaxis-flow-editor__tab-group" data-role="document-actions">
+                            {#- Each button's content is icons only, never template logic: the label lives in
+                                title/aria-label (Sonar Web:S7927 reads template tags as visible text). #}
                             {% for action in document_actions %}
-                                <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action {{ action.class ?? '' }}" data-role="{{ action.role }}"
-                                        title="{{ action.label|trans }}" aria-label="{{ action.label|trans }}"{% if action.disabled ?? false %} disabled{% endif %}>
-                                    <span class="fa {{ action.icon }}" aria-hidden="true"></span>
-                                    {%- if action.role == 'save-all' %}<span class="fa fa-floppy-o aaxis-flow-editor__save-all-front" aria-hidden="true"></span>{% endif %}
-                                </button>
+                                {% if action.role == 'save-all' %}
+                                    {# FA 4 has no "save all" glyph: two floppies, one offset behind the other. #}
+                                    <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action" data-role="save-all"
+                                            title="{{ action.label|trans }}" aria-label="{{ action.label|trans }}" disabled>
+                                        <span class="fa fa-floppy-o aaxis-flow-editor__save-all-back" aria-hidden="true"></span>
+                                        <span class="fa fa-floppy-o aaxis-flow-editor__save-all-front" aria-hidden="true"></span>
+                                    </button>
+                                {% else %}
+                                    <button type="button" class="aaxis-flow-editor__tab aaxis-flow-editor__tab--action {{ action.class ?? '' }}" data-role="{{ action.role }}"
+                                            title="{{ action.label|trans }}" aria-label="{{ action.label|trans }}"{% if action.disabled ?? false %} disabled{% endif %}>
+                                        <span class="fa {{ action.icon }}" aria-hidden="true"></span>
+                                    </button>
+                                {% endif %}
                             {% endfor %}
                         </div>
                     </div>

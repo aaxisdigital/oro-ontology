@@ -474,16 +474,7 @@ class FlowDebugExecutor
             throw new FlowStepFailure($message, $step['id'], [], $e);
         }
         $tickOverTrails = array_values($this->subflowTrails);
-        foreach ($this->subflowTrails as $trail) {
-            if (!isset($trails[$trail['flowId']])) {
-                $trails[$trail['flowId']] = $trail;
-            } else {
-                $trails[$trail['flowId']]['executedIds'] = array_values(array_unique(array_merge(
-                    $trails[$trail['flowId']]['executedIds'],
-                    $trail['executedIds']
-                )));
-            }
-        }
+        $this->mergeSubflowTrails($trails);
         if (self::logsEvents($step, (bool) ($frame['quiet'] ?? false))) {
             $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
                 'name' => $step['name'],
@@ -515,6 +506,26 @@ class FlowDebugExecutor
             // in-frame walk bookkeeping must not — it made the editor bounce home every step.
             '_overTrails' => $tickOverTrails,
         ];
+    }
+
+    /**
+     * Folds the subflow trails of the step just run into the walk's per-flow trails (the runAll
+     * visit animation): a new flow joins, a known one gains the ids it did not have yet.
+     *
+     * @param array<int, array<string,mixed>> $trails
+     */
+    private function mergeSubflowTrails(array &$trails): void
+    {
+        foreach ($this->subflowTrails as $trail) {
+            if (!isset($trails[$trail['flowId']])) {
+                $trails[$trail['flowId']] = $trail;
+                continue;
+            }
+            $trails[$trail['flowId']]['executedIds'] = array_values(array_unique(array_merge(
+                $trails[$trail['flowId']]['executedIds'],
+                $trail['executedIds']
+            )));
+        }
     }
 
     /**

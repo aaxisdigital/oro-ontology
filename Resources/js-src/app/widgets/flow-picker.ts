@@ -37,7 +37,7 @@ function byName(a: PickableFlow, b: PickableFlow): number {
 
 /** Epoch millis of the last modification; flows without one count as the oldest. */
 function modifiedAt(flow: PickableFlow): number {
-    const time = flow.lastModified ? Date.parse(flow.lastModified) : NaN;
+    const time = flow.lastModified ? Date.parse(flow.lastModified) : Number.NaN;
 
     return Number.isNaN(time) ? 0 : time;
 }

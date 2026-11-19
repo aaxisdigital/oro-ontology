@@ -21,6 +21,8 @@ final class FlowRunsTable
     public const string NAME = 'aaxis_ontology_flow_runs';
 
     private const string MICRO = 'TIMESTAMP(6) WITHOUT TIME ZONE';
+    private const string MICRO_NOT_NULL = self::MICRO . ' NOT NULL';
+    private const string MICRO_NULL = self::MICRO . ' DEFAULT NULL';
 
     /**
      * Rebuilds the index rows of the TABLE-stored runs from aaxis_ontology_flow_events, with the
@@ -83,17 +85,17 @@ final class FlowRunsTable
         $table->addColumn('storage', 'string', ['length' => 8, 'default' => 'db']);
         // start_at = the flow-start's time; first_event_at = the earliest event (a start-less run,
         // e.g. a bare consumer upsert, starts there); started_at = the one the page shows/sorts.
-        $table->addColumn('start_at', 'datetime', ['columnDefinition' => self::MICRO . ' DEFAULT NULL']);
-        $table->addColumn('first_event_at', 'datetime', ['columnDefinition' => self::MICRO . ' NOT NULL']);
-        $table->addColumn('started_at', 'datetime', ['columnDefinition' => self::MICRO . ' NOT NULL']);
-        $table->addColumn('last_event_at', 'datetime', ['columnDefinition' => self::MICRO . ' NOT NULL']);
+        $table->addColumn('start_at', 'datetime', ['columnDefinition' => self::MICRO_NULL]);
+        $table->addColumn('first_event_at', 'datetime', ['columnDefinition' => self::MICRO_NOT_NULL]);
+        $table->addColumn('started_at', 'datetime', ['columnDefinition' => self::MICRO_NOT_NULL]);
+        $table->addColumn('last_event_at', 'datetime', ['columnDefinition' => self::MICRO_NOT_NULL]);
         // The latest flow-finish/flow-exception (NULL = still running) and which one it was.
-        $table->addColumn('finished_at', 'datetime', ['columnDefinition' => self::MICRO . ' DEFAULT NULL']);
+        $table->addColumn('finished_at', 'datetime', ['columnDefinition' => self::MICRO_NULL]);
         $table->addColumn('finish_event', 'string', ['length' => 32, 'notnull' => false]);
         $table->addColumn('elapsed_ms', 'bigint', ['notnull' => false]);
         $table->addColumn('events', 'integer', ['default' => 0]);
         // Database clock of the last change — the Events page's incremental refresh cursor.
-        $table->addColumn('updated_at', 'datetime', ['columnDefinition' => self::MICRO . ' NOT NULL']);
+        $table->addColumn('updated_at', 'datetime', ['columnDefinition' => self::MICRO_NOT_NULL]);
         $table->setPrimaryKey(['flow_uuid']);
         $table->addIndex(['storage', 'started_at'], 'aaxis_ontology_flow_runs_started_idx');
         $table->addIndex(['updated_at'], 'aaxis_ontology_flow_runs_updated_idx');

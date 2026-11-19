@@ -5338,9 +5338,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $buttons.each((_i: number, el: HTMLElement) => {
             // The twig titles name the buttons (the only label in icon-only mode): keep them,
             // swapping in the reason while running is blocked by red steps.
-            if (el.dataset.title === undefined) {
-                el.dataset.title = el.getAttribute('title') || '';
-            }
+            el.dataset.title ??= el.getAttribute('title') || '';
             el.setAttribute('title', invalid ? __('aaxis.ontology.flow_editor.invalid_steps_blocked') : el.dataset.title);
         });
         if (blocked) {
@@ -6058,7 +6056,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private paintDebugNext(): void {
         this.steps.forEach(s => s.el.classList.remove('is-debug-next'));
         const session = this.debugSession;
-        if (!session || !session.next || session.done || session.error !== null || this.debugVisiting) {
+        if (!session?.next || session.done || session.error !== null || this.debugVisiting) {
             return;
         }
         const canvasKey = this.activeTab === session.homeIndex ? 'root' : String((this.flow as any)?.id ?? '');
