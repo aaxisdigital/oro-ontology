@@ -2315,16 +2315,26 @@
         box-shadow: 0 0 0 1.5px rgba(192, 57, 43, 0.35);
     }
 
-    // Steps a debug session has EXECUTED (amber, distinct from the blue selection) — marks
-    // accumulate as the run advances and stay until the session closes.
-    &__step.is-debug-active {
+    // Debug / Run Now marks, distinct from the blue selection. Declared in priority order, so
+    // the later one wins on a tile carrying two.
+    // EXECUTED steps (light green): marks accumulate as the run advances and stay until the
+    // session closes.
+    &__step.is-debug-executed {
+        border-color: #2f855a;
+        background: #e9f7ee;
+        box-shadow: 0 0 0 2px rgba(56, 161, 105, 0.4);
+    }
+
+    // The step the NEXT debug tick will execute (light orange). It beats green: a subflow
+    // stepped into a second time shows its earlier marks.
+    &__step.is-debug-next {
         border-color: #b45309;
         background: #fff7e6;
         box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.4);
     }
 
-    // The step whose execution FAILED (declared after the amber rule so red wins if both apply);
-    // the sidebar shows the error text itself.
+    // The step whose execution FAILED (light red; Run Now and Debug alike); the sidebar shows the
+    // error text itself.
     &__step.is-debug-failed {
         border-color: #c0392b;
         background: #fdecea;
@@ -2870,8 +2880,11 @@
     }
 }
 
-// The "open a flow in a new tab" picker (flow editor tab bar).
+// The flow editor's "Open flows" popup (widgets/flow-picker.ts). Rows and the column head share
+// one grid template, so the status badges and dates line up under their titles.
 .aaxis-flow-picker {
+    --aaxis-flow-picker-cols: 16px minmax(0, 1fr) 76px 168px 28px;
+
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -2880,24 +2893,44 @@
     max-height: calc(60vh - 88px);
     overflow: hidden;
 
-    &__filter {
+    &__bar {
         flex: 0 0 auto;
-        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 8px;
     }
 
-    &__tabs {
+    // Oro's .form-control margin-bottom would push the bar's line off center.
+    &__filter.form-control {
+        flex: 1 1 auto;
+        min-width: 0;
+        margin: 0;
+    }
+
+    &__sort.form-control {
+        @include aaxis-select-arrow;
+
         flex: 0 0 auto;
+        width: 228px;
+        margin: 0;
+    }
+
+    // Stretched to the bar's height, so the toggles match the inputs beside them.
+    &__kinds {
+        flex: 0 0 auto;
+        align-self: stretch;
         display: flex;
         gap: 6px;
     }
 
-    &__tab {
-        padding: 6px 14px;
+    &__kind {
+        padding: 6px 12px;
         border: 1px solid #d6dde4;
         border-radius: 6px;
         background: #f5f8fb;
         color: #4a5a6a;
         font-size: 12.5px;
+        white-space: nowrap;
         cursor: pointer;
 
         &:hover {
@@ -2910,6 +2943,28 @@
             color: #fff;
             font-weight: font-weight('bold');
         }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+    }
+
+    &__head,
+    &__row {
+        display: grid;
+        grid-template-columns: var(--aaxis-flow-picker-cols);
+        align-items: center;
+        column-gap: 10px;
+    }
+
+    &__head {
+        flex: 0 0 auto;
+        // The rows' border + horizontal padding, so the titles sit over their columns.
+        padding: 0 13px;
+        color: #7a8a9a;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: .03em;
     }
 
     &__list {
@@ -2922,24 +2977,30 @@
     }
 
     &__row {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 9px 12px;
+        flex: 0 0 auto;
+        padding: 7px 12px;
         border: 1px solid #e4e9ee;
         border-radius: 6px;
         background: #fff;
-        text-align: left;
         cursor: pointer;
+        user-select: none;
 
         &:hover {
-            background: #f0f6ff;
+            border-color: #2b6cb0;
+        }
+
+        &.is-selected {
+            background: #eaf2fc;
             border-color: #2b6cb0;
         }
     }
 
+    &__check {
+        margin: 0;
+        cursor: pointer;
+    }
+
     &__name {
-        flex: 1 1 auto;
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -2949,16 +3010,58 @@
     }
 
     &__badge {
-        flex: 0 0 auto;
+        justify-self: start;
         padding: 1px 8px;
         border-radius: 10px;
-        background: #eaf1f8;
-        color: #2b6cb0;
         font-size: 11px;
+
+        &--on {
+            background: #e6f4ea;
+            color: #1e7e34;
+        }
 
         &--off {
             background: #fdecea;
             color: #c0392b;
         }
+    }
+
+    &__modified {
+        color: #5a6b7d;
+        font-size: 12px;
+        white-space: nowrap;
+    }
+
+    // Icon only, no box (like the tab bar's actions).
+    &__open {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 26px;
+        padding: 0;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: #2b6cb0;
+        font-size: 15px;
+        cursor: pointer;
+
+        &:hover {
+            background: #d8e6f6;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+    }
+
+    &__actions {
+        flex: 0 0 auto;
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding-top: 10px;
+        border-top: 1px solid #e4e9ee;
     }
 }

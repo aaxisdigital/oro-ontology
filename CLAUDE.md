@@ -685,10 +685,18 @@ an icon-only `__tab--action` (titles are the labels) in two `__tab-group`s, 14px
   step blocked running must not strand an open toolbox menu without its handlers);
 - DOCUMENT tools (`document-actions`), in order:
   - empty page (fa-file-o) = a new empty flow tab (`tab-add`);
-  - folder = open any existing non-native flow in a NEW tab (`tab-open`; picker over
-    `aaxis_ontology_flow_list` — a full-width name filter + a Flows|Subflows tab pair whose COUNTS
-    follow the filter, only the list scrolls and the popup is capped at ~60% of the window; an
-    already-open flow just focuses its tab);
+  - folder = **Open flows** (`tab-open`): `widgets/flow-picker.ts` (`FlowPickerDialog`, fresh
+    `aaxis_ontology_flow_list` fetch, natives left out; 2026-11-19). Top bar, one line: the name
+    filter (takes the remaining width), the sort select (`PICKER_SORTS` via the pure
+    `sortFlows()`: name A–Z/Z–A, last modified newest/oldest, status enabled/disabled first; ties
+    by name; no date = oldest) and the Flows / Subflows toggles (`__kind`, counts follow the
+    filter). The toggles COMBINE — either or both kinds list — and clicking the only one still on
+    does nothing. Rows (a grid shared with the column head): checkbox, name, enabled/disabled
+    badge (always), last modified, and an Open button (`flow-open`) that opens THAT flow at once.
+    A row click only MARKS (`picked`, marking order); marks survive filter/sort/toggles. Footer:
+    Cancel + **Open selected** (`picker-open`, disabled with no marks, "Open selected (N)" from
+    two). `openFlowsInTabs()` opens each in a tab (an already-open flow keeps its own) and fronts
+    the FIRST picked; only the list scrolls, the popup is capped at ~60% of the window;
   - floppy = **Save** (`save`) — the ACTIVE tab, disabled while it is clean or `saving`;
   - two stacked floppies = **Save all** (`save-all`; FA 4 has no such glyph) — enabled ONLY while a
     tab OUT OF FOCUS holds changes (several changed tabs always include one): with just the focused
@@ -1193,7 +1201,7 @@ frame and RE-ENTERS it per iteration, loop vars seeded/restored like the atomic 
 is one of: executing the current frame's next step (`transition: null`); ENTERING a subflow
 ('entered' — the target's TRIGGER is the returned step, nothing else ran); RE-ENTERING for the
 next foreach iteration ('reentered' — the editor WIPES the subflow canvas so it starts white with
-only the trigger amber, `iteration` says which pass); RETURNING ('returned' — the caller's
+only the trigger green, `iteration` says which pass); RETURNING ('returned' — the caller's
 invoker step completes only now). Responses carry `frame: {flowId, flowName, depth}` (the editor
 switches tabs to follow — `applyDebugTick`, session-preserving via debugVisiting — and repaints
 that canvas's marks from `session.marksByFlow`), `next` ({id,name,type} of the upcoming step —
@@ -1222,13 +1230,27 @@ by timeout — restart the debug"; every later step gets the same answer). Aband
 (`ScheduledFlowRunner::sweepStaleDebugSessions`, runs before the due-flows pass): any run of the
 run index with trigger `debug`, NO finish/exception, and no event newer than the window
 (`FlowRunIndex::staleDebugRuns`, a partial index over exactly those rows) gets the same
-debug-timeout exception event, and its cached walk blob is marked terminated too. **Canvas marks**: every EXECUTED step keeps the AMBER `is-debug-active`
-class for the whole session (marks accumulate, cleared only on session start/close), a FAILED
-step turns RED (`is-debug-failed`, declared after amber so it wins) with the error text in the
-sidebar as before. Both debug endpoints return `executedIds` (this call's successful trail —
+debug-timeout exception event, and its cached walk blob is marked terminated too. **Canvas marks** (colours since 2026-11-19; the SCSS declares them in this priority order, so
+the later one wins on a tile carrying two):
+- EXECUTED steps are LIGHT GREEN (`is-debug-executed`, was amber `is-debug-active`) for the whole
+  session: marks accumulate and are cleared only on session start/close.
+- The step the NEXT Debug tick will execute is LIGHT ORANGE (`is-debug-next`, the old amber
+  look): `paintDebugNext()` paints the response's `next` on the canvas of the frame it belongs to
+  (`session.nextKey`, from `debugFrameKey()` — the marksByFlow keys). It runs after every tick
+  and after a subflow visit comes home, and paints nothing while a visit shows another canvas,
+  once the run is done or failed, or when `next` is null (the next tick returns from a
+  subflow). Run Now has no orange.
+- A FAILED step is LIGHT RED (`is-debug-failed`), in Run Now and Debug alike, with the error text
+  in the sidebar.
+
+Both debug endpoints return `executedIds` (this call's successful trail —
 `FlowDebugExecutor::lastExecutedIds()`, reset per execute/tick) and, on a step failure,
-`failedStepId` + `executedIds` via `Exception/FlowStepFailure` (executeStepTracked wraps step
-errors; callers catching plain \RuntimeException still work). **Run Now** (mode
+`failedStepId` + `executedIds` via `Exception/FlowStepFailure`. EVERY step error is wrapped —
+executeStepTracked, the debug tick and entering a subflow frame catch `\Throwable` — so a
+TypeError, JsonException or a PHP warning turned into an ErrorException paints its tile red too
+instead of escaping as a bare 500 (until 2026-11-19 only \RuntimeException was). Those non-runtime
+errors get the `Step "<name>": ` prefix (`stepErrorMessage()`); runtime ones already carry it.
+Callers catching plain \RuntimeException still work. **Run Now** (mode
 'run', `data-role="debug"`) executes everything in ONE POST to `aaxis_ontology_flow_debug`
 (`FlowDebugExecutor::execute()`) — while it runs only the button spinner shows; the sidebar
 APPEARS WHEN THE RUN FINISHES with the final context (or the failure), and the canvas marks are
@@ -1350,7 +1372,7 @@ doctrine.metadata.cache.config oro_security.entity_security_metadata_provider.ca
 three before the migration run comes back green.
 **DEBUG SUBFLOW VISIT** (editor): when a debugged step of type sub_flow/foreach returns
 `subflowTrails`, `visitSubflowTrails()` brings each subflow's tab to the front (`ensureFlowTab`:
-reuse the open tab or open one from the flow catalog), paints its executed steps amber, dwells
+reuse the open tab or open one from the flow catalog), paints its executed steps green, dwells
 ~1.6s each, then returns to the debugged flow's tab and REPAINTS its session marks (the switch
 re-rendered the canvas — the session now tracks `markedIds`/`failedId` for exactly this). Tab
 switches during the visit keep the session alive via the `debugVisiting` flag (resetCanvas skips

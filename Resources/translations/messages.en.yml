@@ -409,7 +409,7 @@ aaxis:
             organize: 'Organize'
             tab_toolbox: 'Show / hide the toolbox'
             tab_add: 'New flow in a new tab'
-            tab_open: 'Open a flow in a new tab'
+            tab_open: 'Open flows in new tabs'
             tab_save: 'Save this flow'
             tab_save_all: 'Save all changed flows'
             tab_close_all: 'Close the editor'

@@ -211,13 +211,26 @@ class FlowDebugExecutor
 
     /**
      * The ids of the steps the LAST execute()/executeFrom() call ran successfully, in order — what
-     * the editor paints amber. On failure the trail travels inside {@see FlowStepFailure} too.
+     * the editor paints green. On failure the trail travels inside {@see FlowStepFailure} too.
      *
      * @return array<int, string>
      */
     public function lastExecutedIds(): array
     {
         return $this->lastExecutedIds;
+    }
+
+    /**
+     * The message a failed step reports. Step code throws runtime exceptions that already name
+     * the step; anything else (a TypeError, a JsonException, a PHP warning turned into an
+     * ErrorException) is prefixed with the step name here. Every step error is wrapped into a
+     * {@see FlowStepFailure}, so the editor can always paint the failing tile.
+     *
+     * @param array{name: string} $step
+     */
+    private static function stepErrorMessage(array $step, \Throwable $e): string
+    {
+        return $e instanceof \RuntimeException ? $e->getMessage() : sprintf('Step "%s": %s', $step['name'], $e->getMessage());
     }
 
     /**
@@ -231,8 +244,8 @@ class FlowDebugExecutor
     {
         try {
             $this->executeStep($step, $context, $flow, $executionUuid);
-        } catch (\RuntimeException $e) {
-            throw new FlowStepFailure($e->getMessage(), $step['id'], $this->lastExecutedIds, $e);
+        } catch (\Throwable $e) {
+            throw new FlowStepFailure(self::stepErrorMessage($step, $e), $step['id'], $this->lastExecutedIds, $e);
         }
         $this->lastExecutedIds[] = $step['id'];
         // Every executed step leaves one event — the run's step-by-step trail — unless its
@@ -455,9 +468,10 @@ class FlowDebugExecutor
         }
         try {
             $this->executeStep($step, $context, $frameFlow, $executionUuid);
-        } catch (\RuntimeException $e) {
-            $this->emitDebugException($blob, $e->getMessage(), $executionUuid);
-            throw new FlowStepFailure($e->getMessage(), $step['id'], [], $e);
+        } catch (\Throwable $e) {
+            $message = self::stepErrorMessage($step, $e);
+            $this->emitDebugException($blob, $message, $executionUuid);
+            throw new FlowStepFailure($message, $step['id'], [], $e);
         }
         $tickOverTrails = array_values($this->subflowTrails);
         foreach ($this->subflowTrails as $trail) {
@@ -528,9 +542,10 @@ class FlowDebugExecutor
                 $blob['context'][$itemVar] = $frame['list'][0];
                 $blob['context']['index'] = 0;
             }
-        } catch (\RuntimeException $e) {
-            $this->emitDebugException($blob, $e->getMessage(), $executionUuid);
-            throw new FlowStepFailure($e->getMessage(), $step['id'], [], $e);
+        } catch (\Throwable $e) {
+            $message = self::stepErrorMessage($step, $e);
+            $this->emitDebugException($blob, $message, $executionUuid);
+            throw new FlowStepFailure($message, $step['id'], [], $e);
         }
 
         $blob['frames'][] = $frame;

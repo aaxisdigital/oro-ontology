@@ -6,7 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Exception;
 
 /**
  * A flow run that failed INSIDE a step, carrying what the editor needs to paint the canvas: the
- * failing step's id (reddish tile) and the ids of the steps that had already executed (amber
+ * failing step's id (light-red tile) and the ids of the steps that had already executed (green
  * tiles). Message and semantics are the wrapped step error's — this only adds addressing, so
  * callers that catch plain \RuntimeException keep working unchanged.
  */

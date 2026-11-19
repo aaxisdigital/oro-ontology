@@ -12,6 +12,7 @@ import {apiFetch, formatDateTime} from './component-support';
 import {highlightJson, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 import {buildClipboardDoc, ClipboardDoc, parseClipboardDoc, pastedName} from '../widgets/flow-clipboard';
 import {readClipboard, writeClipboard} from '../widgets/clipboard';
+import FlowPickerDialog from '../widgets/flow-picker';
 
 interface FlowStep {
     type: string;
@@ -353,6 +354,7 @@ interface FlowRecord {
     steps: FlowStep[] | null;
     design: any;
     invalidSteps?: string[];
+    lastModified?: string | null;
 }
 
 /** One open editor tab: a flow (or a new one) plus its stashed working state while inactive. */
@@ -421,6 +423,14 @@ function debugAutoCloseBar(autoClose: {deadline: number; duration: number}): any
         $('<div/>', {'class': 'aaxis-flow-editor__debug-autoclose-bar', 'data-role': 'debug-autoclose-bar'})
             .css('width', `${(remaining / autoClose.duration) * 100}%`)
     );
+}
+
+/**
+ * The debug session's key for a tick's frame: 'root' for the debugged flow (depth 0), else the
+ * subflow's id (the keys of `marksByFlow`).
+ */
+function debugFrameKey(frame: {flowId?: number | string | null; depth?: number} | null | undefined): string {
+    return frame && Number(frame.depth || 0) > 0 && frame.flowId ? String(frame.flowId) : 'root';
 }
 
 /** Which debugger button a request was started from (it carries the spinner meanwhile). */
@@ -638,6 +648,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         homeIndex: number;
         /** What the next tick would execute — Step into appears when it is a subflow invoker. */
         next: {id: string; name: string; type: string} | null;
+        /** The canvas `next` belongs to (same keys as marksByFlow) — it is painted orange there. */
+        nextKey: string | null;
         /** Current frame depth (0 = the debugged flow) — Step out appears inside a subflow. */
         depth: number;
         /** The auto-dismiss countdown once the run FINISHED (config seconds; 0 = never). */
@@ -2012,100 +2024,43 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
     }
 
-    /** The "open" action tab: pick any existing (non-native) flow and open it in a NEW tab. */
     /**
-     * The "open a flow in a new tab" picker: a full-width name filter, a Flows | Subflows tab
-     * pair whose COUNTS follow the filter, and the matching list below (only the LIST scrolls;
-     * the popup itself is capped at ~60% of the window).
+     * The "Open flows" popup ({@see FlowPickerDialog}): mark any existing (non-native) flows and
+     * open them in tabs. It fetches the list afresh, so flows created elsewhere show up.
      */
     private openFlowPicker(): void {
-        const dialog = new Dialog({title: __('aaxis.ontology.flow_editor.tab_open'), width: '560px'});
-        const $content = dialog.open();
-        const $picker = $('<div/>', {'class': 'aaxis-flow-picker'});
-        $content.append($picker);
-        $picker.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.loading')}));
-        fetch(routing.generate('aaxis_ontology_flow_list'), {credentials: 'same-origin'})
-            .then(r => r.json())
-            .then((data: {records?: FlowRecord[]}) => {
-                $picker.empty();
-                const rows = (data.records || []).filter(f => f.type !== 'native');
-                if (!rows.length) {
-                    $picker.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.tab_open_empty')}));
-                    return;
-                }
-
-                const $filter = $('<input/>', {
-                    type: 'text', 'class': 'form-control aaxis-flow-picker__filter',
-                    placeholder: __('aaxis.ontology.flow_editor.tab_open_filter_placeholder'),
-                    autocomplete: 'off', spellcheck: false
-                });
-                const $tabs = $('<div/>', {'class': 'aaxis-flow-picker__tabs'});
-                const $list = $('<div/>', {'class': 'aaxis-flow-picker__list'});
-                $picker.append($filter, $tabs, $list);
-
-                let active: 'flow' | 'subflow' = 'flow';
-                const matches = (kind: 'flow' | 'subflow'): FlowRecord[] => {
-                    const query = String($filter.val() || '').trim().toLowerCase();
-                    return rows.filter(f => f.type === kind
-                        && (query === '' || (f.name || '').toLowerCase().includes(query)));
-                };
-                const render = (): void => {
-                    $tabs.empty();
-                    const kinds: Array<['flow' | 'subflow', string]> = [
-                        ['flow', __('aaxis.ontology.flow_editor.tab_open_flows')],
-                        ['subflow', __('aaxis.ontology.flow_editor.tab_open_subflows')]
-                    ];
-                    kinds.forEach(([kind, label]) => {
-                        const $tab = $('<button/>', {
-                            type: 'button',
-                            'class': 'aaxis-flow-picker__tab' + (active === kind ? ' is-active' : ''),
-                            text: `${label} (${matches(kind).length})`
-                        });
-                        $tab.on('click', () => {
-                            active = kind;
-                            render();
-                        });
-                        $tabs.append($tab);
-                    });
-
-                    $list.empty();
-                    const visible = matches(active);
-                    if (!visible.length) {
-                        $list.append($('<p/>', {'class': 'aaxis-json-note', text: __('aaxis.ontology.flow_editor.tab_open_no_match')}));
-                        return;
-                    }
-                    visible.forEach(flow => {
-                        const $row = $('<button/>', {type: 'button', 'class': 'aaxis-flow-picker__row'});
-                        $row.append($('<span/>', {'class': 'aaxis-flow-picker__name', text: flow.name || ''}));
-                        if (!flow.enabled) {
-                            $row.append($('<span/>', {'class': 'aaxis-flow-picker__badge aaxis-flow-picker__badge--off', text: __('aaxis.ontology.flow_editor.tab_open_disabled')}));
-                        }
-                        $row.on('click', () => {
-                            dialog.close();
-                            this.openFlowInTab(flow);
-                        });
-                        $list.append($row);
-                    });
-                };
-                $filter.on('input', render);
-                render();
-                $filter.trigger('focus');
-            })
-            .catch(() => {
-                $picker.empty();
-                messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error'));
-            });
+        new FlowPickerDialog<FlowRecord>({
+            load: () => fetch(routing.generate('aaxis_ontology_flow_list'), {credentials: 'same-origin'})
+                .then(r => r.json())
+                .then((data: {records?: FlowRecord[]}) => data.records || []),
+            onOpen: flows => this.openFlowsInTabs(flows),
+            onLoadError: () => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error'))
+        }).open();
     }
 
-    /** Focuses the tab already showing `flow`, or opens it in a new one. */
-    private openFlowInTab(flow: FlowRecord): void {
-        const already = this.tabs.findIndex(t => t.flow !== null && t.flow.id === flow.id);
-        if (already >= 0) {
-            this.switchTab(already);
+    /**
+     * Opens each flow in a tab of its own (an already-open flow keeps its tab) and brings the
+     * FIRST one to the front.
+     */
+    private openFlowsInTabs(flows: FlowRecord[]): void {
+        let focus = -1;
+        flows.forEach(flow => {
+            let index = this.tabs.findIndex(t => t.flow !== null && t.flow.id === flow.id);
+            if (index < 0) {
+                this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
+                index = this.tabs.length - 1;
+            }
+            if (focus < 0) {
+                focus = index;
+            }
+        });
+        if (focus === this.activeTab) {
+            // The front tab stays; only the new ones need drawing and listing in the URL.
+            this.renderTabs();
+            this.syncTabsUrl();
             return;
         }
-        this.tabs.push({flow, design: null, savedState: null, invalidNames: flow.invalidSteps || []});
-        this.switchTab(this.tabs.length - 1);
+        this.switchTab(focus);
     }
 
     /** The full canvas state persisted alongside the logical steps. */
@@ -5604,6 +5559,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             failedId: null,
             homeIndex: this.activeTab,
             next: null,
+            nextKey: null,
             depth: 0,
             autoClose: null
         };
@@ -5765,7 +5721,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * upcoming subflow (stepInto). The server owns the cursor — a STACK of frames — and answers
      * with the executed step, the frame it belongs to and a `transition`:
      *  'entered'/'reentered' bring the subflow's tab to the front (re-enter WIPES its marks —
-     *  a new foreach iteration starts white with only the trigger amber);
+     *  a new foreach iteration starts white with only the trigger green);
      *  'returned' comes home to the caller's tab, whose invoker step is only now marked.
      */
     private debugAdvance(runAll: boolean, stepInto: boolean, stepOut = false): void {
@@ -5793,7 +5749,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 return; // the session was cancelled while the request ran
             }
             if (!res.ok || !res.data?.success) {
-                // A failed step paints the canvas too: everything that ran stays amber, the
+                // A failed step paints the canvas too: everything that ran stays green, the
                 // failing tile turns red (the sidebar shows the error text).
                 this.markExecutedDebugSteps(res.data?.executedIds || []);
                 if (res.data?.failedStepId) {
@@ -5811,6 +5767,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             session.done = Boolean(res.data.done);
             session.next = res.data.next || null;
             session.depth = Number(res.data.frame?.depth || 0);
+            session.nextKey = debugFrameKey(res.data.frame);
             const frameName = res.data.frame?.flowName && res.data.frame.depth > 0
                 ? `${res.data.frame.flowName}: `
                 : '';
@@ -5823,6 +5780,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }).catch((err: Error) => {
             if (this.debugSession === session) {
                 session.error = err.message || __('aaxis.ontology.flow_editor.debug_error');
+                this.paintDebugNext();
             }
         }).finally(() => {
             // A running subflow visit owns the busy flag; its finish() releases it.
@@ -5866,10 +5824,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.updateDebugger();
     }
 
-    /** Applies one tick's canvas effects: tab focus per frame, mark wipes, amber marks. */
+    /** Applies one tick's canvas effects: tab focus per frame, mark wipes, green marks, the orange next step. */
     private applyDebugTick(session: NonNullable<typeof this.debugSession>, data: any): void {
         const frame = data.frame || {flowId: null, flowName: null, depth: 0};
-        const frameKey = frame.depth > 0 && frame.flowId ? String(frame.flowId) : 'root';
+        const frameKey = debugFrameKey(frame);
         const ids: string[] = (data.executedIds || [String(data.step.id || '')]).map(String);
 
         const paint = (): void => {
@@ -5880,6 +5838,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
             session.marksByFlow[frameKey] = Array.from(new Set([...(session.marksByFlow[frameKey] || []), ...ids]));
             this.markExecutedDebugSteps(ids);
+            this.paintDebugNext();
         };
 
         const targetTab = frameKey === 'root'
@@ -5947,6 +5906,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (session.failedId) {
                     this.markFailedDebugStep(session.failedId);
                 }
+                this.paintDebugNext();
                 session.busy = false;
                 session.busyAction = null;
                 this.updateDebugger();
@@ -6085,17 +6045,30 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
-    /** Marks tiles as EXECUTED (amber) — marks accumulate over the session, never move away. */
+    /** Marks tiles as EXECUTED (light green) — marks accumulate over the session, never move away. */
     private markExecutedDebugSteps(stepIds: string[]): void {
-        stepIds.forEach(id => {
-            const step = this.steps.find(s => s.id === String(id));
-            if (step) {
-                step.el.classList.add('is-debug-active');
-            }
-        });
+        stepIds.forEach(id => this.steps.find(s => s.id === String(id))?.el.classList.add('is-debug-executed'));
     }
 
-    /** Marks the tile whose step FAILED (reddish) — the sidebar carries the error text itself. */
+    /**
+     * Paints the step the NEXT tick will execute (light orange) — only on the canvas of the frame
+     * it belongs to, and never while a subflow visit shows another canvas. Without an upcoming
+     * step (finished, failed, or the next tick returns from a subflow) no tile is orange.
+     */
+    private paintDebugNext(): void {
+        this.steps.forEach(s => s.el.classList.remove('is-debug-next'));
+        const session = this.debugSession;
+        if (!session || !session.next || session.done || session.error !== null || this.debugVisiting) {
+            return;
+        }
+        const canvasKey = this.activeTab === session.homeIndex ? 'root' : String((this.flow as any)?.id ?? '');
+        if (canvasKey !== session.nextKey) {
+            return;
+        }
+        this.steps.find(s => s.id === String(session.next!.id))?.el.classList.add('is-debug-next');
+    }
+
+    /** Marks the tile whose step FAILED (light red) — the sidebar carries the error text itself. */
     private markFailedDebugStep(stepId: string): void {
         const step = this.steps.find(s => s.id === String(stepId));
         if (step) {
@@ -6106,9 +6079,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
     }
 
-    /** Clears every executed/failed mark (session start and close). */
+    /** Clears every executed/next/failed mark (session start and close). */
     private clearDebugMarks(): void {
-        this.steps.forEach(s => s.el.classList.remove('is-debug-active', 'is-debug-failed'));
+        this.steps.forEach(s => s.el.classList.remove('is-debug-executed', 'is-debug-next', 'is-debug-failed'));
     }
 
     private closeDebugSession(): void {

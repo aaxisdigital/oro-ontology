@@ -378,6 +378,47 @@ class FlowDebugExecutorDebugWalkTest extends FlowDebugExecutorTestCase
         ], $this->events);
     }
 
+    public function testANonRuntimeStepErrorPaintsTheFailingStepToo(): void
+    {
+        $this->logger->method('info')->willThrowException(new \TypeError('bad argument'));
+        // Ids of the main design, so its links (t → a) reach the logger.
+        $steps = [self::step('t', 'cron', null, 'Main'), self::step('a', 'logger', ['message' => 'hi'], 'Log')];
+        $started = $this->tick(null, steps: $steps);
+        $this->events = [];
+
+        try {
+            $this->tick($started['blob'], steps: $steps);
+            self::fail('Expected the step to fail.');
+        } catch (FlowStepFailure $e) {
+            self::assertSame('Step "Log": bad argument', $e->getMessage());
+            self::assertSame('a', $e->stepId);
+        }
+        self::assertSame([['flow-exception', 'Main', ['message' => 'Step "Log": bad argument']]], $this->events);
+    }
+
+    public function testAnInvokerFailingToEnterOnANonRuntimeErrorNamesItself(): void
+    {
+        $broken = $this->createMock(OntologyFlow::class);
+        $broken->method('getType')->willReturn(OntologyFlow::TYPE_SUBFLOW);
+        $broken->method('isEnabled')->willReturn(true);
+        $broken->method('getDesign')->willThrowException(new \TypeError('unreadable design'));
+        $this->flows[20] = $broken;
+        $steps = self::mainSteps();
+        $blob = ['context' => ['flowUuid' => 'u'], 'frames' => [[
+            'kind' => 'flow', 'flowId' => 1, 'flowName' => 'Main', 'steps' => $steps,
+            'links' => self::mainLinks(), 'index' => 2, 'callerStepId' => null,
+        ]], 'done' => false];
+
+        try {
+            $this->tick($blob, steps: $steps);
+            self::fail('Expected the invoker to fail.');
+        } catch (FlowStepFailure $e) {
+            self::assertSame('Step "Call": unreadable design', $e->getMessage());
+            self::assertSame('call', $e->stepId);
+        }
+        self::assertSame([['flow-exception', 'Main', ['message' => 'Step "Call": unreadable design']]], $this->events);
+    }
+
     /**
      * @dataProvider unenterableInvokers
      */

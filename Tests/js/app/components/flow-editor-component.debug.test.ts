@@ -31,9 +31,14 @@ function clickButton(labelKey: string): void {
     $(`.aaxis-flow-editor__debug-btn[aria-label="${KEY(labelKey)}"]`).trigger('click');
 }
 
-function amber(): string[] {
-    return $('[data-role="step"].is-debug-active .aaxis-flow-editor__step-name').map((_i: number, el: HTMLElement) => el.textContent).get();
+function marked(cls: string): string[] {
+    return $(`[data-role="step"].${cls} .aaxis-flow-editor__step-name`).map((_i: number, el: HTMLElement) => el.textContent).get();
 }
+
+/** Tiles painted as executed (light green). */
+const executed = (): string[] => marked('is-debug-executed');
+/** The tile painted as the next step to execute (light orange). */
+const upcoming = (): string[] => marked('is-debug-next');
 
 const tick = (extra: Record<string, any> = {}): any => ({body: {
     success: true, context: {payload: {a: 1}}, contextKey: 'k1', index: 0, total: 2, done: false,
@@ -72,7 +77,8 @@ describe('OntologyFlowEditorComponent — Run Now', () => {
         expect(root(editor).find('[data-role="debugger"]').prop('hidden')).toBe(false);
         expect($('.aaxis-flow-editor__debugger-mode').text()).toBe(KEY('run_now_title'));
         expect(status()).toBe(` — ${KEY('debug_finished')}`);
-        expect(amber()).toEqual(['nightly', 'shape']);
+        expect(executed()).toEqual(['nightly', 'shape']);
+        expect(upcoming()).toEqual([]);
         // Variables: one line per entry, structures collapsed with a count preview.
         const $vars = $('.aaxis-flow-editor__debugger-vars > .aaxis-json-tree > .aaxis-json-tree__node');
         expect($vars).toHaveLength(2);
@@ -89,7 +95,7 @@ describe('OntologyFlowEditorComponent — Run Now', () => {
         expect($('[data-role="debug-autoclose-bar"]')[0].style.width).toBe('50%');
         vi.advanceTimersByTime(7600);
         expect(root(editor).find('[data-role="debugger"]').prop('hidden')).toBe(true);
-        expect(amber()).toEqual([]);
+        expect(executed()).toEqual([]);
         expect($run.prop('disabled')).toBe(false);
     });
 
@@ -102,8 +108,9 @@ describe('OntologyFlowEditorComponent — Run Now', () => {
 
         expect(status()).toBe(` — ${KEY('debug_failed')}: boom`);
         expect($('.aaxis-flow-editor__debugger-status').hasClass('is-error')).toBe(true);
-        expect(amber()).toEqual(['nightly']);
+        expect(executed()).toEqual(['nightly']);
         expect(tile('shape').classList.contains('is-debug-failed')).toBe(true);
+        expect(tile('shape').classList.contains('is-debug-executed')).toBe(false);
         expect(buttons()).toEqual([[KEY('close'), false]]);
         expect($('[data-role="debug-autoclose-bar"]')).toHaveLength(0);
 
@@ -120,7 +127,7 @@ describe('OntologyFlowEditorComponent — Run Now', () => {
         await flush();
 
         expect(status()).toBe(` — ${KEY('debug_failed')}: ${KEY('debug_error')}`);
-        expect(amber()).toEqual([]);
+        expect(executed()).toEqual([]);
     });
 
     it('never auto-closes when configured with 0 seconds', async () => {
@@ -265,7 +272,8 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
         await flush();
 
         expect(status()).toBe(' — nightly (1/2)');
-        expect(amber()).toEqual(['nightly']);
+        expect(executed()).toEqual(['nightly']);
+        expect(upcoming()).toEqual(['shape']);
         expect(buttons()).toEqual([
             [KEY('debug_run_all'), false], [KEY('debug_next_step'), false], [KEY('debug_step_into'), true],
             [KEY('debug_step_out'), true], [KEY('cancel'), false]
@@ -280,7 +288,8 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
             expect.objectContaining({contextKey: 'k1', runAll: false, stepInto: false, stepOut: false})
         ]);
         expect(status()).toBe(` — ${KEY('debug_finished')}`);
-        expect(amber()).toEqual(['nightly', 'shape']);
+        expect(executed()).toEqual(['nightly', 'shape']);
+        expect(upcoming()).toEqual([]);
         expect(buttons().every(([, disabled]) => disabled)).toBe(true);
         const primitives = $('.aaxis-flow-editor__debugger-vars .aaxis-json-tree__node > .aaxis-json-tree__line > span:last-child')
             .map((_i: number, el: HTMLElement) => el.className).get();
@@ -331,6 +340,7 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
 
         root(editor).find('[data-role="debug-step"]').trigger('click');
         await flush();
+        expect(upcoming()).toEqual(['call']);
         expect(buttons()[2]).toEqual([KEY('debug_step_into'), false]);
         clickButton('debug_step_into');
         expect($(`.aaxis-flow-editor__debug-btn[aria-label="${KEY('debug_step_into')}"] .fa-spinner`)).toHaveLength(1);
@@ -343,19 +353,22 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
         expect($('[data-role="tab"].is-active .aaxis-flow-editor__tab-title').text()).toBe('entry');
         expect(root(editor).find('[data-role="debugger"]').prop('hidden')).toBe(false);
         expect(status()).toBe(' — Child: entry (1/2)');
-        expect(amber()).toEqual(['entry']);
+        expect(executed()).toEqual(['entry']);
+        expect(upcoming()).toEqual(['work']);
         expect(buttons()[3]).toEqual([KEY('debug_step_out'), false]);
 
         clickButton('debug_next_step');
         await flush();
         expect(status()).toBe(` — Child: work (2/2) [${KEY('debug_iteration')} 1]`);
-        expect(amber()).toEqual(['entry', 'work']);
+        expect(executed()).toEqual(['entry', 'work']);
+        // The next tick returns to the caller: nothing is about to run on this canvas.
+        expect(upcoming()).toEqual([]);
 
         clickButton('debug_step_out');
         await flush();
         expect(sentTo(spy, 'aaxis_ontology_flow_debug_step')[3]).toMatchObject({stepOut: true});
         expect($('[data-role="tab"].is-active .aaxis-flow-editor__tab-title').text()).toBe('go');
-        expect(amber()).toEqual(['go', 'call']);
+        expect(executed()).toEqual(['go', 'call']);
 
         // The subflow's marks were remembered silently: revisiting its tab shows them.
         $('[data-role="tab"]').eq(1).trigger('click');
@@ -372,7 +385,7 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
 
         expect(tabTitles()).toEqual(['nightly']);
         expect(status()).toBe(' — Gone: ghost (1/2)');
-        expect(amber()).toEqual([]);
+        expect(executed()).toEqual([]);
     });
 
     it('wipes the subflow canvas for each new foreach iteration', async () => {
@@ -391,25 +404,50 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
         await flush();
         root(editor).find('[data-role="debug-step"]').trigger('click');
         await flush();
-        expect(amber()).toEqual(['entry', 'work']);
+        expect(executed()).toEqual(['entry', 'work']);
 
         clickButton('debug_next_step');
         await flush();
 
-        expect(amber()).toEqual(['entry']);
+        expect(executed()).toEqual(['entry']);
         expect(status()).toBe(` — Child: entry (1/2) [${KEY('debug_iteration')} 2]`);
+    });
+
+    it('turns a failing step light red and drops the orange mark', async () => {
+        mockFetch({aaxis_ontology_flow_debug_step: queue(
+            tick(),
+            {status: 422, body: {success: false, message: 'boom', executedIds: [], failedStepId: 'd1'}}
+        )});
+        const editor = createEditor({flow: simpleFlow(), debugAutoCloseSeconds: 0});
+        root(editor).find('[data-role="debug-step"]').trigger('click');
+        await flush();
+        expect(upcoming()).toEqual(['shape']);
+
+        clickButton('debug_next_step');
+        await flush();
+
+        expect(status()).toBe(` — ${KEY('debug_failed')}: boom`);
+        expect(executed()).toEqual(['nightly']);
+        expect(upcoming()).toEqual([]);
+        expect(tile('shape').classList.contains('is-debug-failed')).toBe(true);
+
+        clickButton('close');
+        expect(tile('shape').className).not.toMatch(/is-debug-/);
+        expect(tile('nightly').className).not.toMatch(/is-debug-/);
     });
 
     it('visits the subflows a stepped-over invoker ran, then comes home and repaints', async () => {
         vi.useFakeTimers();
         const child = flowRecord(20, 'Child', [st('e', 'subflow', 'entry', 0, 0, {enabled: true})], [], {type: 'subflow'});
         const main = flowRecord(7, 'Main', [
-            st('t1', 'cron', 'go', 0, 0, {enabled: true}), st('s1', 'sub_flow', 'call', 200, 0, {subflow: 20})
-        ], [{from: 't1', fromPort: 0, to: 's1'}]);
+            st('t1', 'cron', 'go', 0, 0, {enabled: true}), st('s1', 'sub_flow', 'call', 200, 0, {subflow: 20}),
+            st('l1', 'logger', 'log', 400, 0)
+        ], [{from: 't1', fromPort: 0, to: 's1'}, {from: 's1', fromPort: 0, to: 'l1'}]);
         mockFetch({
             aaxis_ontology_flow_list: {body: {records: [child]}},
             aaxis_ontology_flow_debug_step: tick({step: {id: 's1', name: 'call'}, executedIds: ['t1', 's1'],
-                subflowTrails: [{flowId: 404, executedIds: []}, {flowId: 20, flowName: 'Child', executedIds: ['e']}]})
+                subflowTrails: [{flowId: 404, executedIds: []}, {flowId: 20, flowName: 'Child', executedIds: ['e']}],
+                next: {id: 'l1', name: 'log', type: 'logger'}})
         });
         const editor = createEditor({flow: main, debugAutoCloseSeconds: 0});
         await flush();
@@ -417,7 +455,8 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
         root(editor).find('[data-role="debug-step"]').trigger('click');
         await flush();
         expect($('[data-role="tab"].is-active .aaxis-flow-editor__tab-title').text()).toBe('entry');
-        expect(amber()).toEqual(['entry']);
+        expect(executed()).toEqual(['entry']);
+        expect(upcoming()).toEqual([]);
         expect(buttons().slice(0, 4).every(([, disabled]) => disabled)).toBe(true);
         // The visit owns the busy state; its spinner sits on Next step.
         expect($(`.aaxis-flow-editor__debug-btn[aria-label="${KEY('debug_next_step')}"] .fa-spinner`)).toHaveLength(1);
@@ -425,7 +464,8 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
 
         await vi.advanceTimersByTimeAsync(1700);
         expect($('[data-role="tab"].is-active .aaxis-flow-editor__tab-title').text()).toBe('go');
-        expect(amber()).toEqual(['go', 'call']);
+        expect(executed()).toEqual(['go', 'call']);
+        expect(upcoming()).toEqual(['log']);
         expect(buttons()[1]).toEqual([KEY('debug_next_step'), false]);
     });
 
@@ -471,7 +511,7 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
         await vi.advanceTimersByTimeAsync(1700);
 
         expect($('[data-role="tab"].is-active .aaxis-flow-editor__tab-title').text()).toBe('go');
-        expect(amber()).toEqual([]);
+        expect(executed()).toEqual([]);
     });
 
     it('shows a step request failure in the sidebar', async () => {
@@ -496,7 +536,7 @@ describe('OntologyFlowEditorComponent — step-by-step Debug', () => {
         reply.resolve(tick());
         await flush();
 
-        expect(amber()).toEqual([]);
+        expect(executed()).toEqual([]);
         expect(root(editor).find('[data-role="debugger"]').prop('hidden')).toBe(true);
     });
 });

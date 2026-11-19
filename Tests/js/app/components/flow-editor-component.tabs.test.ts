@@ -175,7 +175,7 @@ describe('OntologyFlowEditorComponent — tabs', () => {
     });
 });
 
-describe('OntologyFlowEditorComponent — the "open flow" picker', () => {
+describe('OntologyFlowEditorComponent — the "open flows" picker', () => {
     useFlowEditorEnv(FlowEditorComponent);
 
     const FLOWS = [
@@ -186,16 +186,16 @@ describe('OntologyFlowEditorComponent — the "open flow" picker', () => {
         {id: 99, name: 'Native', type: 'native', enabled: true}
     ];
 
-    function pickerTabs(): string[] {
-        return $('.aaxis-flow-picker__tab').map((_i: number, el: HTMLElement) => el.textContent).get();
-    }
-
     function rows(): string[] {
-        return $('.aaxis-flow-picker__row').map((_i: number, el: HTMLElement) => el.textContent).get();
+        return $('.aaxis-flow-picker__row .aaxis-flow-picker__name').map((_i: number, el: HTMLElement) => el.textContent).get();
     }
 
-    it('lists the non-native flows by kind, filters them and opens the picked one in a new tab', async () => {
-        mockFetch({aaxis_ontology_flow_list: {body: {records: FLOWS}}});
+    function row(name: string): any {
+        return $('.aaxis-flow-picker__row').filter((_i: number, el: HTMLElement) => $(el).find('.aaxis-flow-picker__name').text() === name);
+    }
+
+    it('fetches the non-native flows and opens the marked ones in tabs, the first one in front', async () => {
+        const fetchSpy = mockFetch({aaxis_ontology_flow_list: {body: {records: FLOWS}}});
         const editor = createEditor({flow: simpleFlow()});
 
         root(editor).find('[data-role="tab-open"]').trigger('click');
@@ -204,22 +204,32 @@ describe('OntologyFlowEditorComponent — the "open flow" picker', () => {
         expect(dialog.$content.find('.aaxis-json-note').text()).toBe(KEY('loading'));
         await flush();
 
-        expect(pickerTabs()).toEqual([`${KEY('tab_open_flows')} (2)`, `${KEY('tab_open_subflows')} (2)`]);
-        expect(rows()).toEqual(['Other', `Beta${KEY('tab_open_disabled')}`]);
-        expect(document.activeElement).toBe($('.aaxis-flow-picker__filter')[0]);
-        $('.aaxis-flow-picker__filter').val('  bET ').trigger('input');
-        expect(pickerTabs()).toEqual([`${KEY('tab_open_flows')} (1)`, `${KEY('tab_open_subflows')} (0)`]);
-        expect(rows()).toEqual([`Beta${KEY('tab_open_disabled')}`]);
-        $('.aaxis-flow-picker__tab').eq(1).trigger('click');
-        expect($('.aaxis-flow-picker__tab').eq(1).hasClass('is-active')).toBe(true);
-        expect($('.aaxis-flow-picker__list .aaxis-json-note').text()).toBe(KEY('tab_open_no_match'));
-        $('.aaxis-flow-picker__filter').val('').trigger('input');
-        expect(rows()).toEqual([`Sub${KEY('tab_open_disabled')}`, '']);
-        $('.aaxis-flow-picker__row').eq(0).trigger('click');
+        expect(fetchSpy.mock.calls.some((c: any[]) => String(c[0]).includes('aaxis_ontology_flow_list'))).toBe(true);
+        expect(rows()).toEqual(['Beta', 'Other']);
+        $('.aaxis-flow-picker__kind[data-kind="subflow"]').trigger('click');
+        expect(rows()).toEqual(['', 'Beta', 'Other', 'Sub']);
+
+        row('Sub').trigger('click');
+        row('Other').trigger('click');
+        $('[data-role="picker-open"]').trigger('click');
 
         expect(dialog.closed).toBe(true);
-        expect(tabTitles()).toEqual(['nightly', 'entry']);
+        expect(tabTitles()).toEqual(['nightly', 'entry', 'hook']);
         expect(activeTitle()).toBe('entry');
+        expect(url()).toBe('/aaxis_ontology_flow_editor?id=9?tabs=7,9,8');
+    });
+
+    it('opens one flow at once from its row button', async () => {
+        mockFetch({aaxis_ontology_flow_list: {body: {records: FLOWS}}});
+        const editor = createEditor({flow: simpleFlow()});
+
+        root(editor).find('[data-role="tab-open"]').trigger('click');
+        await flush();
+        row('Other').find('[data-role="flow-open"]').trigger('click');
+
+        expect(FlowDialog.last().closed).toBe(true);
+        expect(tabTitles()).toEqual(['nightly', 'hook']);
+        expect(activeTitle()).toBe('hook');
     });
 
     it('focuses an already-open flow instead of opening it twice', async () => {
@@ -229,10 +239,25 @@ describe('OntologyFlowEditorComponent — the "open flow" picker', () => {
 
         root(editor).find('[data-role="tab-open"]').trigger('click');
         await flush();
-        $('.aaxis-flow-picker__row').eq(0).trigger('click');
+        row('Nightly').find('[data-role="flow-open"]').trigger('click');
 
         expect(tabTitles()).toEqual(['nightly', KEY('name_unset')]);
         expect(activeTitle()).toBe('nightly');
+    });
+
+    it('keeps the front tab when it is the first marked one, adding the others behind it', async () => {
+        mockFetch({aaxis_ontology_flow_list: {body: {records: [simpleFlow(), OTHER]}}});
+        const editor = createEditor({flow: simpleFlow()});
+
+        root(editor).find('[data-role="tab-open"]').trigger('click');
+        await flush();
+        row('Nightly').trigger('click');
+        row('Other').trigger('click');
+        $('[data-role="picker-open"]').trigger('click');
+
+        expect(tabTitles()).toEqual(['nightly', 'hook']);
+        expect(activeTitle()).toBe('nightly');
+        expect(url()).toBe('/aaxis_ontology_flow_editor?id=7?tabs=7,8');
     });
 
     it('says so when there is nothing to open, and flashes a failed load', async () => {

@@ -169,6 +169,41 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
     }
 
     /**
+     * @dataProvider nonRuntimeErrors
+     */
+    public function testANonRuntimeStepErrorStillNamesTheFailingStep(\Throwable $error, string $expected): void
+    {
+        $this->logger->method('info')->willThrowException($error);
+
+        try {
+            $this->executor->execute(
+                [self::step('t', 'cron'), self::step('log', 'logger', ['message' => 'hi'], 'Log')],
+                [self::link('t', 'log')],
+                []
+            );
+            self::fail('Expected the step to fail.');
+        } catch (FlowStepFailure $e) {
+            self::assertSame($expected, $e->getMessage());
+            self::assertSame('log', $e->stepId);
+            self::assertSame(['t'], $e->executedIds);
+            self::assertSame($error, $e->getPrevious());
+        }
+        self::assertSame(['flow-start', 'step', 'flow-exception'], $this->eventKinds());
+        self::assertSame(['message' => $expected], $this->events[2][2]);
+    }
+
+    public static function nonRuntimeErrors(): array
+    {
+        return [
+            'a type error' => [new \TypeError('bad argument'), 'Step "Log": bad argument'],
+            'a JSON error' => [new \JsonException('Syntax error'), 'Step "Log": Syntax error'],
+            'a PHP warning' => [new \ErrorException('Undefined array key "x"'), 'Step "Log": Undefined array key "x"'],
+            // Runtime exceptions already name their step: kept as they are.
+            'a runtime exception' => [new \RuntimeException('Step "Log": refused'), 'Step "Log": refused'],
+        ];
+    }
+
+    /**
      * @dataProvider choices
      *
      * @param array<int, string> $expectedTrail

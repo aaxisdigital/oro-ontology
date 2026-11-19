@@ -498,7 +498,7 @@ class OntologyFlowController extends AbstractOntologyController
     }
 
     /**
-     * The 422 for a failed run: the editor paints the trail — executed tiles amber, the failing
+     * The 422 for a failed run: the editor paints the trail — executed tiles green, the failing
      * one red — so a step failure carries the step id and the executed ids (and, for the step
      * debugger, the subflow trails).
      *
