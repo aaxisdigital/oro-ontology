@@ -12,21 +12,36 @@ use Aaxis\Bundle\OntologyBundle\Dwl\Runtime\ValueType;
 /**
  * application/csv for read()/write(). Reader: an array of objects keyed by the header row (with
  * `header: false` they are keyed column_0, column_1, …), every cell a String, blank lines skipped,
- * quoted cells may span lines; a short row gets null for its missing columns. Writer: an array of
+ * quoted cells may span lines; a short row gets null for its missing columns. Lines may end in LF,
+ * CRLF or a lone CR (a lone CR — inside a quoted cell too — reads as LF). Writer: an array of
  * objects, the columns being the union of their keys in first-seen order, nested values JSON-encoded
- * in their cell. Properties: `separator` (","), `quote` ('"'), `escape` (none — RFC 4180 doubled
- * quotes) and `header` (true).
+ * in their cell. Properties: `separator`, `quote` ('"'), `escape` (none — RFC 4180 doubled
+ * quotes) and `header` (true). The writer's separator defaults to ","; the reader SNIFFS it from
+ * the header line when the script gives none ({@see sniffSeparator()} — `,` `;` TAB or `|`), a
+ * deliberate departure from DataWeave's fixed comma.
  *
  * @internal used through {@see DataFormats}
  */
 final class CsvCodec
 {
+    /** The separators the reader sniffs for, in tie-break order. */
+    private const array SNIFFED_SEPARATORS = [',', ';', "\t", '|'];
+
+    /** How far into the text the header line is looked for. */
+    private const int SNIFF_BYTES = 65536;
+
     public static function read(string $text, array $options): Value
     {
         [$separator, $quote, $escape] = self::dialect($options);
+        if (($options['separator'] ?? null) === null) {
+            $separator = self::sniffSeparator($text, $quote);
+        }
         $header = DataFormats::flag($options, 'header', true);
 
-        $handle = self::stream($text);
+        // fgetcsv only breaks lines on LF (PHP 8.1 dropped auto_detect_line_endings), so a file
+        // whose lines end in a lone CR — Excel's "CSV (Macintosh)", classic Mac exports — would
+        // read as ONE header row and come back as []. Lone CRs become LF; CRLF stays as it is.
+        $handle = self::stream(preg_replace('/\r(?!\n)/', "\n", $text) ?? $text);
         $columns = $header ? null : [];
         $rows = [];
         while (($fields = fgetcsv($handle, null, $separator, $quote, $escape)) !== false) {
@@ -81,6 +96,45 @@ final class CsvCodec
         fclose($handle);
 
         return $csv;
+    }
+
+    /**
+     * The reader's separator when the script names none: the candidate found most often OUTSIDE
+     * quotes on the first non-blank line, a comma on a tie or when none appears. Excel saves
+     * "CSV" with the locale's list separator (`;` wherever the decimal mark is a comma — pt-BR
+     * among them) and SAP exports often do the same. With a fixed comma such a file read as ONE
+     * column per row, keyed by the whole header line, so every `row.field` came back null.
+     */
+    private static function sniffSeparator(string $text, string $quote): string
+    {
+        $counts = array_fill_keys(self::SNIFFED_SEPARATORS, 0);
+        $quoted = false;
+        $seen = false;
+        $length = min(\strlen($text), self::SNIFF_BYTES);
+        for ($i = 0; $i < $length; ++$i) {
+            $char = $text[$i];
+            if (!$quoted && ($char === "\n" || $char === "\r")) {
+                if ($seen) {
+                    break; // the end of the header line (blank lines before it are skipped)
+                }
+                continue;
+            }
+            $seen = true;
+            if ($char === $quote) {
+                $quoted = !$quoted; // a doubled quote toggles twice — still quoted
+            } elseif (!$quoted && isset($counts[$char])) {
+                ++$counts[$char];
+            }
+        }
+
+        $best = self::SNIFFED_SEPARATORS[0];
+        foreach ($counts as $candidate => $count) {
+            if ($count > $counts[$best]) {
+                $best = (string) $candidate;
+            }
+        }
+
+        return $best;
     }
 
     /** @return array{string, string, string} separator, quote, escape */

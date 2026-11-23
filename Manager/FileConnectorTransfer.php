@@ -20,7 +20,9 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
  *   the storage reports them) so a flow's output is stable across runs and across connector types.
  * - **Reading a FILE** yields its content as a plain STRING — deliberately not JSON-decoded (unlike
  *   the rest_api reader): a file's type is not knowable from the transport, and a DWL step can
- *   parse when it wants to. Binary content passes through untouched.
+ *   parse when it wants to. TEXT in another encoding (Latin-1/Windows-1252, UTF-16/32 with a
+ *   BOM) is converted to UTF-8 so the context stays JSON-encodable; binary content (any NUL
+ *   byte) passes through untouched.
  * - **Writing** yields `{isError: false, message, path, bytes}`.
  * - **Any I/O failure** yields `{isError: true, message, exception: {class, message}}` — the
  *   exception is the ROOT cause when the storage/library threw one, and the transfer failure itself
@@ -43,6 +45,14 @@ class FileConnectorTransfer
 {
     public const string ITEM_FILE = FileStorage::ITEM_FILE;
     public const string ITEM_FOLDER = FileStorage::ITEM_FOLDER;
+
+    /** Byte-order marks of the non-UTF-8 Unicode encodings; the UTF-32 ones go first (UTF-32LE's starts like UTF-16LE's). */
+    private const array UNICODE_BOMS = [
+        "\xFF\xFE\x00\x00" => 'UTF-32LE',
+        "\x00\x00\xFE\xFF" => 'UTF-32BE',
+        "\xFF\xFE" => 'UTF-16LE',
+        "\xFE\xFF" => 'UTF-16BE',
+    ];
 
     private readonly LocalFileStorage $local;
     private readonly SftpFileStorage $sftp;
@@ -83,7 +93,7 @@ class FileConnectorTransfer
         $path = $this->normalizeStepPath($path);
 
         try {
-            return match ($connector->getType()) {
+            $result = match ($connector->getType()) {
                 OntologyConnector::TYPE_FILE_SYSTEM => $this->local->read($config, $path),
                 OntologyConnector::TYPE_SFTP => $this->sftp->read($config, $path),
                 default => $this->bucket->read($config, $path),
@@ -91,6 +101,34 @@ class FileConnectorTransfer
         } catch (ConnectorTransferFailure $e) {
             return $this->failure($e);
         }
+
+        return \is_string($result) ? self::utf8Text($result) : $result;
+    }
+
+    /**
+     * File content as UTF-8 when it is TEXT in another encoding. The context travels as JSON (the
+     * debugger's responses, the run events) and json_encode refuses anything but UTF-8, so a
+     * Latin-1 file broke the run instead of reaching the next step. Excel is the usual source:
+     * its "CSV" is saved in the machine's ANSI code page (Windows-1252 on Western and Brazilian
+     * machines) and its "Unicode text" as UTF-16 with a BOM.
+     *
+     * - valid UTF-8 is returned as-is (a UTF-8 BOM included — `read()` drops it);
+     * - a UTF-32 or UTF-16 BOM decodes by that BOM, which is dropped;
+     * - content with a NUL byte is BINARY and passes through untouched;
+     * - anything else is decoded as Windows-1252 (ISO-8859-1's superset; every byte maps).
+     */
+    private static function utf8Text(string $content): string
+    {
+        if (mb_check_encoding($content, 'UTF-8')) {
+            return $content;
+        }
+        foreach (self::UNICODE_BOMS as $bom => $encoding) {
+            if (str_starts_with($content, $bom)) {
+                return mb_convert_encoding(substr($content, \strlen($bom)), 'UTF-8', $encoding);
+            }
+        }
+
+        return str_contains($content, "\0") ? $content : mb_convert_encoding($content, 'UTF-8', 'Windows-1252');
     }
 
     /**

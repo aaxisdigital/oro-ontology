@@ -48,7 +48,8 @@ use Psr\Log\LoggerInterface;
  *    outcome ({uuid, count, upsert, changedIds}) and the event row completes on the spot;
  *  - file_read/file_write/file_list/file_delete/file_rename: the file-based connector operations,
  *    all real via {@see FileConnectorTransfer} (DWL-capable paths; I/O failures come back as
- *    `{isError: true, ...}` payloads instead of aborting the run);
+ *    `{isError: true, ...}` payloads instead of aborting the run); file_read optionally parses
+ *    the text it read (Content type + Reader options, as DWL's `read()`);
  *  - everything else: no-op pass-through for now. (The legacy generic reader/writer types were
  *    REMOVED — v1_10's ConvertLegacyReaderWriterSteps rewrote stored flows to the types above.)
  *
@@ -1328,7 +1329,7 @@ class FlowDebugExecutor
         $path = $this->resolveDwlText($stepName, 'path', (string) ($config['path'] ?? ''), ($config['path_dwl'] ?? false) === true, $context);
 
         try {
-            return match ($type) {
+            $result = match ($type) {
                 'file_read', 'file_list' => $this->files->read($connector, $path),
                 'file_write' => $this->files->write($connector, $path, $this->contentText($stepName, $config, $context)),
                 'file_delete' => $this->files->delete($connector, $path),
@@ -1343,6 +1344,43 @@ class FlowDebugExecutor
         } catch (\RuntimeException $e) {
             throw self::stepFailure($stepName, $e->getMessage() . '.', $e);
         }
+
+        return $type === 'file_read' ? $this->readFileContent($stepName, $config, $context, $result) : $result;
+    }
+
+    /**
+     * Read File's optional parsing: with a Content type set, the file's text goes through DWL's
+     * `read(content, contentType, readerOptions)` and the parsed value is what the step stores
+     * — the same as a following `read()` step, minus the step. Reader options are a DWL
+     * expression evaluated against the context and must yield an object (`{header: false}`).
+     * Without a content type, or when the read did not produce text (a folder listing, an
+     * `isError` payload), the result passes through as-is. Content that does not parse FAILS the
+     * step: the author asked for that format, so garbage is a mistake to surface, not a branch.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     */
+    private function readFileContent(string $stepName, array $config, array $context, mixed $result): mixed
+    {
+        $contentType = trim((string) ($config['content_type'] ?? ''));
+        if ($contentType === '' || !\is_string($result)) {
+            return $result;
+        }
+
+        $optionsCode = trim((string) ($config['reader_options'] ?? ''));
+        $options = $optionsCode === '' ? [] : $this->transformForStep($stepName, $optionsCode, $context);
+        if (!\is_array($options) || ($options !== [] && array_is_list($options))) {
+            throw self::stepFailure($stepName, sprintf(
+                'the reader options must be an object such as {header: false}, got %s.',
+                get_debug_type($options)
+            ));
+        }
+
+        return $this->transformForStep($stepName, 'read(content, contentType, readerOptions)', [
+            'content' => $result,
+            'contentType' => $contentType,
+            'readerOptions' => $options,
+        ]);
     }
 
     /**

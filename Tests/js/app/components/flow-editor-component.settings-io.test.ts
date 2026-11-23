@@ -333,6 +333,65 @@ describe('OntologyFlowEditorComponent — connector-backed settings', () => {
         expect(tile('read file').classList.contains('is-config-invalid')).toBe(false);
     });
 
+    it('gives Read File a Content type | Reader options row that stores nothing while None', async () => {
+        const editor = await open(st('f', 'file_read', 'read file', 300, 0, {connector: '3', path: 'in/a.csv'}));
+        const $type = $('[data-role="file-content-type"]');
+        const $options = $('[data-role="file-reader-options"]');
+
+        // The row sits right under Name | Connector | Destination.
+        const $rows = $('.aaxis-flow-editor__settings .aaxis-flow-editor__settings-row');
+        expect($rows.eq(1).find('[data-role="file-content-type"]')).toHaveLength(1);
+        expect(options($type, 'text')).toEqual([
+            KEY('file_content_type_none'), 'application/json', 'application/xml', 'application/csv', 'application/dw'
+        ]);
+        expect($type.val()).toBe('');
+        expect($options.prop('disabled')).toBe(true);
+        // Always DWL: code style, no text/DWL switch.
+        expect($options.hasClass('aaxis-dwl-input__input--code')).toBe(true);
+        expect($options.closest('.aaxis-dwl-input').find('input[type="checkbox"]')).toHaveLength(0);
+
+        $type.val('application/csv').trigger('change');
+        expect($options.prop('disabled')).toBe(false);
+        $options.val(' {header: false, separator: ";"} ');
+        confirmSettings();
+        expect(configOf(editor, 'read file')).toEqual({
+            connector: '3', path: 'in/a.csv', path_dwl: false, destination: 'payload',
+            content_type: 'application/csv', reader_options: '{header: false, separator: ";"}'
+        });
+
+        openSettings('read file');
+        await flush();
+        expect($('[data-role="file-content-type"]').val()).toBe('application/csv');
+        expect($('[data-role="file-reader-options"]').val()).toBe('{header: false, separator: ";"}');
+        $('[data-role="file-reader-options"]').val('');
+        confirmSettings();
+        expect(configOf(editor, 'read file').content_type).toBe('application/csv');
+        expect(configOf(editor, 'read file')).not.toHaveProperty('reader_options');
+
+        openSettings('read file');
+        await flush();
+        $('[data-role="file-reader-options"]').val('{header: false}');
+        $('[data-role="file-content-type"]').val('').trigger('change');
+        confirmSettings();
+        expect(configOf(editor, 'read file')).toEqual({connector: '3', path: 'in/a.csv', path_dwl: false, destination: 'payload'});
+    });
+
+    it('keeps a Read File content type the list does not offer', async () => {
+        const editor = await open(st('f', 'file_read', 'read file', 300, 0, {connector: '3', path: 'a', content_type: 'text/csv'}));
+
+        expect(options($('[data-role="file-content-type"]'), 'text').slice(-1)).toEqual(['text/csv']);
+        expect($('[data-role="file-content-type"]').val()).toBe('text/csv');
+        confirmSettings();
+        expect(configOf(editor, 'read file').content_type).toBe('text/csv');
+    });
+
+    it.each(['file_list', 'file_write', 'file_delete', 'file_rename'])('has no content type row on %s', async type => {
+        await open(st('f', type, 'op', 300, 0, {connector: '3', path: 'a'}));
+
+        expect($('[data-role="file-content-type"]')).toHaveLength(0);
+        expect($('[data-role="file-reader-options"]')).toHaveLength(0);
+    });
+
     it('adds the content to Write File and the new name to Rename', async () => {
         const editor = await open(st('w', 'file_write', 'write file', 300, 0, {connector: '4', path: 'out.txt'}),);
         expect(dwlTextarea('writer_content_label').val()).toBe('payload');

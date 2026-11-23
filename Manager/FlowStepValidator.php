@@ -34,6 +34,8 @@ class FlowStepValidator
         // File Operations: the path (all five) and the rename's new name are DWL-capable too.
         ['file_*', 'path', 'path_dwl'],
         ['file_rename', 'new_name', 'new_name_dwl'],
+        // Read File: the reader options object is ALWAYS a DWL expression.
+        ['file_read', 'reader_options', null],
         ['choice', 'expression', null],
         // Invoke PHP: the parameters object is ALWAYS a DWL expression.
         ['invoke_php', 'params', null],

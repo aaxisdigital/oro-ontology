@@ -767,6 +767,11 @@
         margin: 0;
     }
 
+    // Always-DWL input: no switch inside its left end, so no room kept for one.
+    &--fixed .aaxis-dwl-input__input {
+        padding-left: 12px;
+    }
+
     .aaxis-dwl-input__input--code {
         background: #fbfcfe;
         color: #1b3a5b;

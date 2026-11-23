@@ -6,6 +6,7 @@ namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Dwl\Runtime;
 
 use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Dwl\Language\Exception\RuntimeException;
+use Aaxis\Bundle\OntologyBundle\Dwl\Runtime\DataFormats;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -96,6 +97,46 @@ class DataFormatsTest extends TestCase
                 ['a' => '1', 'column_1' => '2'],
             ],
             'csv empty input' => ['read(text, "application/csv")', '', []],
+            'csv sniffs a semicolon separator (Excel pt-BR, SAP exports)' => [
+                'read(text, "application/csv")',
+                "\"MCH1_MATNR\";\"MCH1_CHARG\";\"AUSP_ATWRT\"\n\"3019PE PL14\";\"BAKAMJ032E\";\"20231020\"\n\"X 1\";\"B2\";\"0\"\n",
+                [
+                    ['MCH1_MATNR' => '3019PE PL14', 'MCH1_CHARG' => 'BAKAMJ032E', 'AUSP_ATWRT' => '20231020'],
+                    ['MCH1_MATNR' => 'X 1', 'MCH1_CHARG' => 'B2', 'AUSP_ATWRT' => '0'],
+                ],
+            ],
+            'csv sniffs a tab separator' => ['read(text, "text/csv")', "a\tb\n1\t2,5\n", [['a' => '1', 'b' => '2,5']]],
+            'csv sniffs a pipe separator' => ['read(text, "text/csv")', "a|b\n1|2\n", [['a' => '1', 'b' => '2']]],
+            'csv sniffing ignores separators inside quotes' => [
+                'read(text, "application/csv")',
+                "\"a;b;c\",d\n1,2\n",
+                [['a;b;c' => '1', 'd' => '2']],
+            ],
+            'csv sniffing reads only the header line' => [
+                'read(text, "application/csv")',
+                "\n\nnote\nfoo;bar\n",
+                [['note' => 'foo;bar']],
+            ],
+            'csv sniffing ties go to the comma' => [
+                'read(text, "application/csv")',
+                "a,b;c\n1,2;3\n",
+                [['a' => '1', 'b;c' => '2;3']],
+            ],
+            'csv explicit separator is never overridden' => [
+                'read(text, "application/csv", {separator: ","})',
+                "a;b\n1;2\n",
+                [['a;b' => '1;2']],
+            ],
+            'csv with CR line endings' => [
+                'read(text, "application/csv")',
+                "id,note\r1,\"two\rlines\"\r2,x\r",
+                [['id' => '1', 'note' => "two\nlines"], ['id' => '2', 'note' => 'x']],
+            ],
+            'csv with CRLF line endings keeps CRLF in quoted cells' => [
+                'read(text, "application/csv")',
+                "\xEF\xBB\xBFid,note\r\n1,\"two\r\nlines\"\r\n\r\n2,x\r\n",
+                [['id' => '1', 'note' => "two\r\nlines"], ['id' => '2', 'note' => 'x']],
+            ],
             // text/plain
             'text is kept verbatim' => ['read(text, "text/plain")', " {a: 1}\n", " {a: 1}\n"],
             // application/dw
@@ -248,6 +289,28 @@ class DataFormatsTest extends TestCase
             'dw of a function' => ['write((x) -> x)', '', '~cannot write a Function~'],
             'json of infinity' => ['write(pow(10, 400), "application/json")', '', '~cannot write application/json~'],
             'xml of a function' => ['write({a: (x) -> x}, "application/xml")', '', '~cannot write a Function as application/xml~'],
+        ];
+    }
+
+    /**
+     * @dataProvider supportedTypes
+     */
+    public function testSupports(string $contentType, bool $supported): void
+    {
+        self::assertSame($supported, DataFormats::supports($contentType));
+    }
+
+    public static function supportedTypes(): array
+    {
+        return [
+            'csv' => ['application/csv', true],
+            'text csv with charset' => ['Text/CSV; charset=ISO-8859-1', true],
+            'json suffix' => ['application/vnd.api+json', true],
+            'xml suffix' => ['application/atom+xml', true],
+            'dw' => ['application/dw', true],
+            'plain' => ['text/plain', true],
+            'unknown' => ['application/pdf', false],
+            'empty' => ['', false],
         ];
     }
 }

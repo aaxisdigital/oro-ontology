@@ -465,6 +465,12 @@ const REQUIRES_CONFIG = new Set([
     'file_read', 'file_write', 'file_list', 'file_delete', 'file_rename'
 ]);
 
+/**
+ * Read File's Content type choices (besides None = the raw text): the formats DWL's `read()`
+ * parses — the server accepts any type `DataFormats::supports()` knows (text/csv, +json, …).
+ */
+const FILE_READ_CONTENT_TYPES = ['application/json', 'application/xml', 'application/csv', 'application/dw'];
+
 /** The four tile sides a flow line can attach to. */
 type AnchorSide = 'north' | 'south' | 'east' | 'west';
 
@@ -3947,8 +3953,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
     /**
      * File Operations (file_read / file_write / file_list / file_delete / file_rename): one
      * file-based connector (file_system/sftp/bucket), a DWL-capable Path, and per-type extras —
-     * Write File adds the Content field, Rename the New name. Row 1: Name | Connector |
-     * Destination; row 2: the Path field; row 3 (write/rename only): the extra field.
+     * Read File adds the Content type | Reader options row, Write File the Content field, Rename
+     * the New name. Row 1: Name | Connector | Destination; row 2 (read only): Content type |
+     * Reader options; then the Path field; last (write/rename only): the extra field.
      */
     private fileOpSection(type: string, $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
         // File-based connectors only — these steps talk to a storage.
@@ -3960,6 +3967,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.settingsCol('connector_label', connectors.$el, 1.4),
             this.settingsCol('destination_label', $destination)
         ));
+        const reader = type === 'file_read' ? this.fileReaderRow($top, initial) : null;
 
         const path = createDwlField({
             label: __('aaxis.ontology.flow_editor.file_path_label'),
@@ -4024,9 +4032,63 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     merged.new_name = newName.value().trim();
                     merged.new_name_dwl = newName.isDwl();
                 }
-                return merged;
+                return reader ? reader.merge(merged) : merged;
             },
             ready: connectors.ready
+        };
+    }
+
+    /**
+     * Read File's second row: Content type (None = the raw text, as before) | Reader options (an
+     * always-DWL object such as `{header: false}`). With a type the server parses the file like
+     * `read(content, type, options)` before storing it; the options are disabled while the type is
+     * None, and neither key is stored then. A type the list does not offer (an imported flow's
+     * `text/csv`, say) is kept as an extra option rather than silently dropped.
+     */
+    private fileReaderRow($top: any, initial: Record<string, any>): {merge: (c: Record<string, any>) => Record<string, any>} {
+        const initialType = String(initial.content_type || '');
+        const $type = $('<select/>', {
+            'class': 'form-control no-uniform', 'data-role': 'file-content-type',
+            title: __('aaxis.ontology.flow_editor.file_content_type_title')
+        });
+        $type.append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.file_content_type_none')}));
+        const types = FILE_READ_CONTENT_TYPES.includes(initialType) || initialType === ''
+            ? FILE_READ_CONTENT_TYPES
+            : [...FILE_READ_CONTENT_TYPES, initialType];
+        types.forEach(contentType => $type.append($('<option/>', {value: contentType, text: contentType})));
+        $type.val(initialType);
+
+        const options = createDwlInput({
+            value: String(initial.reader_options || ''),
+            dwl: true,
+            fixed: true,
+            label: __('aaxis.ontology.flow_editor.file_reader_options_label'),
+            placeholder: '{header: false}'
+        });
+        options.$input.attr({'data-role': 'file-reader-options', title: __('aaxis.ontology.flow_editor.file_reader_options_title')});
+        const sync = (): void => {
+            options.$input.prop('disabled', String($type.val() || '') === '');
+        };
+        $type.on('change', sync);
+        sync();
+
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('file_content_type_label', $type, 1),
+            this.settingsCol('file_reader_options_label', options.$el, 2)
+        ));
+
+        return {
+            merge: config => {
+                const rest = {...config};
+                delete rest.content_type;
+                delete rest.reader_options;
+                const contentType = String($type.val() || '');
+                if (contentType === '') {
+                    return rest;
+                }
+                const readerOptions = options.value().trim();
+                return {...rest, content_type: contentType, ...(readerOptions === '' ? {} : {reader_options: readerOptions})};
+            }
         };
     }
 

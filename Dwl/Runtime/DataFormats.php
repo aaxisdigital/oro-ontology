@@ -116,12 +116,7 @@ final class DataFormats
                 $contentType->type->value,
             ));
         }
-        $mime = strtolower(trim(explode(';', $contentType->data, 2)[0]));
-        $format = self::CONTENT_TYPES[$mime] ?? match (true) {
-            str_ends_with($mime, '+json') => self::JSON,
-            str_ends_with($mime, '+xml') => self::XML,
-            default => null,
-        };
+        $format = self::formatOf($contentType->data);
         if ($format === null) {
             throw new RuntimeException(sprintf(
                 '%s: unsupported content type "%s" (supported: %s)',
@@ -132,6 +127,23 @@ final class DataFormats
         }
 
         return $format;
+    }
+
+    /** Whether read()/write() know the content type (parameters and case ignored, `+json`/`+xml` suffixes accepted). */
+    public static function supports(string $contentType): bool
+    {
+        return self::formatOf($contentType) !== null;
+    }
+
+    private static function formatOf(string $contentType): ?string
+    {
+        $mime = strtolower(trim(explode(';', $contentType, 2)[0]));
+
+        return self::CONTENT_TYPES[$mime] ?? match (true) {
+            str_ends_with($mime, '+json') => self::JSON,
+            str_ends_with($mime, '+xml') => self::XML,
+            default => null,
+        };
     }
 
     /** @return array<string, mixed> the reader/writer properties object as plain PHP */

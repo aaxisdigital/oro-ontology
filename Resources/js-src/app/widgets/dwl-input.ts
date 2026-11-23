@@ -4,8 +4,10 @@ import __ from 'orotranslation/js/translator';
 export interface DwlInputOptions {
     /** Initial text. */
     value: string;
-    /** Initial mode: true = the text is a (single-line) DWL expression. */
+    /** Initial mode (ignored when `fixed`): true = the text is a (single-line) DWL expression. */
     dwl: boolean;
+    /** Always DWL: no switch is rendered and {@link DwlInput.isDwl} is always true. */
+    fixed?: boolean;
     /** Accessible name of the input — the visible label belongs to the host's layout. */
     label?: string;
     placeholder?: string;
@@ -19,7 +21,7 @@ export interface DwlInput {
     $el: any;
     /** The text input, for host event bindings/focus. */
     $input: any;
-    /** The pure-text/DWL switch's checkbox. */
+    /** The pure-text/DWL switch's checkbox (detached when `fixed`). */
     $toggle: any;
     value: () => string;
     isDwl: () => boolean;
@@ -33,12 +35,14 @@ export interface DwlInput {
  * is flattened by the input itself (text inputs drop line breaks).
  *
  * The host stores the text and the switch state side by side (e.g. `path` + `path_dwl`); the
- * visible label stays the host's, so the component fits any row layout.
+ * visible label stays the host's, so the component fits any row layout. A `fixed` input is DWL
+ * only (e.g. Read File's reader options): code style, no switch, nothing to store beside it.
  */
 export default function createDwlInput(options: DwlInputOptions): DwlInput {
+    const fixed = Boolean(options.fixed);
     const $toggle = $('<input/>', {type: 'checkbox'});
-    $toggle.prop('checked', options.dwl);
-    const isDwl = (): boolean => Boolean($toggle.prop('checked'));
+    $toggle.prop('checked', fixed || options.dwl);
+    const isDwl = (): boolean => fixed || Boolean($toggle.prop('checked'));
 
     const $input = $('<input/>', {
         type: 'text',
@@ -74,7 +78,8 @@ export default function createDwlInput(options: DwlInputOptions): DwlInput {
         $('<span/>', {'class': 'aaxis-flow-editor__switch-text', text: __('aaxis.ontology.flow_editor.dwl_toggle_label')})
     );
 
-    const $el = $('<div/>', {'class': 'aaxis-dwl-input'}).append($input, $switch);
+    const $el = $('<div/>', {'class': 'aaxis-dwl-input' + (fixed ? ' aaxis-dwl-input--fixed' : '')})
+        .append($input, fixed ? null : $switch);
 
     return {$el, $input, $toggle, value: () => String($input.val() || ''), isDwl};
 }

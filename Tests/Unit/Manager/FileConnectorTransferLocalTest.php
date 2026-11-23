@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Tests\Unit\Manager;
 
+use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyConnector;
 use Aaxis\Bundle\OntologyBundle\Exception\ConnectorConfigurationException;
 use Aaxis\Bundle\OntologyBundle\Exception\ConnectorTransferFailure;
@@ -119,6 +120,44 @@ class FileConnectorTransferLocalTest extends TestCase
     {
         self::assertSame('hello', $this->transfer->read($this->connector(), '  /a.txt '));
         self::assertSame("bin\x00\xFFary", $this->transfer->read($this->connector(), 'zeta.txt'));
+    }
+
+    /**
+     * @dataProvider encodedTexts
+     */
+    public function testTextInAnotherEncodingIsReadAsUtf8(string $bytes, string $expected): void
+    {
+        file_put_contents($this->base . '/excel.csv', $bytes);
+
+        self::assertSame($expected, $this->transfer->read($this->connector(), 'excel.csv'));
+    }
+
+    public static function encodedTexts(): array
+    {
+        $csv = "código;preço\r\nAção;10€\r\n";
+
+        return [
+            'utf-8 untouched' => [$csv, $csv],
+            'utf-8 BOM kept for read() to drop' => ["\xEF\xBB\xBF" . $csv, "\xEF\xBB\xBF" . $csv],
+            'windows-1252 (Excel "CSV")' => [mb_convert_encoding($csv, 'Windows-1252', 'UTF-8'), $csv],
+            'utf-16LE with BOM (Excel "Unicode text")' => ["\xFF\xFE" . mb_convert_encoding($csv, 'UTF-16LE', 'UTF-8'), $csv],
+            'utf-16BE with BOM' => ["\xFE\xFF" . mb_convert_encoding($csv, 'UTF-16BE', 'UTF-8'), $csv],
+            'utf-32LE with BOM' => ["\xFF\xFE\x00\x00" . mb_convert_encoding($csv, 'UTF-32LE', 'UTF-8'), $csv],
+            'utf-32BE with BOM' => ["\x00\x00\xFE\xFF" . mb_convert_encoding($csv, 'UTF-32BE', 'UTF-8'), $csv],
+            'bytes undefined in windows-1252 still map' => ["a\x81b", "a\u{81}b"],
+        ];
+    }
+
+    public function testAReadLatin1CsvParsesInDwl(): void
+    {
+        file_put_contents($this->base . '/excel.csv', mb_convert_encoding("código,descrição\r1,Ação\r", 'ISO-8859-1', 'UTF-8'));
+        $content = $this->transfer->read($this->connector(), 'excel.csv');
+
+        self::assertSame(
+            [['código' => '1', 'descrição' => 'Ação']],
+            (new DwlTransformer())->transform('read(content, "application/csv")', ['content' => $content])
+        );
+        self::assertNotFalse(json_encode($content));
     }
 
     public function testAMissingPathIsAResultNotAnException(): void

@@ -1615,7 +1615,13 @@ DateInterval->f, and `now()` returning a real DateTime. NULL passes through ever
 `Dwl/Runtime/DataFormats` dispatches on the content type to one codec per format under
 `Dwl/Runtime/Codec/` — application/json (STRICT: `{key: 'v'}` is NOT JSON and errors with a hint),
 application/xml (repeated elements = repeated keys, text stays String, `nullValueOn` reader prop,
-attributes NOT read), application/csv (header row → keys, `header`/`separator`/`quote`/`escape`),
+attributes NOT read), application/csv (header row → keys, `header`/`separator`/`quote`/`escape`;
+lone-CR line endings — Excel "CSV (Macintosh)" — are turned into LF first, because `fgetcsv` only
+breaks on LF since PHP 8.1 and such a file read as ONE header row, i.e. `[]`; without a
+`separator` property the READER sniffs it from the header line — the most frequent of `,` `;` TAB
+`|` outside quotes, comma on a tie — because Excel pt-BR and SAP exports use `;` and a fixed comma
+read them as one column keyed by the whole header (every `row.field` null); an explicit
+`separator` is never overridden, and the WRITER still defaults to `,`),
 text/plain, and application/dw — DataWeave's DEFAULT for both functions, LITERALS ONLY: the reader
 parses the text and refuses any non-literal node instead of evaluating it, because evaluating data
 would run code DwlScriptGuard never screened. `+json`/`+xml` suffixes and `;charset=` params are
@@ -1661,7 +1667,7 @@ that answers "is this connector file-based".
 | Case | Value |
 |------|-------|
 | read a FOLDER | a LIST of `{name, path, type: file\|folder, size, modified}`, sorted by name |
-| read a FILE | its content as a plain STRING |
+| read a FILE | its content as a plain STRING — or, with Read File's **Content type** set, the PARSED value (see below) |
 | write | `{isError: false, message, path, bytes}` — file_system writes add `absolutePath` (the resolved server-side target): they land on the APPLICATION container's filesystem, so without it people hunt for the file on the host/their machine |
 | delete | `{isError: false, message, path}` — FILES only (a folder path is refused, recursing is worse); a missing path fails on every storage — object storage would happily "delete" a key that never existed, so `delete`/`rename` HEAD the object first |
 | rename | `{isError: false, message, path: <new>, from: <old>}` — `new_name` without `/` renames within the source folder, with `/` it is a full path against the base (= move); an EXISTING target is a failure everywhere (no silent overwrite); buckets have no rename so it is a signed server-side copy (`x-amz-copy-source`, extra signed headers via `S3RequestSigner::headers(..., $extraHeaders)`) + delete of the source — beware the S3 quirk of a 200 carrying an `<Error>` body, which the copy checks for |
@@ -1680,7 +1686,26 @@ that answers "is this connector file-based".
   fed straight back into the next step; file_system/sftp tolerate the slash.
 - **File content is NOT JSON-decoded** (again unlike the rest_api reader): a file's type is not
   knowable from the transport, so the raw string is handed over and a DWL step parses it with
-  `read(content, "application/json" | "application/csv" | "application/xml")`.
+  `read(content, "application/json" | "application/csv" | "application/xml")` — **or the author
+  says the type on the step itself**: Read File's second settings row is **Content type** (select:
+  None = raw text | application/json | xml | csv | dw; config `content_type`, any type
+  `DataFormats::supports()` knows is valid, so an imported `text/csv` survives as an extra option)
+  | **Reader options** (config `reader_options`, an ALWAYS-DWL object expression evaluated against
+  the context — `{header: false}`, `{separator: payload.sep}`; single-line `createDwlInput({fixed:
+  true})`, disabled and NOT stored while the type is None). The executor
+  (`readFileContent()`) then runs `read(content, contentType, readerOptions)` on the TEXT the
+  transfer returned — a folder listing or an `isError` payload passes through unparsed. Options
+  that are not an object, and content that does not parse, FAIL the step (`Step "X": read: …`):
+  the author asked for that format, so garbage is surfaced, not returned as a branchable result.
+  Validation: `FlowStepConfigRules::fileReaderOk()` (type supported, both strings) + the
+  `reader_options` DWL syntax check in `FlowStepValidator::DWL_FIELDS`.
+- ⚠️ **File TEXT always reaches the context as UTF-8** (`FileConnectorTransfer::utf8Text()`): the
+  context is JSON (debugger responses, run events) and `json_encode` refuses non-UTF-8, so a
+  Latin-1 file used to break the run before any step could parse it. Valid UTF-8 (BOM included —
+  `read()` drops it) is untouched; a UTF-32/UTF-16 BOM decodes by it (Excel "Unicode text");
+  content with a NUL byte is BINARY and passes through untouched; anything else is decoded as
+  Windows-1252 (Excel's "CSV" on Western/Brazilian machines — every byte maps, nothing is lost).
+  Consequence: a read → write copy of a Latin-1 text file writes UTF-8.
 - ⚠️ **file_system reads/writes are confined to the connector's `base_path`** (`localTarget()`):
   a flow author types the path, so without the containment check a step could read `/etc/passwd`
   through a connector scoped to an import folder. Paths that do not exist yet (every write target)

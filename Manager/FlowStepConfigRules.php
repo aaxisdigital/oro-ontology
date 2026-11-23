@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Aaxis\Bundle\OntologyBundle\Manager;
 
+use Aaxis\Bundle\OntologyBundle\Dwl\Runtime\DataFormats;
+
 /**
  * The per-type completeness rules of a flow step's config: what {@see FlowStepValidator} checks to
  * decide whether a step can RUN. Pure and DB/container-free — whether a connector, subflow or
@@ -58,7 +60,8 @@ final class FlowStepConfigRules
             // so it needs no destination (one left in the config is ignored).
             'invoke' => (($config['async'] ?? false) === true || self::destinationOk($config))
                 && self::boolOk($config, 'async') && self::connectorOk($config),
-            'file_read', 'file_list', 'file_delete' => self::destinationOk($config) && self::fileOpOk($config),
+            'file_read' => self::destinationOk($config) && self::fileOpOk($config) && self::fileReaderOk($config),
+            'file_list', 'file_delete' => self::destinationOk($config) && self::fileOpOk($config),
             'file_write' => self::destinationOk($config) && self::fileOpOk($config)
                 && self::filled($config, 'content') && self::boolOk($config, 'content_dwl'),
             'file_rename' => self::destinationOk($config) && self::fileOpOk($config)
@@ -155,6 +158,19 @@ final class FlowStepConfigRules
     private static function fileOpOk(array $config): bool
     {
         return self::selected($config, 'connector') && self::filled($config, 'path') && self::boolOk($config, 'path_dwl');
+    }
+
+    /**
+     * Read File's optional parsing: no `content_type` (or an empty one) keeps the raw content;
+     * a set one must be a format `read()` knows. `reader_options` is a DWL text (syntax checked
+     * separately), meaningful only with a content type.
+     */
+    private static function fileReaderOk(array $config): bool
+    {
+        $type = $config['content_type'] ?? '';
+        $options = $config['reader_options'] ?? '';
+
+        return \is_string($type) && ($type === '' || DataFormats::supports($type)) && \is_string($options);
     }
 
     /**

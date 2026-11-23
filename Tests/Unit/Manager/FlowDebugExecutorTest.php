@@ -655,6 +655,66 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
         ];
     }
 
+    /**
+     * @dataProvider parsedFileReads
+     */
+    public function testReadFileParsesTheContentWithAContentType(mixed $read, array $config, mixed $expected): void
+    {
+        $this->connector(5, 'bucket');
+        $this->files->method('read')->willReturn($read);
+
+        self::assertSame($expected, $this->runStep('file_read', $config + ['destination' => 'f', 'connector' => 5, 'path' => 'x'], ['sep' => ';'])['f']);
+    }
+
+    public static function parsedFileReads(): array
+    {
+        $csv = "\"id\";\"name\"\n\"1\";\"Ann\"\n";
+
+        return [
+            'no content type keeps the raw text' => [$csv, ['reader_options' => '{header: false}'], $csv],
+            'empty content type keeps the raw text' => [$csv, ['content_type' => ''], $csv],
+            'csv, separator sniffed' => [$csv, ['content_type' => 'application/csv'], [['id' => '1', 'name' => 'Ann']]],
+            'csv with literal options' => [
+                $csv,
+                ['content_type' => 'application/csv', 'reader_options' => '{header: false}'],
+                [['column_0' => 'id', 'column_1' => 'name'], ['column_0' => '1', 'column_1' => 'Ann']],
+            ],
+            'csv with options from the context' => [
+                "a;b\n1;2\n",
+                ['content_type' => 'text/csv', 'reader_options' => '{separator: payload.sep, header: false}'],
+                [['column_0' => 'a', 'column_1' => 'b'], ['column_0' => '1', 'column_1' => '2']],
+            ],
+            'empty options object' => ['{"a": [1]}', ['content_type' => 'application/json', 'reader_options' => '{}'], ['a' => [1]]],
+            'json' => ['{"a": {"b": true}}', ['content_type' => 'application/json'], ['a' => ['b' => true]]],
+            'xml' => ['<r><v>1</v></r>', ['content_type' => 'application/xml'], ['r' => ['v' => '1']]],
+            'a folder listing is not parsed' => [[['name' => 'a.csv']], ['content_type' => 'application/csv'], [['name' => 'a.csv']]],
+            'an isError payload is not parsed' => [['isError' => true], ['content_type' => 'application/json'], ['isError' => true]],
+        ];
+    }
+
+    /**
+     * @dataProvider brokenFileParsing
+     */
+    public function testReadFileParsingFailuresFailTheStep(string $content, array $config, string $message): void
+    {
+        $this->connector(5, 'bucket');
+        $this->files->method('read')->willReturn($content);
+        $this->expectExceptionMessage($message);
+
+        $this->runStep('file_read', $config + ['destination' => 'f', 'connector' => 5, 'path' => 'x']);
+    }
+
+    public static function brokenFileParsing(): array
+    {
+        return [
+            'malformed json' => ['{nope', ['content_type' => 'application/json'], 'Step "Step": read: '],
+            'options not an object' => ['a', ['content_type' => 'application/csv', 'reader_options' => '[1]'], 'Step "Step": the reader options must be an object such as {header: false}, got array.'],
+            'options a string' => ['a', ['content_type' => 'application/csv', 'reader_options' => '"x"'], 'got string.'],
+            'failing options' => ['a', ['content_type' => 'application/csv', 'reader_options' => 'nope'], "Step \"Step\": Undefined variable: 'nope'"],
+            'bad csv option' => ['a', ['content_type' => 'application/csv', 'reader_options' => '{separator: ";;"}'], 'CSV property "separator" must be a single character'],
+        ];
+    }
+
     // --- HTTP request ---------------------------------------------------------------------------
 
     public function testHttpRequestAgainstARestConnector(): void

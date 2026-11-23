@@ -35,4 +35,17 @@ describe('dwl-input — single-line text or DWL field', () => {
         field.$input.val('typed');
         expect(field.value()).toBe('typed');
     });
+
+    it('is DWL only when fixed: code style, no switch', () => {
+        const field = createDwlInput({value: '{header: false}', dwl: false, fixed: true});
+
+        expect(field.$el.hasClass('aaxis-dwl-input--fixed')).toBe(true);
+        expect(field.$el.find('.aaxis-dwl-input__switch')).toHaveLength(0);
+        expect(field.isDwl()).toBe(true);
+        expect(field.$input.hasClass('aaxis-dwl-input__input--code')).toBe(true);
+        expect(field.$input.attr('spellcheck')).toBe('false');
+
+        field.$toggle.prop('checked', false).trigger('change');
+        expect(field.isDwl()).toBe(true);
+    });
 });
