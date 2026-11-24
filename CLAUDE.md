@@ -1665,9 +1665,17 @@ their line (it used to sit 5px high). The visible label stays the host's (e.g. a
 `<key>` + `<key>_dwl` pair. Used by the HTTP Request path; reach for it wherever a one-line value
 may be an expression.
 **DWL-toggled fields** render through ONE shared widget — `widgets/dwl-field.ts`,
-`createDwlField({label, value, dwl, fixed?, editorClass?, labelClass?, rowClass?, $tools?})`
-(local relative import; also exports `prettyPrintDwl`). The widget owns the title row — label
-left; optional host `$tools` + the pure-text/DWL switch ALWAYS right-aligned over the textarea
+`createDwlField({label, value, dwl, fixed?, editorClass?, labelClass?, rowClass?, $tools?, format?})`
+(local relative import; also exports `prettyPrintDwl` and `formatDwl`). The widget owns the title
+row — label left; optional host `$tools`, the FORMAT WAND and the pure-text/DWL switch ALWAYS
+right-aligned over the textarea. The wand (2026-11-24, `data-role="dwl-format"`, the Data View's
+fa-magic glyph, `format: false` leaves it out) runs `formatDwl()` — object literals with several
+entries one entry per line, lists too when long (> 60 chars) or holding objects, never inside
+strings/comments/parentheses, existing line breaks kept, then `prettyPrintDwl`; idempotent — and
+fires `input` (live red-field repaint). It is disabled in plain-text mode and while the host
+disables the textarea (hosts that do so trigger `aaxis:dwl-sync` on it, e.g. the HTTP Request body).
+A `fixed` (always-DWL) field shows the switch too, ON and LOCKED (`.is-locked`, title
+`dwl_fixed_title`), so every DWL textarea reads the same: wand, then switch
 (`.aaxis-dwl-field__*` block; switch visuals reused from the flow editor's small switch) — the
 textarea (each host brings its sizing via `editorClass`) and the behavior: whenever DWL mode is
 active (toggle turned on, opening with it on, or `fixed`) the content is pretty-printed via
@@ -1675,7 +1683,7 @@ active (toggle turned on, opening with it on, or `fixed`) the content is pretty-
 string/comment contents never count) and shown with code styling (`__textarea--code`, spellcheck
 off). Users: the connector Body content, the writer's Content (compact settings textarea — ALWAYS
 a textarea so toggling changes no visuals), the transform's code (`fixed`: always-DWL, switch
-HIDDEN) and the Entities DWL playground's script pane (`fixed`, with the limit/Run tools passed
+locked ON) and the Entities DWL playground's script pane (`fixed`, with the limit/Run tools passed
 as `$tools`, so the script pretty-prints on open too). Config flags `body_dwl` / `content_dwl` (lenient-absent bools in
 `isStepConfigValid`). ON = the field is evaluated as a DWL expression against the execution
 context at run time: the body result is sent as-is when a string and JSON-encoded otherwise

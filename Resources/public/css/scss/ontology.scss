@@ -715,6 +715,30 @@
         gap: 12px;
     }
 
+    // The "format" wand before the DWL switch (the Data View's Format glyph): just the icon.
+    &__wand {
+        padding: 0 2px;
+        border: 0;
+        background: transparent;
+        color: #5b6b7b;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+
+        &:hover:not(:disabled) {
+            color: #1b3a5b;
+        }
+
+        &:disabled {
+            opacity: 0.35;
+            cursor: default;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+    }
+
     &__textarea {
         width: 100%;
         box-sizing: border-box;
@@ -1675,6 +1699,12 @@
             width: 0;
             height: 0;
         }
+    }
+
+    // A switch that cannot be flipped (an always-DWL field's DWL switch): shown, but plainly locked.
+    &__switch.is-locked {
+        cursor: not-allowed;
+        opacity: 0.6;
     }
 
     &__switch-track {

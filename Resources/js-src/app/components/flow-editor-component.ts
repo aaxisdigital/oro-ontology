@@ -4725,7 +4725,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const syncBodyContent = (): void => {
             const enabled = String($bodyType.val()) !== 'empty';
             bodyContent.$el.toggleClass('aaxis-dwl-field--disabled', !enabled);
-            bodyContent.$textarea.prop('disabled', !enabled);
+            bodyContent.$textarea.prop('disabled', !enabled).trigger('aaxis:dwl-sync'); // (the format wand follows)
             bodyContent.$el.find('input[type="checkbox"]').prop('disabled', !enabled);
             reposition();
         };

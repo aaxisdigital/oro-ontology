@@ -1,6 +1,6 @@
 import $ from 'jquery';
-import {describe, expect, it} from 'vitest';
-import createDwlField, {prettyPrintDwl} from '../../../../Resources/js-src/app/widgets/dwl-field';
+import {describe, expect, it, vi} from 'vitest';
+import createDwlField, {formatDwl, prettyPrintDwl} from '../../../../Resources/js-src/app/widgets/dwl-field';
 
 describe('prettyPrintDwl', () => {
     it('re-indents every line to its brace depth, two spaces per level', () => {
@@ -79,11 +79,16 @@ describe('createDwlField', () => {
         expect(field.$textarea.hasClass('aaxis-dwl-field__textarea--code')).toBe(false);
     });
 
-    it('a fixed field is always DWL and renders no switch', () => {
+    it('a fixed field is always DWL: its switch shows ON and locked, after the format wand', () => {
         const field = createDwlField({label: 'Script', value: 'a', dwl: false, fixed: true});
+        const $switch = field.$el.find('.aaxis-flow-editor__switch');
 
         expect(field.isDwl()).toBe(true);
-        expect(field.$el.find('input[type="checkbox"]')).toHaveLength(0);
+        expect($switch.hasClass('is-locked')).toBe(true);
+        expect($switch.attr('title')).toBe('aaxis.ontology.flow_editor.dwl_fixed_title');
+        expect($switch.find('input').prop('checked')).toBe(true);
+        expect($switch.find('input').prop('disabled')).toBe(true);
+        expect($switch.prev().is('[data-role="dwl-format"]')).toBe(true);
         expect(field.$textarea.hasClass('aaxis-dwl-field__textarea--code')).toBe(true);
     });
 
@@ -122,5 +127,71 @@ describe('createDwlField', () => {
         field.$textarea.val('typed');
 
         expect(field.value()).toBe('typed');
+    });
+});
+
+describe('formatDwl', () => {
+    it('puts each entry of an object literal on its own line, nested ones too', () => {
+        expect(formatDwl('{statusCode: 200, body: {id: payload.id, total: payload.total}}')).toBe(
+            '{\n  statusCode: 200,\n  body: {\n    id: payload.id,\n    total: payload.total\n  }\n}'
+        );
+    });
+
+    it('keeps short lists, one-entry objects and parentheses inline', () => {
+        expect(formatDwl('[1, 2, 3]')).toBe('[1, 2, 3]');
+        expect(formatDwl('{a: 1}')).toBe('{a: 1}');
+        expect(formatDwl('payload map ((item, index) -> item.id)')).toBe('payload map ((item, index) -> item.id)');
+        expect(formatDwl('payload.items[0]')).toBe('payload.items[0]');
+    });
+
+    it('breaks long lists and lists of objects', () => {
+        expect(formatDwl('[{a: 1}, {a: 2}]')).toBe('[\n  {a: 1},\n  {a: 2}\n]');
+        const long = `[${Array.from({length: 20}, (_v, i) => `"value${i}"`).join(', ')}]`;
+        expect(formatDwl(long).split('\n')).toHaveLength(22);
+    });
+
+    it('never touches strings or comments, and keeps a comment trailing a comma on its line', () => {
+        expect(formatDwl('{a: "x, {y}", b: 1}')).toBe('{\n  a: "x, {y}",\n  b: 1\n}');
+        expect(formatDwl('{a: 1, // note, {not code}\nb: 2}')).toBe('{\n  a: 1, // note, {not code}\n  b: 2\n}');
+        expect(formatDwl('{a: 1, /* x, y */ b: 2}')).toBe('{\n  a: 1,\n  /* x, y */ b: 2\n}');
+    });
+
+    it('keeps existing line breaks, re-indents, and changes nothing the second time', () => {
+        const once = formatDwl('%dw 2.0\noutput application/json\n---\n{\n      a: 1, b: [1, 2],\n c: 3}');
+        expect(once).toBe('%dw 2.0\noutput application/json\n---\n{\n  a: 1,\n  b: [1, 2],\n  c: 3\n}');
+        expect(formatDwl(once)).toBe(once);
+    });
+});
+
+describe('createDwlField format wand', () => {
+    it('formats the code (firing input) from a wand before the switch', () => {
+        const field = createDwlField({label: 'Code', value: '{a: 1, b: 2}', dwl: true});
+        const onInput = vi.fn();
+        field.$textarea.on('input', onInput);
+        const $wand = field.$el.find('[data-role="dwl-format"]');
+
+        expect($wand.next().is('.aaxis-flow-editor__switch')).toBe(true);
+        expect($wand.attr('title')).toBe('aaxis.ontology.flow_editor.dwl_format');
+        $wand.trigger('click');
+
+        expect(field.value()).toBe('{\n  a: 1,\n  b: 2\n}');
+        expect(onInput).toHaveBeenCalled();
+    });
+
+    it('is disabled in plain-text mode and while the host disables the field', () => {
+        const field = createDwlField({label: 'Message', value: '{a: 1, b: 2}', dwl: false});
+        const $wand = field.$el.find('[data-role="dwl-format"]');
+        expect($wand.prop('disabled')).toBe(true);
+
+        field.$el.find('input[type="checkbox"]').prop('checked', true).trigger('change');
+        expect($wand.prop('disabled')).toBe(false);
+
+        field.$textarea.prop('disabled', true).trigger('aaxis:dwl-sync');
+        expect($wand.prop('disabled')).toBe(true);
+    });
+
+    it('shows on fixed DWL fields too, and can be left out', () => {
+        expect(createDwlField({label: 'Code', value: '', dwl: true, fixed: true}).$el.find('[data-role="dwl-format"]')).toHaveLength(1);
+        expect(createDwlField({label: 'Code', value: '', dwl: true, format: false}).$el.find('[data-role="dwl-format"]')).toHaveLength(0);
     });
 });

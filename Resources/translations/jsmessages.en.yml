@@ -414,6 +414,8 @@ aaxis:
             debug_failed: 'Failed'
             debug_not_started: 'Waiting for the first step…'
             dwl_toggle_label: 'DWL'
+            dwl_format: 'Format the DWL code'
+            dwl_fixed_title: 'This field is always a DWL expression'
             dwl_toggle_title: 'When on, this field is evaluated as a DWL expression against the execution context'
             writer_content_label: 'Content'
             writer_content_required: 'Please enter the content to write.'
