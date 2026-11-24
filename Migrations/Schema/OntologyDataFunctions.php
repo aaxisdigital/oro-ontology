@@ -141,7 +141,13 @@ DECLARE
 BEGIN
     IF p_old IS NOT NULL AND p_new IS NOT NULL
         AND jsonb_typeof(p_old) = 'object' AND jsonb_typeof(p_new) = 'object' THEN
-        FOR v_key, v_new_val IN SELECT * FROM jsonb_each(p_new) LOOP
+        -- Only the keys whose value differs can contribute (an equal value — object, array or
+        -- scalar — adds nothing below), so they are filtered here: a record usually changes a few
+        -- of its keys, and looping over all of them dominated the cost of a large update batch.
+        FOR v_key, v_new_val IN
+            SELECT n.key, n.value FROM jsonb_each(p_new) AS n
+            WHERE (p_old -> n.key) IS DISTINCT FROM n.value
+        LOOP
             IF NOT (p_old ? v_key) THEN
                 v_result := v_result || jsonb_build_object(v_key, 'null'::jsonb);
             ELSE
@@ -214,7 +220,6 @@ DECLARE
     v_result jsonb;
     v_key text;
     v_new_val jsonb;
-    v_old_val jsonb;
 BEGIN
     IF p_old IS NULL OR jsonb_typeof(p_old) <> 'object' THEN
         RETURN COALESCE(p_new, p_old);
@@ -223,18 +228,15 @@ BEGIN
         RETURN p_old;
     END IF;
 
-    v_result := p_old;
-    FOR v_key, v_new_val IN SELECT * FROM jsonb_each(p_new) LOOP
-        IF v_result ? v_key THEN
-            v_old_val := v_result -> v_key;
-            IF jsonb_typeof(v_new_val) = 'object' AND jsonb_typeof(v_old_val) = 'object' THEN
-                v_result := jsonb_set(v_result, ARRAY[v_key], aaxis_ontology_jsonb_deep_merge(v_old_val, v_new_val));
-            ELSE
-                v_result := jsonb_set(v_result, ARRAY[v_key], v_new_val);
-            END IF;
-        ELSE
-            v_result := v_result || jsonb_build_object(v_key, v_new_val);
-        END IF;
+    -- Every key of p_new wins (one concatenation instead of a jsonb_set per key, each of which
+    -- copied the whole object); only the keys that are objects on BOTH sides are then merged
+    -- recursively instead of replaced.
+    v_result := p_old || p_new;
+    FOR v_key, v_new_val IN
+        SELECT n.key, n.value FROM jsonb_each(p_new) AS n
+        WHERE jsonb_typeof(n.value) = 'object' AND jsonb_typeof(p_old -> n.key) = 'object'
+    LOOP
+        v_result := jsonb_set(v_result, ARRAY[v_key], aaxis_ontology_jsonb_deep_merge(p_old -> v_key, v_new_val));
     END LOOP;
 
     RETURN v_result;
@@ -254,6 +256,20 @@ SQL;
      * the same unique id survived a delete/reload (the pre-v1_10 purge kept history rows), which
      * used to violate the (entity_id, unique_id, version) unique index and silently abort the
      * whole batch from inside the async consumer.
+     *
+     * SET-BASED (v1_15): the batch is written by ONE statement — a plan of every record (insert /
+     * unchanged / update, joined to its live row and its highest surviving history version), then
+     * the inserts, the history archive and the updates as data-modifying CTEs over that plan, and
+     * the response aggregated once. The former per-record loop grew its response with
+     * `v_changes := v_changes || …`, which copies the whole object on every record: a batch of N
+     * records cost O(N²) (4 000 records took 26 s, a 50k-row file never finished and pinned a CPU).
+     *
+     * RESPONSE: {uuid, entity_id, payload: {<unique id>: null | {uuid, version}}} — null = the stored
+     * payload already contained the record (nothing written), an object = created or updated, with
+     * the record's new version. Callers only tell those two apart
+     * ({@see \Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager::parseUpsertResponse()}),
+     * so the record's payload/diff is NOT echoed back: it made the response as big as the batch.
+     * Validation failures answer {uuid, entity_id, payload: {errors: [...]}} as before.
      */
     public static function dataUpsert(): string
     {
@@ -271,20 +287,7 @@ DECLARE
     v_unique_ids jsonb;
     v_payload jsonb;
     v_updated_at timestamp;
-    v_changes jsonb := '{}'::jsonb;
-    v_idx int;
-    v_uid text;
-    v_item jsonb;
-    v_existing_id int;
-    v_existing_payload jsonb;
-    v_existing_version int;
-    v_existing_uuid text;
-    v_existing_updated_at timestamp;
-    v_diff jsonb;
-    v_history_diff jsonb;
-    v_new_payload jsonb;
-    v_max_history int;
-    v_archive_version int;
+    v_changes jsonb;
 BEGIN
     v_flow_raw   := p_input -> 'flow_id';
     v_uuid       := p_input ->> 'uuid';
@@ -352,60 +355,77 @@ BEGIN
 
     v_updated_at := (p_input ->> 'updated_at')::timestamp;
 
-    FOR v_idx IN 0 .. jsonb_array_length(v_unique_ids) - 1 LOOP
-        v_uid  := v_unique_ids ->> v_idx;
-        v_item := v_payload -> v_idx;
-
-        SELECT d.id, d.payload, d.version, d.uuid, d.updated_at
-            INTO v_existing_id, v_existing_payload, v_existing_version, v_existing_uuid, v_existing_updated_at
-        FROM aaxis_ontology_data d
-        WHERE d.entity_id = v_entity_id AND d.unique_id = v_uid;
-
-        -- Version continuity: numbering always continues after this unique id's surviving history
-        -- (0 when there is none), so a re-created record can never re-issue an archived version.
-        -- NOTE: this SELECT resets FOUND, so record existence is checked via v_existing_id
-        -- (SELECT INTO nulls its targets when the data row above did not match).
-        SELECT COALESCE(MAX(h.version), 0) INTO v_max_history
-        FROM aaxis_ontology_data_history h
-        WHERE h.entity_id = v_entity_id AND h.unique_id = v_uid;
-
-        IF v_existing_id IS NULL THEN
-            INSERT INTO aaxis_ontology_data (entity_id, unique_id, uuid, version, payload, updated_at)
-            VALUES (v_entity_id, v_uid, v_uuid, v_max_history + 1, v_item, v_updated_at);
-
-            v_changes := v_changes || jsonb_build_object(
-                v_uid, jsonb_build_object('uuid', v_uuid, 'payload', v_item, 'version', v_max_history + 1)
-            );
-        ELSIF v_existing_payload @> v_item THEN
-            v_changes := v_changes || jsonb_build_object(v_uid, 'null'::jsonb);
-        ELSE
-            v_diff := aaxis_ontology_jsonb_diff(v_existing_payload, v_item);
-            v_history_diff := aaxis_ontology_jsonb_diff_previous(v_existing_payload, v_item);
-
-            v_archive_version := GREATEST(v_existing_version, v_max_history + 1);
-
-            INSERT INTO aaxis_ontology_data_history (entity_id, unique_id, uuid, version, payload, updated_at)
-            VALUES (v_entity_id, v_uid, v_existing_uuid, v_archive_version, v_history_diff, v_existing_updated_at);
-
-            v_new_payload := aaxis_ontology_jsonb_deep_merge(v_existing_payload, v_item);
-
-            UPDATE aaxis_ontology_data
-            SET payload = v_new_payload,
-                uuid = v_uuid,
-                updated_at = v_updated_at,
-                version = v_archive_version + 1
-            WHERE id = v_existing_id;
-
-            v_changes := v_changes || jsonb_build_object(
-                v_uid, jsonb_build_object('uuid', v_uuid, 'payload', v_diff, 'version', v_archive_version + 1)
-            );
-        END IF;
-    END LOOP;
+    -- The unique ids are distinct (checked above), so every record touches its own row and the
+    -- CTEs below never race each other inside the statement.
+    WITH batch AS (
+        SELECT u.uid, p.item
+        FROM jsonb_array_elements_text(v_unique_ids) WITH ORDINALITY AS u(uid, ord)
+        JOIN jsonb_array_elements(v_payload) WITH ORDINALITY AS p(item, ord) USING (ord)
+    ),
+    plan AS MATERIALIZED (
+        SELECT b.uid,
+               b.item,
+               d.id,
+               d.payload AS old_payload,
+               d.uuid AS old_uuid,
+               d.updated_at AS old_updated_at,
+               CASE
+                   WHEN d.id IS NULL THEN 'insert'
+                   WHEN d.payload @> b.item THEN 'same'
+                   ELSE 'update'
+               END AS action,
+               -- insert: the new record's version; update: the version the replaced payload is
+               -- archived under (the live row then moves to version + 1).
+               CASE
+                   WHEN d.id IS NULL THEN COALESCE(h.max_version, 0) + 1
+                   ELSE GREATEST(d.version, COALESCE(h.max_version, 0) + 1)
+               END AS version
+        FROM batch b
+        LEFT JOIN aaxis_ontology_data d
+               ON d.entity_id = v_entity_id AND d.unique_id = b.uid
+        LEFT JOIN LATERAL (
+            SELECT MAX(hh.version) AS max_version
+            FROM aaxis_ontology_data_history hh
+            WHERE hh.entity_id = v_entity_id AND hh.unique_id = b.uid
+        ) h ON true
+    ),
+    inserted AS (
+        INSERT INTO aaxis_ontology_data (entity_id, unique_id, uuid, version, payload, updated_at)
+        SELECT v_entity_id, p.uid, v_uuid, p.version, p.item, v_updated_at
+        FROM plan p
+        WHERE p.action = 'insert'
+    ),
+    archived AS (
+        INSERT INTO aaxis_ontology_data_history (entity_id, unique_id, uuid, version, payload, updated_at)
+        SELECT v_entity_id, p.uid, p.old_uuid, p.version,
+               aaxis_ontology_jsonb_diff_previous(p.old_payload, p.item), p.old_updated_at
+        FROM plan p
+        WHERE p.action = 'update'
+    ),
+    updated AS (
+        UPDATE aaxis_ontology_data d
+        SET payload = aaxis_ontology_jsonb_deep_merge(p.old_payload, p.item),
+            uuid = v_uuid,
+            updated_at = v_updated_at,
+            version = p.version + 1
+        FROM plan p
+        WHERE p.action = 'update' AND d.id = p.id
+    )
+    SELECT jsonb_object_agg(
+               p.uid,
+               CASE p.action
+                   WHEN 'same' THEN 'null'::jsonb
+                   WHEN 'insert' THEN jsonb_build_object('uuid', v_uuid, 'version', p.version)
+                   ELSE jsonb_build_object('uuid', v_uuid, 'version', p.version + 1)
+               END
+           )
+      INTO v_changes
+      FROM plan p;
 
     RETURN jsonb_build_object(
         'uuid', v_uuid,
         'entity_id', v_entity_id,
-        'payload', v_changes
+        'payload', COALESCE(v_changes, '{}'::jsonb)
     );
 END;
 $func$;

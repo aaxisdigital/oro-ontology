@@ -585,6 +585,12 @@ class OntologyDataApiManagerTest extends TestCase
                 ['payload' => ['A' => ['q' => 1], 'B' => null, 'C' => []]],
                 ['changed' => ['A', 'C'], 'errors' => null],
             ],
+            'the v1_15 function answers {uuid, version} per written record' => [
+                ['uuid' => 'u', 'entity_id' => 12, 'payload' => [
+                    'A' => ['uuid' => 'u', 'version' => 1], 'B' => null, 'errors' => ['uuid' => 'u', 'version' => 4],
+                ]],
+                ['changed' => ['A', 'errors'], 'errors' => null],
+            ],
             'numeric-looking ids are strings' => [['payload' => [101 => ['x' => 1], 102 => null]], ['changed' => ['101'], 'errors' => null]],
             'a rejected batch' => [['payload' => ['errors' => ['a', 'b']]], ['changed' => [], 'errors' => ['a', 'b']]],
             'a record whose id is "errors" is a success' => [['payload' => ['errors' => ['q' => 1]]], ['changed' => ['errors'], 'errors' => null]],
