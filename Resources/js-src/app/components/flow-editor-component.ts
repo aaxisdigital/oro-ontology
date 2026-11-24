@@ -328,6 +328,15 @@ function plainObject(value: unknown): Record<string, any> {
     return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
 }
 
+/** Distance from a point to the segment a–b. */
+function segmentDistance(p: Point, a: Point, b: Point): number {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length2 = dx * dx + dy * dy;
+    const t = length2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2));
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
 /** The SUBFLOW id a stored step invokes (Call Subflow / Foreach Loop), null otherwise. */
 function subflowTargetOf(step: any): string | null {
     const id = (step?.type === 'sub_flow' || step?.type === 'foreach') ? step.config?.subflow : null;
@@ -769,6 +778,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     // drawn as an origin-less arrow into that step.
     private startId!: string | null;
     private wires!: SVGSVGElement;
+    /** The routed polyline of every drawn link (canvas coordinates) — a toolbox drop on a line uses them. */
+    private linkRoutes!: Array<{link: FlowLink; points: Point[]}>;
     private selection!: Set<PlacedStep>;
     /** Step ids of the ACTIVE canvas carrying a debug breakpoint (see toggleBreakpoint). */
     private breakpoints!: Set<string>;
@@ -789,6 +800,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         el: HTMLElement | null;
         startX: number;
         startY: number;
+        /** The line a release right now would splice the new element into (highlighted). */
+        link?: FlowLink | null;
     } | null;
     private stepDrag!: {
         pointerId: number;
@@ -883,6 +896,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.phpMethodsCache = {};
         this.steps = [];
         this.links = [];
+        this.linkRoutes = [];
         this.startId = null;
         this.selection = new Set();
         this.breakpoints = new Set();
@@ -1219,6 +1233,22 @@ class OntologyFlowEditorComponent extends BaseComponent {
             const link = this.wireGroupLink(e.currentTarget as SVGGElement);
             if (link) {
                 this.openLinkContextMenu(e.originalEvent as PointerEvent, link);
+            }
+        });
+        // The glyph after a Call Subflow / Foreach Loop name: Cmd/Alt (or Ctrl)+click opens what it invokes.
+        this.$el.on('click.aaxisFlowEditor', '[data-role="step-link"]', (e: any) => {
+            const ev = e.originalEvent as MouseEvent;
+            if (!ev.metaKey && !ev.altKey && !ev.ctrlKey) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            const stepEl = (e.currentTarget as HTMLElement).closest('[data-role="step"]');
+            const from = this.steps.find(st => st.el === stepEl) || null;
+            const target = from ? this.invokedTarget(from) : null;
+            if (target) {
+                this.closeContextMenu();
+                target.open();
             }
         });
         this.$el.on('dblclick.aaxisFlowEditor', '[data-role="step"]', (e: any) => {
@@ -1949,6 +1979,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.syncCanvasExtent();
         this.wires.querySelectorAll('[data-role="wire-group"], [data-role="start-group"]').forEach(el => el.remove());
         this.drawStartArrow();
+        this.linkRoutes = [];
+        this.refreshInvokeGlyphs();
         if (!this.links.length) {
             return;
         }
@@ -1963,6 +1995,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
         }
         const hops = this.computeHops(routes.map(r => r.points));
+        this.linkRoutes = routes;
 
         routes.forEach((route, i) => {
             const d = this.pathWithHops(route.points, hops[i]);
@@ -2001,6 +2034,70 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
             this.wires.appendChild(group);
         });
+    }
+
+    /**
+     * What a Call Subflow / Foreach Loop invokes, for the glyph after its name: the subflow (by the
+     * flow catalog's name — none until the catalog loaded) or the inner flow box on this canvas.
+     */
+    private invokedTarget(step: PlacedStep): {name: string; icon: string; open: () => void} | null {
+        if (step.type !== 'sub_flow' && step.type !== 'foreach') {
+            return null;
+        }
+        const inner = innerTargetOf(step.config);
+        if (inner !== null) {
+            const box = this.stepById(inner);
+            return box && this.isInner(box)
+                ? {name: box.name, icon: this.stepMeta[INNER_FLOW]?.icon || 'fa-object-group', open: () => this.revealStep(box)}
+                : null;
+        }
+        const id = Number(step.config?.subflow || 0);
+        const record = id > 0 ? this.catalogFlowRecords?.find(f => f.id === id) : undefined;
+        return record
+            ? {name: record.name || String(id), icon: this.stepMeta.sub_flow?.icon || 'fa-sitemap', open: () => this.focusFlowTab(id)}
+            : null;
+    }
+
+    /**
+     * The glyph after a Call Subflow / Foreach Loop tile's NAME: the subflow or inner-flow icon of
+     * what it invokes (its name in the tooltip) — Cmd/Alt (or Ctrl)+click opens it. Text-less, so
+     * the name label reads the same; refreshed with every redraw (targets, names, the catalog).
+     */
+    private refreshInvokeGlyph(step: PlacedStep): void {
+        const label = step.el.querySelector('.aaxis-flow-editor__step-name');
+        if (!label) {
+            return;
+        }
+        label.querySelector('[data-role="step-link"]')?.remove();
+        const target = this.invokedTarget(step);
+        if (!target) {
+            return;
+        }
+        const glyph = document.createElement('span');
+        glyph.className = `fa ${target.icon} aaxis-flow-editor__step-link`;
+        glyph.dataset.role = 'step-link';
+        glyph.title = __('aaxis.ontology.flow_editor.step_link_title', {name: target.name});
+        label.appendChild(glyph);
+    }
+
+    private refreshInvokeGlyphs(): void {
+        this.steps.forEach(step => this.refreshInvokeGlyph(step));
+    }
+
+    /** The drawn line passing within `tolerance` px of a canvas point (the nearest), or null. */
+    private linkAt(px: number, py: number, tolerance = 8): FlowLink | null {
+        let best: FlowLink | null = null;
+        let bestDistance = tolerance;
+        this.linkRoutes.forEach(({link, points}) => {
+            for (let i = 0; i + 1 < points.length; i++) {
+                const distance = segmentDistance({x: px, y: py}, points[i], points[i + 1]);
+                if (distance <= bestDistance) {
+                    bestDistance = distance;
+                    best = link;
+                }
+            }
+        });
+        return best;
     }
 
     /** Sets/clears the sub-flow entry marker and refreshes arrows, marking and buttons. */
@@ -3091,6 +3188,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const label = step.el.querySelector('.aaxis-flow-editor__step-name');
         if (label) {
             label.textContent = name;
+            this.refreshInvokeGlyph(step); // (textContent dropped it)
         }
         this.syncDirty();
     }
@@ -3305,6 +3403,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         step.config = Object.keys(config).length ? config : null;
         this.renameStep(step, name);
         this.markStepInvalid(step, incomplete);
+        // A new target (or name) changes the name glyphs and which inner flows run.
+        this.redrawLinks();
         this.syncDirty();
         return '';
     }
@@ -5408,6 +5508,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.ghostDrag.el = el;
         }
         this.positionGhost(e);
+        this.trackGhostLink(e);
     }
 
     private dropGhost(e: PointerEvent): void {
@@ -5416,6 +5517,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         const {type, el} = this.ghostDrag;
         this.ghostDrag = null;
+        this.wires.querySelectorAll('[data-role="wire-group"].is-splice-target').forEach(node => node.classList.remove('is-splice-target'));
         // No tile was ever materialised → this was a click, not a drag. Nothing to add.
         if (el === null) {
             return;
@@ -5522,14 +5624,68 @@ class OntologyFlowEditorComponent extends BaseComponent {
             ? null
             : this.steps.find(s => !this.isInner(s) && px >= s.x && px <= s.x + this.tileSize && py >= s.y && py <= s.y + this.tileSize) || null;
         const freePort = target === null ? -1 : this.firstFreePort(target);
-        const added = target !== null && freePort >= 0
-            ? this.addChainedStep(type, target, freePort)
-            : this.addStep(type, x, y);
+        const line = target === null && this.canSpliceType(type) ? this.linkAt(px, py) : null;
+        let added: PlacedStep;
+        if (target !== null && freePort >= 0) {
+            added = this.addChainedStep(type, target, freePort);
+        } else if (line !== null) {
+            added = this.spliceIntoLink(type, line, x, y);
+        } else {
+            added = this.addStep(type, x, y);
+        }
 
         if (REQUIRES_CONFIG.has(type)) {
             this.markStepInvalid(added, true);
         }
         this.syncDirty();
+    }
+
+    /** Types a line can take in the middle: anything with an input and an output (no trigger, no inner flow). */
+    private canSpliceType(type: string): boolean {
+        return this.stepMeta[type]?.category !== 'trigger' && type !== INNER_FLOW;
+    }
+
+    /**
+     * A toolbox drop ON a line: the new element goes where it was dropped and the line now runs
+     * through it — from → new (the line's own port, so a Choice's branch stays its branch) and
+     * new → to (its first output; a Choice continues on its green, matched branch).
+     */
+    private spliceIntoLink(type: string, link: FlowLink, x: number, y: number): PlacedStep {
+        const added = this.addStep(type, x, y);
+        this.links = this.links.filter(l => l !== link);
+        this.links.push({from: link.from, fromPort: link.fromPort, to: added.id});
+        this.links.push({from: added.id, fromPort: 0, to: link.to});
+        this.redrawLinks();
+        return added;
+    }
+
+    /** Highlights the line a toolbox drop at this pointer position would splice into (none over a tile). */
+    private trackGhostLink(e: PointerEvent): void {
+        const drag = this.ghostDrag;
+        if (!drag) {
+            return;
+        }
+        const bounds = this.canvas().getBoundingClientRect();
+        const px = e.clientX - bounds.left;
+        const py = e.clientY - bounds.top;
+        const overTile = this.steps.some(s => {
+            const size = this.stepSize(s);
+            return px >= s.x && px <= s.x + size.w && py >= s.y && py <= s.y + size.h;
+        });
+        const link = drag.el && !overTile && this.canSpliceType(drag.type) ? this.linkAt(px, py) : null;
+        if (link === drag.link) {
+            return;
+        }
+        this.wires.querySelectorAll('[data-role="wire-group"].is-splice-target').forEach(el => el.classList.remove('is-splice-target'));
+        drag.link = link;
+        if (link) {
+            this.wires.querySelectorAll('[data-role="wire-group"]').forEach(el => {
+                const group = el as SVGGElement;
+                if (this.wireGroupLink(group) === link) {
+                    group.classList.add('is-splice-target');
+                }
+            });
+        }
     }
 
     /** The first output port of `step` that drives no link yet (-1 = all taken). */
@@ -7688,7 +7844,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private prefetchCatalogs(): void {
         this.entityCatalog().catch(() => undefined);
         this.connectorCatalog().catch(() => undefined);
-        this.flowCatalog().catch(() => undefined);
+        // Subflow names arrive with the catalog: the name glyphs need them.
+        this.flowCatalog().then(() => this.scheduleRedraw()).catch(() => undefined);
     }
 
     dispose(): void {

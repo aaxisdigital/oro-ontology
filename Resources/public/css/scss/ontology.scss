@@ -2322,6 +2322,14 @@
             stroke: #8f2a1f;
         }
 
+        // The line a toolbox drop would splice the new element into.
+        // (A glow, not a wider stroke: markers scale with the stroke width.)
+        [data-role='wire-group'].is-splice-target [data-role='wire'] {
+            stroke: #2c7a3f;
+            stroke-dasharray: 8 4;
+            filter: drop-shadow(0 0 3px rgba(44, 122, 63, 0.8));
+        }
+
         marker path {
             fill: #2b6cb0;
         }
@@ -2491,6 +2499,19 @@
     // An inner flow's elements are chained automatically — no ports to drag lines from.
     &__step.is-inner-child .aaxis-flow-editor__port {
         display: none;
+    }
+
+    // The glyph after a Call Subflow / Foreach Loop tile's name: the subflow / inner-flow icon of
+    // what it invokes (named in its tooltip); Cmd/Alt+click opens it.
+    &__step-link {
+        margin-left: 4px;
+        font-size: 0.9em;
+        color: #2b6cb0;
+        cursor: pointer;
+
+        &:hover {
+            color: #1b3a5b;
+        }
     }
 
     // A DEBUG BREAKPOINT (tile menu): a red dot on the tile's top-left corner — the Debug mode

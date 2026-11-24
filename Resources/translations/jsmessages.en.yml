@@ -577,6 +577,7 @@ aaxis:
             menu_called_by_none: 'No flow calls this subflow.'
             menu_navigate_inner_flow: 'Go to inner flow'
             menu_breakpoint: 'Debug Breakpoint'
+            step_link_title: '{{ name }} — Cmd/Alt+click to open it'
             entity_name_placeholder: 'Type to filter…'
             entity_name_dwl_placeholder: 'DWL, e.g. payload.system'
             debug_paused_at: 'paused at breakpoint "{{ name }}"'

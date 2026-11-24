@@ -1229,6 +1229,20 @@ selection. Pasted elements:
 The canvas holds ONE trigger, so a copied trigger is LEFT OUT (warning flash) when one exists.
 A pasted trigger clears the "Start here" marker (restoreFromDesign rejects start + trigger).
 Pasted tiles do not avoid overlapping existing ones.
+**NAME GLYPH** (2026-11-24): a Call Subflow / Foreach Loop tile shows, right after its NAME, the
+icon of what it invokes — the subflow (catalog name; there once `flowCatalog()` resolved,
+`prefetchCatalogs` schedules a redraw) or the inner flow box (`invokedTarget()`) — with the
+target named in its tooltip (`step_link_title`). It is a text-less `<span data-role="step-link">`
+inside `.aaxis-flow-editor__step-name`, so the label's text stays the name; `refreshInvokeGlyphs()`
+runs with every `redrawLinks()` (and `renameStep` re-adds it). Cmd/Alt (or Ctrl)+click opens the
+target: `focusFlowTab` or `revealStep(box)`; a plain click is just a click on the tile. (A pill on
+the outgoing LINE was tried first and dropped — it crowded the lines.) `applyStepSettings` calls
+`redrawLinks()`, so a new target/name updates the glyph and inner-flow reachability at once.
+**DROP ON A LINE** (2026-11-24): a toolbox drop within 8px of a drawn line (`linkAt`, segment
+distance over `linkRoutes`, kept by `redrawLinks`) — and not on a tile, which keeps the chain-after behavior — SPLICES
+the new element in (`spliceIntoLink`): from → new on the line's own port (a Choice branch stays
+that branch), new → to on port 0; triggers and inner flows never splice (`canSpliceType`). While
+the ghost hovers such a line its wire group gets `is-splice-target` (green, thick, dashed).
 Right-clicking a flow LINE offers Remove for
 that single connection (each wire ships an invisible 12px-wide hit twin — the only pointer-enabled
 part of the SVG layer — and highlights on hover). **Wire routing**: links are orthogonal polylines
