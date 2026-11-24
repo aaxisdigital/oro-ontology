@@ -7,7 +7,7 @@ import 'jquery.select2';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
-import {apiFetch, bindGridToolbar, formatDateTime, setRefreshBusy} from './component-support';
+import {apiFetch, bindGridToolbar, formatDateTime, setRefreshBusy, takeQueryParam} from './component-support';
 import {escapeHtml, highlightJson, isPlainObject, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 
 interface OntologyDataViewOptions {
@@ -119,6 +119,7 @@ class OntologyDataViewComponent extends BaseComponent {
                 {key: 'versions', label: __('aaxis.ontology.data_view.versions'), icon: 'fa-clone'}
             ],
             gridKey: 'ontology-data-view',
+            urlState: true,
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-data-view'}),
             emptyText: __('aaxis.ontology.data_view.empty'),
             onAction: (action, row) => this.onAction(action, row as DataRecord)
@@ -1006,9 +1007,9 @@ class OntologyDataViewComponent extends BaseComponent {
             return;
         }
         this.entityFilterApplied = true;
-        const entity = new URLSearchParams(window.location.search).get('entity');
-        if (entity !== null && entity.trim() !== '') {
-            this.grid.setFilter('entity', {operator: 'equals', value: entity.trim()});
+        const entity = takeQueryParam('entity');
+        if (entity !== null) {
+            this.grid.setFilter('entity', {operator: 'equals', value: entity});
         }
     }
 

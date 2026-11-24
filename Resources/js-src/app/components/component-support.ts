@@ -17,17 +17,41 @@ export function csrfToken(): string {
  * JSON request carrying Oro's CSRF header and the session cookie. Resolves to the parsed body plus
  * the HTTP ok flag, so callers can branch on failure without a separate rejection path.
  */
-export function apiFetch(url: string, method: string, body?: any): Promise<{ok: boolean; data: any}> {
+export function apiFetch(url: string, method: string, body?: any, keepalive = false): Promise<{ok: boolean; data: any}> {
     const opts: any = {
         method,
         credentials: 'same-origin',
         headers: {'Content-Type': 'application/json', 'X-CSRF-Header': csrfToken()}
     };
+    if (keepalive) {
+        // Outlives the page: a request sent while the tab closes or reloads still reaches the server.
+        opts.keepalive = true;
+    }
     if (body !== undefined) {
         opts.body = JSON.stringify(body);
     }
 
     return fetch(url, opts).then(r => r.json().then(d => ({ok: r.ok, data: d})));
+}
+
+/**
+ * Reads a ONE-SHOT deep-link parameter (`?system=`, `?entity=`, `?uuid=` — other pages link here
+ * pre-filtered) and drops it from the URL: once applied, the grid's own URL state (`f.<column>`,
+ * DataGrid `urlState`) carries the filter, so a refresh keeps it and a filter the user cleared stays
+ * cleared. Returns the trimmed value, or null when absent or blank.
+ */
+export function takeQueryParam(name: string): string | null {
+    const params = new URLSearchParams(window.location.search);
+    const value = params.get(name);
+    if (value === null) {
+        return null;
+    }
+    params.delete(name);
+    const query = params.toString();
+    window.history.replaceState(window.history.state, '', window.location.pathname + (query ? `?${query}` : '') + window.location.hash);
+    const trimmed = value.trim();
+
+    return trimmed === '' ? null : trimmed;
 }
 
 /** Spins and disables the page's refresh button while a request is in flight. */

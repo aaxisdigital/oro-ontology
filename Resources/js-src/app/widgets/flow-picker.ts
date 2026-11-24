@@ -14,9 +14,20 @@ export interface PickableFlow {
 
 export type FlowKind = 'flow' | 'subflow';
 
-/** The sort orders offered, in display order (labels: `aaxis.ontology.flow_editor.tab_open_sort.<key>`). */
+/** Every order the column headers can put the list in. */
 export const PICKER_SORTS = ['name_asc', 'name_desc', 'modified_desc', 'modified_asc', 'status_enabled', 'status_disabled'] as const;
 export type PickerSort = typeof PICKER_SORTS[number];
+
+/**
+ * The sortable column headers: label, then the column's two orders — the FIRST is what a click
+ * on another column switches to (names A–Z, newest first, enabled first), a click on the active
+ * column flips to the other one — and the aria-sort of each.
+ */
+const SORT_COLUMNS: Array<{key: string; label: string; orders: [PickerSort, PickerSort]; aria: [string, string]}> = [
+    {key: 'name', label: 'tab_open_col_name', orders: ['name_asc', 'name_desc'], aria: ['ascending', 'descending']},
+    {key: 'status', label: 'tab_open_col_status', orders: ['status_enabled', 'status_disabled'], aria: ['descending', 'ascending']},
+    {key: 'modified', label: 'tab_open_col_modified', orders: ['modified_desc', 'modified_asc'], aria: ['descending', 'ascending']}
+];
 
 export interface FlowPickerOptions<T extends PickableFlow> {
     /** Every flow the editor knows; native ones are left out here. */
@@ -60,10 +71,12 @@ export function sortFlows<T extends PickableFlow>(flows: T[], sort: PickerSort):
  * The flow editor's "Open flows" popup: pick several existing (non-native) flows and open each
  * in a tab.
  *
- * - The top bar holds the name filter (it takes the remaining width), the sort order and the
- *   Flows / Subflows toggles. The toggles COMBINE: either or both kinds can be listed, and
- *   clicking the only one still on does nothing, so the list never empties by that route.
- *   Their counts follow the filter.
+ * - The top bar holds the name filter (it takes the remaining width) and the Flows / Subflows
+ *   toggles. The toggles COMBINE: either or both kinds can be listed, and clicking the only one
+ *   still on does nothing, so the list never empties by that route. Their counts follow the
+ *   filter.
+ * - The column headers sort (Name, Status, Last modified): a click on another column sorts by it,
+ *   a click on the active one reverses it. A caret marks the active column and its direction.
  * - Clicking a row only MARKS it. The marks survive filtering, sorting and the toggles, so a
  *   hidden marked flow still counts. Each row also has its own Open button, which opens that one
  *   flow right away.
@@ -112,22 +125,10 @@ export default class FlowPickerDialog<T extends PickableFlow> {
             type: 'text', 'class': 'form-control aaxis-flow-picker__filter', 'data-role': 'picker-filter',
             placeholder: t('tab_open_filter_placeholder'), autocomplete: 'off', spellcheck: false
         });
-        const $sort = $('<select/>', {
-            'class': 'form-control no-uniform aaxis-flow-picker__sort', 'data-role': 'picker-sort',
-            title: t('tab_open_sort_title'), 'aria-label': t('tab_open_sort_title')
-        });
-        PICKER_SORTS.forEach(sort => $sort.append($('<option/>', {value: sort, text: t('tab_open_sort.' + sort)})));
-        $sort.val(this.sort);
         const $kinds = $('<div/>', {'class': 'aaxis-flow-picker__kinds', 'data-role': 'picker-kinds'});
-        const $bar = $('<div/>', {'class': 'aaxis-flow-picker__bar'}).append($filter, $sort, $kinds);
+        const $bar = $('<div/>', {'class': 'aaxis-flow-picker__bar'}).append($filter, $kinds);
 
-        const $head = $('<div/>', {'class': 'aaxis-flow-picker__head', 'aria-hidden': 'true'}).append(
-            $('<span/>'),
-            $('<span/>', {text: t('tab_open_col_name')}),
-            $('<span/>', {text: t('tab_open_col_status')}),
-            $('<span/>', {text: t('tab_open_col_modified')}),
-            $('<span/>')
-        );
+        const $head = $('<div/>', {'class': 'aaxis-flow-picker__head', 'data-role': 'picker-head'});
         const $list = $('<div/>', {'class': 'aaxis-flow-picker__list', 'data-role': 'picker-list'});
 
         const $cancel = $('<button/>', {type: 'button', 'class': 'btn', 'data-role': 'picker-cancel', text: t('dialog_cancel')});
@@ -137,10 +138,6 @@ export default class FlowPickerDialog<T extends PickableFlow> {
         this.$picker.append($bar, $head, $list, $actions);
 
         $filter.on('input', () => this.render());
-        $sort.on('change', () => {
-            this.sort = String($sort.val()) as PickerSort;
-            this.render();
-        });
         $cancel.on('click', () => this.dialog?.close());
         $open.on('click', () => this.openFlows(this.picked));
 
@@ -160,7 +157,35 @@ export default class FlowPickerDialog<T extends PickableFlow> {
         return this.flows.filter(f => f.type === kind && (query === '' || (f.name || '').toLowerCase().includes(query)));
     }
 
+    /** The column headers; the active sort column carries a caret pointing its direction. */
+    private renderHead(): void {
+        const $head = this.part('picker-head').empty().append($('<span/>'));
+        SORT_COLUMNS.forEach(column => {
+            const at = column.orders.indexOf(this.sort);
+            const $column = $('<button/>', {
+                type: 'button', 'class': 'aaxis-flow-picker__sort' + (at >= 0 ? ' is-active' : ''),
+                'data-role': 'picker-sort', 'data-sort': column.key,
+                'aria-sort': at >= 0 ? column.aria[at] : 'none',
+                title: t('tab_open_sort_by', {column: t(column.label)})
+            }).append($('<span/>', {text: t(column.label)}));
+            if (at >= 0) {
+                $column.append($('<span/>', {
+                    'class': 'fa ' + (column.aria[at] === 'ascending' ? 'fa-caret-up' : 'fa-caret-down'),
+                    'aria-hidden': 'true'
+                }));
+            }
+            $column.on('click', () => {
+                // Another column starts at its first order; the active one flips.
+                this.sort = column.orders[at === 0 ? 1 : 0];
+                this.render();
+            });
+            $head.append($column);
+        });
+        $head.append($('<span/>'));
+    }
+
     private render(): void {
+        this.renderHead();
         const $kinds = this.part('picker-kinds').empty();
         KINDS.forEach(([kind, label]) => {
             const active = this.kinds.has(kind);

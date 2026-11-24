@@ -28,22 +28,15 @@ interface FlowRecord {
 /**
  * Flows page built on the reusable DataGrid widget. Shows data from aaxis_ontology_flow.
  * "Add Flow" opens a blank editor and CLICKING ANYWHERE ON A ROW opens that flow's editor
- * (no separate edit action) — except the two built-in (type = native) flows.
- *
- * Each editable row carries a checkbox at the start of its Name cell (inside the cell rather than
- * as a column of its own: the grid appends columns unknown to a SAVED layout at the end, and the
- * box belongs first). "Open" opens the checked flows together in one editor, a tab each, in the
- * order they were checked ("Open (N)" when several are).
+ * (no separate edit action) — except the two built-in (type = native) flows. Several flows are
+ * opened together from the editor's own "Open flows" (one tab each).
  */
 class OntologyFlowComponent extends BaseComponent {
     private $el!: any;
     private grid!: DataGrid;
-    /** Ids of the checked flows, in the order they were checked (= the editor's tab order). */
-    private picked!: number[];
 
     initialize(options: OntologyFlowOptions): void {
         this.$el = options._sourceElement;
-        this.picked = [];
 
         const actions: GridAction[] = [
             {
@@ -69,10 +62,7 @@ class OntologyFlowComponent extends BaseComponent {
 
         this.grid = new DataGrid({
             columns: [
-                {
-                    key: 'name', label: __('aaxis.ontology.flow_view.name'), type: 'text',
-                    render: (row: FlowRecord) => this.nameCell(row)
-                },
+                {key: 'name', label: __('aaxis.ontology.flow_view.name'), type: 'text'},
                 {
                     key: 'type', label: __('aaxis.ontology.flow_view.type'), type: 'text', width: '120px',
                     render: (row: FlowRecord) => __('aaxis.ontology.flow_view.type_' + (row.type || 'subflow'))
@@ -98,6 +88,7 @@ class OntologyFlowComponent extends BaseComponent {
             ],
             actions,
             gridKey: 'ontology-flow-view',
+            urlState: true,
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-flow-view'}),
             emptyText: __('aaxis.ontology.flow_view.empty'),
             onAction: (action, row, event) => this.onAction(action, row as FlowRecord, event),
@@ -120,74 +111,8 @@ class OntologyFlowComponent extends BaseComponent {
             e.preventDefault();
             this.openImport();
         });
-        this.$el.on('change.aaxisOntologyFlow', '[data-role="flow-pick"]', (e: any) => {
-            const id = Number($(e.currentTarget).data('flowId'));
-            this.picked = this.picked.filter(picked => picked !== id);
-            if ($(e.currentTarget).is(':checked')) {
-                this.picked.push(id);
-            }
-            this.syncOpenSelected();
-        });
-        this.$el.on('click.aaxisOntologyFlow', '[data-role="open-selected"]', (e: any) => {
-            e.preventDefault();
-            this.openPicked((e.originalEvent || e) as MouseEvent);
-        });
-        this.syncOpenSelected();
 
         this.load();
-    }
-
-    /**
-     * The Name cell: the row's pick checkbox, then the name. Built-in flows cannot be edited, so
-     * they get an empty slot of the same width instead (names stay aligned).
-     */
-    private nameCell(row: FlowRecord): any {
-        const name = row.name || '';
-        const $name = $('<span/>', {'class': 'aaxis-flow-pick__name', text: name, title: name});
-        if (row.type === 'native') {
-            return $('<span/>', {'class': 'aaxis-flow-pick'}).append(
-                $('<span/>', {'class': 'aaxis-flow-pick__slot', 'aria-hidden': 'true'}),
-                $name
-            );
-        }
-        const label = __('aaxis.ontology.flow_view.pick');
-        const $box = $('<input/>', {
-            type: 'checkbox',
-            'class': 'aaxis-flow-pick__box no-uniform',
-            'data-role': 'flow-pick',
-            'data-flow-id': row.id,
-            title: label,
-            'aria-label': label
-        }).prop('checked', this.picked.includes(row.id));
-        // A <label>: the row's click-to-open ignores clicks on labels and inputs.
-        return $('<span/>', {'class': 'aaxis-flow-pick'}).append(
-            $('<label/>', {'class': 'aaxis-flow-pick__slot'}).append($box),
-            $name
-        );
-    }
-
-    /** "Open" is available while at least one flow is checked; several read "Open (N)". */
-    private syncOpenSelected(): void {
-        const count = this.picked.length;
-        this.$el.find('[data-role="open-selected"]').prop('disabled', count === 0);
-        this.$el.find('[data-role="open-selected-label"]').text(count > 1
-            ? __('aaxis.ontology.flow_view.open_count', {count: String(count)})
-            : __('aaxis.ontology.flow_view.open_button'));
-    }
-
-    /**
-     * One editor holding every checked flow: the path opens the first and `?tabs=` lists them all,
-     * which the editor reopens as tabs in this order (its URL format for a restored session).
-     */
-    private openPicked(event?: MouseEvent): void {
-        if (!this.picked.length) {
-            return;
-        }
-        const params: Record<string, string | number> = {id: this.picked[0]};
-        if (this.picked.length > 1) {
-            params.tabs = this.picked.join(',');
-        }
-        navigateTo(routing.generate('aaxis_ontology_flow_editor', params), event);
     }
 
     private onAction(action: string, row: FlowRecord, event?: MouseEvent): void {
@@ -371,12 +296,7 @@ class OntologyFlowComponent extends BaseComponent {
         fetch(routing.generate('aaxis_ontology_flow_list'), {credentials: 'same-origin'})
             .then(r => r.json())
             .then((data: {records: FlowRecord[]}) => {
-                const records = data.records || [];
-                // A checked flow that is gone (deleted elsewhere) can no longer be opened.
-                const editable = new Set(records.filter(r => r.type !== 'native').map(r => r.id));
-                this.picked = this.picked.filter(id => editable.has(id));
-                this.syncOpenSelected();
-                this.grid.setRows(records);
+                this.grid.setRows(data.records || []);
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_view.load_error')))
             .finally(() => this.setBusy(false));

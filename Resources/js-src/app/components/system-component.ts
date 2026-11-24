@@ -65,6 +65,7 @@ class OntologySystemComponent extends BaseComponent {
             ],
             actions,
             gridKey: 'ontology-system',
+            urlState: true,
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-system'}),
             emptyText: __('aaxis.ontology.system_manager.empty'),
             onAction: (action, row, event) => this.onAction(action, row as SystemRecord, event)

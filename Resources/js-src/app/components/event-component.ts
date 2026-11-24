@@ -5,7 +5,7 @@ import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
-import {bindGridToolbar, formatDateTime, setRefreshBusy} from './component-support';
+import {bindGridToolbar, formatDateTime, setRefreshBusy, takeQueryParam} from './component-support';
 import {writeClipboard} from '../widgets/clipboard';
 
 interface OntologyEventOptions {
@@ -119,6 +119,7 @@ class OntologyEventComponent extends BaseComponent {
             // A FRESH grid key: the per-user column preferences saved for the previous events
             // grids (other column sets entirely) must not reorder/hide the run columns.
             gridKey: 'ontology-event-runs',
+            urlState: true,
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-event-runs'}),
             emptyText: __('aaxis.ontology.event_view.empty'),
             onAction: (action, row, event) => this.onAction(action, row as FlowRunRecord, event)
@@ -172,9 +173,9 @@ class OntologyEventComponent extends BaseComponent {
             return;
         }
         this.uuidFilterApplied = true;
-        const uuid = new URLSearchParams(window.location.search).get('uuid');
-        if (uuid !== null && uuid.trim() !== '') {
-            this.grid.setFilter('flowUuid', {operator: 'equals', value: uuid.trim()});
+        const uuid = takeQueryParam('uuid');
+        if (uuid !== null) {
+            this.grid.setFilter('flowUuid', {operator: 'equals', value: uuid});
         }
     }
 
@@ -345,10 +346,13 @@ class OntologyEventComponent extends BaseComponent {
             case 'flow-start':
             case 'subflow-start': {
                 const user = payload.user?.name ? ` — ${payload.user.name}` : '';
-                // An inner flow's run (drawn inside its flow) names the inner flow.
+                // Runs logged before inner flows had their own kinds: a subflow-start naming one.
                 const inner = payload.inner ? ` — ${payload.inner}` : '';
                 return `${payload.trigger || ''}${inner}${user}`;
             }
+            case 'inner-flow-start':
+                // The inner flow (drawn inside its flow) the run executes.
+                return String(payload.inner || '');
             case 'data-upsert': {
                 const uniqueIds = Array.isArray(payload.uniqueIds) ? payload.uniqueIds.length : 0;
                 const changedIds = Array.isArray(payload.changedIds) ? payload.changedIds.length : 0;
@@ -360,7 +364,7 @@ class OntologyEventComponent extends BaseComponent {
             case 'log-message':
                 return String(payload.message || '');
             default:
-                // flow-finish / subflow-finish say everything with their badge alone.
+                // flow-finish / subflow-finish / inner-flow-finish say everything with their badge alone.
                 return '';
         }
     }

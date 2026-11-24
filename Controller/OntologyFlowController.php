@@ -45,6 +45,7 @@ class OntologyFlowController extends AbstractOntologyController
     private const string INVALID_PAYLOAD = 'Invalid payload.';
     private const string SESSION_EXPIRED = 'The debug session expired — restart the debug.';
     private const string SESSION_TIMED_OUT = 'The debug session was terminated by timeout — restart the debug.';
+    private const string SESSION_STOPPED = 'The debug session was stopped — restart the debug.';
 
     /** A flow document is small; anything larger is not one. */
     private const int MAX_IMPORT_BYTES = 2 * 1024 * 1024;
@@ -414,6 +415,13 @@ class OntologyFlowController extends AbstractOntologyController
                 self::debugBreakpoints($payload['breakpoints'] ?? null)
             );
         } catch (\RuntimeException $e) {
+            // The failing tick already closed the run (flow-exception): mark the stored walk so a
+            // later Stop does not close it a second time. A FIRST tick stores nothing to mark.
+            if ($blob !== null) {
+                $blob['terminated'] = 'failed';
+                $this->storeDebugContext($blob);
+            }
+
             return $this->debugFailure($e, $executor->subflowTrails(...));
         }
 
@@ -487,6 +495,7 @@ class OntologyFlowController extends AbstractOntologyController
 
         $refusal = match (true) {
             $blob === null => new JsonResponse(['success' => false, 'message' => self::SESSION_EXPIRED], 422),
+            ($blob['terminated'] ?? null) === 'debug-stop' => new JsonResponse(['success' => false, 'message' => self::SESSION_STOPPED], 422),
             ($blob['terminated'] ?? null) !== null => new JsonResponse(['success' => false, 'message' => self::SESSION_TIMED_OUT], 422),
             $this->isIdle($blob) => $this->terminateSession($blob),
             default => null,
@@ -513,18 +522,55 @@ class OntologyFlowController extends AbstractOntologyController
      */
     private function terminateSession(array $blob): JsonResponse
     {
+        $this->closeSessionRun($blob, 'debug-timeout');
+
+        return new JsonResponse(['success' => false, 'message' => self::SESSION_TIMED_OUT], 422);
+    }
+
+    /**
+     * Ends a step-debug session the user STOPPED (the sidebar's stop button, closing the
+     * session, leaving the editor or the page): its run gets a flow-exception "debug-stop"
+     * event — exactly like the inactivity timeout's "debug-timeout" — instead of staying
+     * "running" until the sweep. Only a walk still OPEN is closed: a finished walk (flow-finish
+     * already emitted), one whose step failed (flow-exception already emitted), an already
+     * terminated or expired one, and Run Now's stored context (that run ended with its request)
+     * answer `stopped: false` and emit nothing.
+     */
+    #[Route(path: '/flows/api/debug-stop', name: 'aaxis_ontology_flow_debug_stop', options: ['expose' => true], methods: ['POST'])]
+    #[AclAncestor('aaxis_ontology_flow_update')]
+    #[CsrfProtection]
+    public function debugStopAction(Request $request): JsonResponse
+    {
+        $payload = json_decode($request->getContent(), true);
+        $stored = $this->loadDebugContext(\is_array($payload) ? ($payload['contextKey'] ?? null) : null);
+        $open = \is_array($stored['frames'] ?? null)
+            && ($stored['done'] ?? false) !== true
+            && ($stored['terminated'] ?? null) === null;
+        if ($open) {
+            $this->closeSessionRun($stored, 'debug-stop');
+        }
+
+        return new JsonResponse(['success' => true, 'stopped' => $open]);
+    }
+
+    /**
+     * Closes a session's run with a flow-exception `<reason>` event on the debugged (root) flow
+     * and marks the stored walk terminated, so later calls are refused without a second event.
+     *
+     * @param array<string, mixed> $blob
+     */
+    private function closeSessionRun(array $blob, string $reason): void
+    {
         $root = $blob['frames'][0] ?? [];
         $this->container->get(OntologyFlowEventEmitter::class)->emitRaw(
             isset($root['flowId']) ? (int) $root['flowId'] : null,
             $root['flowName'] ?? null,
             (string) ($blob['context']['flowUuid'] ?? '') ?: null,
             'flow-exception',
-            ['message' => 'debug-timeout']
+            ['message' => $reason]
         );
-        $blob['terminated'] = 'debug-timeout';
+        $blob['terminated'] = $reason;
         $this->storeDebugContext($blob);
-
-        return new JsonResponse(['success' => false, 'message' => self::SESSION_TIMED_OUT], 422);
     }
 
     /**

@@ -202,11 +202,13 @@ describe('OntologyEventComponent', () => {
 
     describe('?uuid= deep link', () => {
         it('pre-filters the grid to the requested run on the first load only', async () => {
-            window.history.replaceState({}, '', '/?uuid=%20abc-123%20');
+            window.history.replaceState({}, '', '/?sort=-startedAt&uuid=%20abc-123%20');
             const {grid} = mount();
             await flush();
 
             expect(grid.setFilter).toHaveBeenCalledWith('flowUuid', {operator: 'equals', value: 'abc-123'});
+            expect(grid.options.urlState).toBe(true);
+            expect(window.location.search).toBe('?sort=-startedAt');
 
             $el.find('[data-role="refresh"]').trigger('click');
             await flush();
@@ -368,7 +370,11 @@ describe('OntologyEventComponent', () => {
         it.each([
             ['flow-start', {trigger: 'schedule', user: {name: 'Ann'}}, 'schedule — Ann'],
             ['subflow-start', {trigger: 'subflow'}, 'subflow'],
+            // Logged before inner flows had their own kinds.
             ['subflow-start', {trigger: 'subflow', inner: 'Box'}, 'subflow — Box'],
+            ['inner-flow-start', {inner: 'Box'}, 'Box'],
+            ['inner-flow-start', {}, ''],
+            ['inner-flow-finish', {}, ''],
             ['flow-start', {user: {name: 'Bob'}}, ' — Bob'],
             ['flow-start', {user: {}}, ''],
             ['data-upsert', {entity: 'Order', uniqueIds: [1, 2, 3], changedIds: [2]}, 'Order — 3 ids, 1 changed'],

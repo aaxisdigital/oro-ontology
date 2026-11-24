@@ -54,7 +54,10 @@ class OntologyFlowEventTest extends TestCase
     public function testTheEventCatalogue(): void
     {
         self::assertSame(
-            ['flow-start', 'flow-finish', 'subflow-start', 'subflow-finish', 'flow-exception', 'data-upsert', 'log-message', 'step'],
+            [
+                'flow-start', 'flow-finish', 'subflow-start', 'subflow-finish', 'inner-flow-start', 'inner-flow-finish',
+                'flow-exception', 'data-upsert', 'log-message', 'step',
+            ],
             OntologyFlowEvent::EVENTS
         );
     }

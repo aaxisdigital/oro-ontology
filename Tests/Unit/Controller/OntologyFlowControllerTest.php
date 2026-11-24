@@ -875,6 +875,7 @@ class OntologyFlowControllerTest extends TestCase
             'a key that is not a uuid' => ['../../etc/passwd', null, $expired],
             'a legacy plain context (no frames)' => [self::UUID, ['flowUuid' => self::UUID], $expired],
             'a session ended by timeout' => [self::UUID, ['context' => [], 'frames' => [[]], 'terminated' => 'debug-timeout'], 'The debug session was terminated by timeout — restart the debug.'],
+            'a session the user stopped' => [self::UUID, ['context' => [], 'frames' => [[]], 'terminated' => 'debug-stop'], 'The debug session was stopped — restart the debug.'],
         ];
     }
 
@@ -940,6 +941,66 @@ class OntologyFlowControllerTest extends TestCase
             ['success' => false, 'message' => 'Step "Log": boom', 'failedStepId' => 's2', 'executedIds' => ['s1'], 'subflowTrails' => ['sf1' => ['a', 'b']]],
             self::decode($response)
         );
+    }
+
+    public function testAFailedTickMarksTheResumedWalkSoAStopCannotCloseTheRunTwice(): void
+    {
+        $this->storeBlob(['context' => ['flowUuid' => self::UUID], 'frames' => [['flowId' => 5]], 'done' => false, 'lastTickAt' => time()]);
+        $this->executor->method('debugWalk')->willThrowException(new FlowStepFailure('Step "Log": boom', 's2', ['s1']));
+
+        self::assertSame(422, $this->controller->debugStepAction(self::post(self::debugPayload(['contextKey' => self::UUID])))->getStatusCode());
+        self::assertSame('failed', $this->cache->getItem(self::CACHE_KEY)->get()['terminated']);
+
+        $this->events->expects(self::never())->method('emitRaw');
+        self::assertSame(['success' => true, 'stopped' => false], self::decode($this->controller->debugStopAction(self::post(['contextKey' => self::UUID]))));
+    }
+
+    public function testStoppingAnOpenWalkClosesItsRunWithADebugStopEvent(): void
+    {
+        $this->storeBlob(['context' => ['flowUuid' => self::UUID], 'frames' => [['flowId' => 5, 'flowName' => 'Mine'], ['flowId' => 9]], 'done' => false]);
+        $this->events->expects(self::once())->method('emitRaw')->with(5, 'Mine', self::UUID, 'flow-exception', ['message' => 'debug-stop']);
+
+        $response = $this->controller->debugStopAction(self::post(['contextKey' => self::UUID]));
+
+        self::assertSame(['success' => true, 'stopped' => true], self::decode($response));
+        self::assertSame('debug-stop', $this->cache->getItem(self::CACHE_KEY)->get()['terminated']);
+        // A second stop (the stop button, then leaving the page) emits nothing more.
+        self::assertSame(['success' => true, 'stopped' => false], self::decode($this->controller->debugStopAction(self::post(['contextKey' => self::UUID]))));
+    }
+
+    /**
+     * @dataProvider unstoppableProvider
+     *
+     * @param array<string, mixed>|null $stored
+     */
+    public function testStopLeavesClosedOrUnknownSessionsAlone(mixed $body, ?array $stored): void
+    {
+        if ($stored !== null) {
+            $this->storeBlob($stored);
+        }
+        $this->events->expects(self::never())->method('emitRaw');
+
+        $response = $this->controller->debugStopAction(self::post($body));
+
+        self::assertSame(['success' => true, 'stopped' => false], self::decode($response));
+    }
+
+    /**
+     * @return array<string, array{mixed, array<string, mixed>|null}>
+     */
+    public static function unstoppableProvider(): array
+    {
+        $walk = ['context' => ['flowUuid' => self::UUID], 'frames' => [['flowId' => 5]]];
+
+        return [
+            'a finished walk' => [['contextKey' => self::UUID], $walk + ['done' => true]],
+            'a timed-out walk' => [['contextKey' => self::UUID], $walk + ['terminated' => 'debug-timeout']],
+            'Run Now (a plain context)' => [['contextKey' => self::UUID], ['flowUuid' => self::UUID]],
+            'nothing stored' => [['contextKey' => self::UUID], null],
+            'a key that is not a uuid' => [['contextKey' => '../x'], null],
+            'no key' => [[], null],
+            'not an object' => ['nope', null],
+        ];
     }
 
     public function testAnyOtherWalkFailureIsA422(): void

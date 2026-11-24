@@ -74,6 +74,12 @@ describe('FlowPickerDialog', () => {
     const kindLabels = (): string[] => $('.aaxis-flow-picker__kind').map((_i: number, el: HTMLElement) => el.textContent).get();
     const row = (name: string): any => $('.aaxis-flow-picker__row').filter((_i: number, el: HTMLElement) => $(el).find('.aaxis-flow-picker__name').text() === name);
     const kind = (k: string): any => $(`.aaxis-flow-picker__kind[data-kind="${k}"]`);
+    const header = (key: string): any => $(`[data-role="picker-sort"][data-sort="${key}"]`);
+    /** Per sortable header: [column, aria-sort, caret class ('' when inactive)]. */
+    const headState = (): Array<[string, string, string]> => $('[data-role="picker-sort"]').map((_i: number, el: HTMLElement) => [[
+        el.dataset.sort, el.getAttribute('aria-sort'),
+        Array.from(el.querySelector('.fa')?.classList || []).find(c => c.startsWith('fa-caret')) || ''
+    ]]).get();
 
     it('shows a loading note, then the bar, the column head, the flows sorted by name and the actions', async () => {
         let resolve!: (flows: PickableFlow[]) => void;
@@ -88,15 +94,13 @@ describe('FlowPickerDialog', () => {
         await flush();
         const q = (role: string): any => dialog.$content.find(`[data-role="${role}"]`);
 
-        // Filter, sort and kinds share the top bar, in that order.
+        // The filter and the kinds share the top bar; the sort lives in the column headers.
         expect($('.aaxis-flow-picker__bar').children().map((_i: number, el: HTMLElement) => el.dataset.role).get())
-            .toEqual(['picker-filter', 'picker-sort', 'picker-kinds']);
+            .toEqual(['picker-filter', 'picker-kinds']);
         expect(document.activeElement).toBe(q('picker-filter')[0]);
-        expect(q('picker-sort').val()).toBe('name_asc');
-        expect(q('picker-sort').hasClass('no-uniform')).toBe(true);
-        expect(q('picker-sort').find('option').map((_i: number, el: HTMLOptionElement) => el.textContent).get())
-            .toEqual(PICKER_SORTS.map(s => T('tab_open_sort.' + s)));
         expect($('.aaxis-flow-picker__head').text()).toBe(T('tab_open_col_name') + T('tab_open_col_status') + T('tab_open_col_modified'));
+        expect(headState()).toEqual([['name', 'ascending', 'fa-caret-up'], ['status', 'none', ''], ['modified', 'none', '']]);
+        expect(q('picker-sort').first().attr('title')).toBe(T('tab_open_sort_by'));
 
         // Flows only at first; natives never.
         expect(kindLabels()).toEqual([`${T('tab_open_flows')} (3)`, `${T('tab_open_subflows')} (2)`]);
@@ -142,14 +146,28 @@ describe('FlowPickerDialog', () => {
         expect($('.aaxis-flow-picker__list .aaxis-json-note').text()).toBe(T('tab_open_no_match'));
     });
 
-    it('re-sorts on the sort select', async () => {
-        const {q} = await open();
+    it('sorts from the column headers: another column starts at its first order, the active one reverses', async () => {
+        await open();
         kind('subflow').trigger('click');
 
-        q('picker-sort').val('modified_desc').trigger('change');
+        header('modified').trigger('click');
         expect(rowNames()).toEqual(['Billing', 'lookup', 'orders', 'customers', 'notify']);
-        q('picker-sort').val('status_disabled').trigger('change');
+        expect(headState()).toEqual([['name', 'none', ''], ['status', 'none', ''], ['modified', 'descending', 'fa-caret-down']]);
+        header('modified').trigger('click');
+        expect(rowNames()).toEqual(['notify', 'customers', 'orders', 'lookup', 'Billing']);
+        expect(headState()[2]).toEqual(['modified', 'ascending', 'fa-caret-up']);
+
+        header('status').trigger('click');
+        expect(rowNames()).toEqual(['customers', 'lookup', 'orders', 'Billing', 'notify']);
+        expect(headState()[1]).toEqual(['status', 'descending', 'fa-caret-down']);
+        header('status').trigger('click');
         expect(rowNames()).toEqual(['Billing', 'notify', 'customers', 'lookup', 'orders']);
+
+        header('name').trigger('click');
+        expect(rowNames()).toEqual(['Billing', 'customers', 'lookup', 'notify', 'orders']);
+        header('name').trigger('click');
+        expect(rowNames()).toEqual(['orders', 'notify', 'lookup', 'customers', 'Billing']);
+        expect(headState()[0]).toEqual(['name', 'descending', 'fa-caret-down']);
     });
 
     it('marks rows on click (the checkbox too) and opens the marked flows in marking order', async () => {
@@ -169,7 +187,7 @@ describe('FlowPickerDialog', () => {
 
         // Marks survive the filter, the sort and the kinds; a hidden mark still counts.
         q('picker-filter').val('bill').trigger('input');
-        q('picker-sort').val('name_desc').trigger('change');
+        header('name').trigger('click');
         kind('subflow').trigger('click');
         expect(rowNames()).toEqual(['Billing']);
         expect(row('Billing').hasClass('is-selected')).toBe(true);

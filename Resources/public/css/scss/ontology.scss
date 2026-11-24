@@ -151,7 +151,9 @@
     &--flow-start,
     &--flow-finish,
     &--subflow-start,
-    &--subflow-finish {
+    &--subflow-finish,
+    &--inner-flow-start,
+    &--inner-flow-finish {
         background: #e8f6ec;
         color: #1a7f37;
     }
@@ -749,37 +751,6 @@
             color: #1b3a5b;
             font-family: monospace;
         }
-    }
-}
-
-// Flows grid: the pick checkbox at the start of an editable flow's Name cell ("Open all"). Native
-// flows get the same empty slot, so the names stay aligned.
-.aaxis-flow-pick {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    max-width: 100%;
-    vertical-align: middle;
-
-    &__slot {
-        display: inline-flex;
-        align-items: center;
-        flex: 0 0 16px;
-        width: 16px;
-        margin: 0;
-        cursor: pointer;
-    }
-
-    &__box {
-        margin: 0;
-        cursor: pointer;
-    }
-
-    &__name {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
     }
 }
 
@@ -3103,14 +3074,6 @@
         margin: 0;
     }
 
-    &__sort.form-control {
-        @include aaxis-select-arrow;
-
-        flex: 0 0 auto;
-        width: 228px;
-        margin: 0;
-    }
-
     // Stretched to the bar's height, so the toggles match the inputs beside them.
     &__kinds {
         flex: 0 0 auto;
@@ -3161,6 +3124,41 @@
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: .03em;
+    }
+
+    // A column title is its sort control: the active one is darker and carries a caret.
+    &__sort {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+        padding: 2px 0;
+        border: 0;
+        background: none;
+        color: inherit;
+        font: inherit;
+        letter-spacing: inherit;
+        text-align: left;
+        text-transform: inherit;
+        white-space: nowrap;
+        cursor: pointer;
+
+        &:hover,
+        &.is-active {
+            color: #2b4a6a;
+        }
+
+        &.is-active {
+            font-weight: font-weight('bold');
+        }
+
+        .fa {
+            font-size: 12px;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
     }
 
     &__list {

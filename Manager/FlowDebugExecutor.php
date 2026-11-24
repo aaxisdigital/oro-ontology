@@ -291,12 +291,27 @@ class FlowDebugExecutor
      */
     private static function startPayload(array $runInfo): array
     {
+        // An INNER FLOW run (inner-flow-start of a container drawn on the caller's canvas) is
+        // told by the box it runs.
+        if (\is_string($runInfo['inner'] ?? null)) {
+            return ['inner' => $runInfo['inner']];
+        }
+
         return array_filter([
             'trigger' => (string) ($runInfo['trigger'] ?? 'debug'),
-            // An INNER FLOW run (subflow-start of a container drawn on the caller's canvas).
-            'inner' => \is_string($runInfo['inner'] ?? null) ? $runInfo['inner'] : null,
             'user' => \is_array($runInfo['user'] ?? null) ? $runInfo['user'] : null,
         ], static fn ($v) => $v !== null);
+    }
+
+    /**
+     * The start/finish event kinds of a NESTED run: an inner flow's own pair, so the log never
+     * passes an inner flow off as a subflow.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private static function nestedEventKinds(bool $inner): array
+    {
+        return $inner ? ['inner-flow-start', 'inner-flow-finish'] : ['subflow-start', 'subflow-finish'];
     }
 
     /**
@@ -347,8 +362,11 @@ class FlowDebugExecutor
         // A QUIET run was invoked by a sub_flow/foreach whose "Log event" switch is off: its
         // subflow-start/-finish and its trigger's step row are dropped (failures still record).
         $quiet = $isNested && ($runInfo['quiet'] ?? false) === true;
+        // A nested run opens/closes with subflow-start/-finish — inner-flow-start/-finish when it
+        // runs an inner flow of the caller's canvas.
+        [$startKind, $finishKind] = $isNested ? self::nestedEventKinds($isInner) : ['flow-start', 'flow-finish'];
         if (!$quiet) {
-            $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-start' : 'flow-start', self::startPayload($runInfo));
+            $this->flowEvents->emit($flow, $executionUuid, $startKind, self::startPayload($runInfo));
         }
 
         // A CALL SUBFLOW run seeds the CALLER's context — the subflow reads and extends it, and
@@ -381,7 +399,7 @@ class FlowDebugExecutor
             $this->canvasSteps = $outerCanvas;
         }
         if (!$quiet) {
-            $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-finish' : 'flow-finish');
+            $this->flowEvents->emit($flow, $executionUuid, $finishKind);
         }
 
         return $context;
@@ -803,7 +821,7 @@ class FlowDebugExecutor
         $blob['frames'][] = $frame;
         $trigger = $subOrder[0];
         if (!$frame['quiet']) {
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', self::frameStartPayload($frame));
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, self::frameEventKinds($frame)[0], self::frameStartPayload($frame));
             $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
                 'name' => $trigger['name'],
                 'type' => $trigger['type'],
@@ -927,7 +945,7 @@ class FlowDebugExecutor
     }
 
     /**
-     * The subflow-start payload of a frame: a nested run, naming the inner flow when it is one.
+     * The start payload of a frame: a nested subflow run, or the inner flow it runs.
      *
      * @param array<string, mixed> $frame
      *
@@ -935,7 +953,17 @@ class FlowDebugExecutor
      */
     private static function frameStartPayload(array $frame): array
     {
-        return ['trigger' => 'subflow'] + (isset($frame['inner']) ? ['inner' => (string) $frame['inner']['name']] : []);
+        return isset($frame['inner']) ? ['inner' => (string) $frame['inner']['name']] : ['trigger' => 'subflow'];
+    }
+
+    /**
+     * @param array<string, mixed> $frame
+     *
+     * @return array{0: string, 1: string}
+     */
+    private static function frameEventKinds(array $frame): array
+    {
+        return self::nestedEventKinds(isset($frame['inner']));
     }
 
     /**
@@ -1006,7 +1034,7 @@ class FlowDebugExecutor
         $frame = &$blob['frames'][\count($blob['frames']) - 1];
         $quiet = (bool) ($frame['quiet'] ?? false);
         if (!$quiet) {
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, self::frameEventKinds($frame)[1]);
         }
         $frame['iteration']++;
         $frame['index'] = 1;
@@ -1015,7 +1043,7 @@ class FlowDebugExecutor
         $subOrder = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
         $trigger = $subOrder[0];
         if (!$quiet) {
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', self::frameStartPayload($frame));
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, self::frameEventKinds($frame)[0], self::frameStartPayload($frame));
             $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
                 'name' => $trigger['name'],
                 'type' => $trigger['type'],
@@ -1038,7 +1066,7 @@ class FlowDebugExecutor
         $frames = &$blob['frames'];
         $frame = array_pop($frames);
         if (!($frame['quiet'] ?? false)) {
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-finish');
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, self::frameEventKinds($frame)[1]);
         }
         if ($frame['kind'] === 'each') {
             self::restoreLoopScope($frame, $blob['context']);

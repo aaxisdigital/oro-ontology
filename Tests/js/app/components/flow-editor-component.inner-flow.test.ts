@@ -4,7 +4,7 @@ import messenger from 'oroui/js/messenger';
 import FlowEditorComponent from '../../../../Resources/js-src/app/components/flow-editor-component';
 import {
     centerOf, client, clickMenu, clickSubmenu, confirmSettings, configOf, contextMenu, createEditor, designOf,
-    dragPort, dragTile, dropFromToolbox, flowRecord, flush, linksOf, menuLabels, mockFetch, openSettings, pointer,
+    dragPort, FlowDialog, dragTile, dropFromToolbox, flowRecord, flush, linksOf, menuLabels, mockFetch, openSettings, pointer,
     positionOf, root, selectedNames, sentTo, st, submenu, tile, tileNames, useFlowEditorEnv
 } from '../../helpers/flow-editor';
 
@@ -224,16 +224,50 @@ describe('OntologyFlowEditorComponent — Inner Flow on the canvas', () => {
         expect(linksOf(editor)).toEqual([]);
     });
 
-    it('removes a box with everything inside it and turns its callers red', () => {
+    it('asks before removing a box with elements, then removes everything inside it and turns its callers red', () => {
         const editor = createEditor({flow: innerFlowRecord()});
         expect(tile('call').classList.contains('is-config-invalid')).toBe(false);
+        const all = tileNames();
+
+        // Cancel keeps everything.
+        contextMenu(tile('box'));
+        clickMenu(KEY('menu_remove'));
+        const asked = FlowDialog.last();
+        expect(asked.options.title).toBe(KEY('inner_flow_remove_title'));
+        expect(asked.$content.find('.aaxis-ontology-confirm__q').text()).toBe(KEY('inner_flow_remove_confirm'));
+        expect(tileNames()).toEqual(all);
+        asked.$content.find('.btn:not(.btn-primary)').trigger('click');
+        expect(asked.closed).toBe(true);
+        expect(tileNames()).toEqual(all);
 
         contextMenu(tile('box'));
         clickMenu(KEY('menu_remove'));
+        FlowDialog.last().$content.find('.btn-primary').trigger('click');
 
         expect(tileNames()).toEqual(['nightly', 'call']);
         expect(tile('call').classList.contains('is-config-invalid')).toBe(true);
         expect(configOf(editor, 'call')).toEqual({inner: 'b1'});
+    });
+
+    it('removes an empty box, or several boxes after one question naming them all', () => {
+        const editor = createEditor({flow: innerFlowRecord({more: [
+            st('b2', 'inner_flow', 'empty', 600, 300, {children: []}),
+            st('b3', 'inner_flow', 'other', 600, 600, {children: ['x1']}),
+            st('x1', 'logger', 'quiet', 0, 0, {message: 'x'})
+        ]})});
+        const dialogs = FlowDialog.instances.length;
+
+        contextMenu(tile('empty'));
+        clickMenu(KEY('menu_remove'));
+        expect(FlowDialog.instances.length).toBe(dialogs);
+        expect(tileNames()).not.toContain('empty');
+
+        editor.select([tile('box'), tile('other')].map(el => editor.steps.find((s: any) => s.el === el)));
+        contextMenu(tile('other'));
+        clickMenu(KEY('menu_remove'));
+        expect(FlowDialog.last().$content.find('.aaxis-ontology-confirm__q').text()).toBe(KEY('inner_flows_remove_confirm'));
+        FlowDialog.last().$content.find('.btn-primary').trigger('click');
+        expect(tileNames()).toEqual(['nightly', 'call']);
     });
 
     it('takes a removed element out of its box', () => {

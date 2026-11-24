@@ -67,11 +67,12 @@ class FlowDebugExecutorInnerFlowTest extends FlowDebugExecutorTestCase
         self::assertSame(['t', 'a', 'box', 'add', 'dbl', 'call', 'b'], $this->executor->lastExecutedIds());
         self::assertSame([], $this->executor->subflowTrails());
         self::assertSame(
-            ['flow-start', 'step', 'step', 'subflow-start', 'step', 'step', 'step', 'subflow-finish', 'step', 'step', 'flow-finish'],
+            ['flow-start', 'step', 'step', 'inner-flow-start', 'step', 'step', 'step', 'inner-flow-finish', 'step', 'step', 'flow-finish'],
             $this->eventKinds()
         );
-        // The inner run reports as a nested run of THIS flow, naming the inner flow.
-        self::assertSame(['subflow-start', 'Main', ['trigger' => 'subflow', 'inner' => 'Box']], $this->events[3]);
+        // The inner run reports as an INNER FLOW of this flow (never as a subflow), naming the box.
+        self::assertSame(['inner-flow-start', 'Main', ['inner' => 'Box']], $this->events[3]);
+        self::assertNotContains('subflow-start', $this->eventKinds());
         self::assertSame(['step', 'Main', ['name' => 'Box', 'type' => 'inner_flow']], $this->events[4]);
     }
 
@@ -211,7 +212,8 @@ class FlowDebugExecutorInnerFlowTest extends FlowDebugExecutorTestCase
         self::assertArrayNotHasKey('row', $context);
         self::assertArrayNotHasKey('index', $context);
         self::assertSame(['t', 'a', 'box', 'acc', 'call', 'b'], $this->executor->lastExecutedIds());
-        self::assertSame(2, \count(array_keys($this->eventKinds(), 'subflow-start', true)));
+        self::assertSame(2, \count(array_keys($this->eventKinds(), 'inner-flow-start', true)));
+        self::assertSame(2, \count(array_keys($this->eventKinds(), 'inner-flow-finish', true)));
     }
 
     public function testAnInnerFlowCanCallAnotherInnerFlowOfTheCanvas(): void
@@ -337,7 +339,7 @@ class FlowDebugExecutorInnerFlowTest extends FlowDebugExecutorTestCase
             ['flowId' => 1, 'flowName' => 'Box', 'depth' => 1, 'canvasDepth' => 0, 'innerId' => 'box'],
             $r['response']['frame']
         );
-        self::assertSame(['subflow-start', 'Main', ['trigger' => 'subflow', 'inner' => 'Box']], $this->events[\count($this->events) - 2]);
+        self::assertSame(['inner-flow-start', 'Main', ['inner' => 'Box']], $this->events[\count($this->events) - 2]);
 
         $r = $this->tick($steps, $r['blob']);     // add
         self::assertSame('add', $r['response']['step']['id']);
@@ -347,6 +349,8 @@ class FlowDebugExecutorInnerFlowTest extends FlowDebugExecutorTestCase
 
         $r = $this->tick($steps, $r['blob']);     // back to the caller
         self::assertSame('returned', $r['response']['transition']);
+        self::assertContains(['inner-flow-finish', 'Main', []], $this->events);
+        self::assertNotContains('subflow-finish', $this->eventKinds());
         self::assertSame('call', $r['response']['step']['id']);
         self::assertSame(['flowId' => 1, 'flowName' => 'Main', 'depth' => 0, 'canvasDepth' => 0, 'innerId' => null], $r['response']['frame']);
 

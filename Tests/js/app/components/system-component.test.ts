@@ -48,6 +48,7 @@ describe('OntologySystemComponent', () => {
                 ['name', 'entityCount', 'recordCount', 'flowCount', 'external', 'enabled']
             );
             expect(grid.options.gridKey).toBe('ontology-system');
+            expect(grid.options.urlState).toBe(true);
             expect(grid.options.preferencesUrl).toBe('/aaxis_common_grid_preference_get?gridKey=ontology-system');
             expect(grid.options.emptyText).toBe('aaxis.ontology.system_manager.empty');
         });

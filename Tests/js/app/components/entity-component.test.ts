@@ -184,11 +184,14 @@ describe('OntologyEntityComponent', () => {
 
     describe('?system= deep link', () => {
         it('filters the grid on the system name, once', async () => {
-            window.history.replaceState({}, '', '/?system=%20ERP%20');
+            window.history.replaceState({}, '', '/?system=%20ERP%20&keep=1#top');
             const {grid} = mount();
             await flush();
 
             expect(grid.setFilter).toHaveBeenCalledWith('systemName', {operator: 'equals', value: 'ERP'});
+            // The one-shot parameter is consumed: the grid's URL state carries the filter now.
+            expect(grid.options.urlState).toBe(true);
+            expect(window.location.search + window.location.hash).toBe('?keep=1#top');
 
             $el.find('[data-role="refresh"]').trigger('click');
             await flush();

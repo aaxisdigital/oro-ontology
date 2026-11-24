@@ -454,5 +454,3 @@ aaxis:
         flow_view:
             add_button: 'Add Flow'
             import_button: 'Import Flow'
-            open_button: 'Open'
-            open_title: 'Open the checked flows in the editor, one tab each'

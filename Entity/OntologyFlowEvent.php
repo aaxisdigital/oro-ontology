@@ -33,7 +33,7 @@ use Oro\Bundle\EntityConfigBundle\Metadata\Attribute\Config;
 class OntologyFlowEvent
 {
     public const array EVENTS = [
-        'flow-start', 'flow-finish', 'subflow-start', 'subflow-finish',
+        'flow-start', 'flow-finish', 'subflow-start', 'subflow-finish', 'inner-flow-start', 'inner-flow-finish',
         'flow-exception', 'data-upsert', 'log-message', 'step',
     ];
 

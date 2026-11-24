@@ -8,7 +8,7 @@ import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import RecordFormModal, {FieldChangeContext, FormField, SelectOption, SelectPickerApi} from 'aaxiscommon/js/app/widgets/record-form-modal';
 import DwlPlayground from '../widgets/dwl-playground';
 import EraseRecordsDialog from '../widgets/erase-records';
-import {apiFetch, bindGridToolbar, setRefreshBusy} from './component-support';
+import {apiFetch, bindGridToolbar, setRefreshBusy, takeQueryParam} from './component-support';
 
 interface OntologyEntityOptions {
     _sourceElement: any;
@@ -133,6 +133,7 @@ class OntologyEntityComponent extends BaseComponent {
             ],
             actions,
             gridKey: 'ontology-entity',
+            urlState: true,
             preferencesUrl: routing.generate('aaxis_common_grid_preference_get', {gridKey: 'ontology-entity'}),
             emptyText: __('aaxis.ontology.entity_manager.empty'),
             onAction: (action, row, event) => this.onAction(action, row as EntityRecord, event)
@@ -214,9 +215,9 @@ class OntologyEntityComponent extends BaseComponent {
             return;
         }
         this.systemFilterApplied = true;
-        const system = new URLSearchParams(window.location.search).get('system');
-        if (system !== null && system.trim() !== '') {
-            this.grid.setFilter('systemName', {operator: 'equals', value: system.trim()});
+        const system = takeQueryParam('system');
+        if (system !== null) {
+            this.grid.setFilter('systemName', {operator: 'equals', value: system});
         }
     }
 

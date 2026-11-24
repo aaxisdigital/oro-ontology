@@ -46,106 +46,17 @@ describe('OntologyFlowComponent', () => {
         return {component, fetchSpy, grid: FakeGrid.instances[0]};
     }
 
-    describe('open several flows together', () => {
-        const LIST = [flow({id: 3, name: 'Nightly'}), flow({id: 5, name: 'Hourly'}), flow({id: 1, name: 'Manual', type: 'native'})];
-
-        /** Renders each row's Name cell into the list slot, as the grid would. */
-        function renderNames(grid: any, records: any[]): void {
-            const $list = $el.find('[data-role="list"]').empty();
-            records.forEach(row => $list.append($('<div/>').append(grid.column('name').render(row))));
-        }
-        const $open = () => $el.find('[data-role="open-selected"]');
-        const pick = (id: number, on = true) => $el.find(`[data-role="flow-pick"][data-flow-id="${id}"]`).prop('checked', on).trigger('change');
-
-        function mountPicking(records = LIST) {
-            const extra = '<button data-role="open-selected" disabled><span data-role="open-selected-label">Open</span></button>';
-            $el = pageElement(extra);
-            const fetchSpy = stubFetch({[LIST_URL]: jsonResponse({records})});
-            const component: any = new (FlowComponent as any)({_sourceElement: $el});
-
-            return {component, fetchSpy, grid: FakeGrid.instances[0]};
-        }
-
-        it('puts a checkbox before the name of every editable flow, none on the built-ins', async () => {
-            const {grid} = mountPicking();
-            await flush();
-            renderNames(grid, LIST);
-
-            expect($el.find('[data-role="flow-pick"]').map((_i: number, el: HTMLElement) => el.dataset.flowId).get()).toEqual(['3', '5']);
-            expect($el.find('.aaxis-flow-pick__name').map((_i: number, el: HTMLElement) => el.textContent).get()).toEqual(['Nightly', 'Hourly', 'Manual']);
-            expect($el.find('.aaxis-flow-pick__slot')).toHaveLength(3); // the built-in keeps the slot: names align
-            expect(grid.column('name').render(flow({name: null})).find('.aaxis-flow-pick__name').text()).toBe('');
-        });
-
-        it('reads "Open" for none (disabled) or one checked flow, "Open (N)" for several', async () => {
-            const {grid} = mountPicking();
-            await flush();
-            renderNames(grid, LIST);
-            const label = () => $el.find('[data-role="open-selected-label"]').text();
-            expect([$open().prop('disabled'), label()]).toEqual([true, 'aaxis.ontology.flow_view.open_button']);
-
-            pick(5);
-            expect([$open().prop('disabled'), label()]).toEqual([false, 'aaxis.ontology.flow_view.open_button']);
-            pick(3);
-            expect([$open().prop('disabled'), label()]).toEqual([false, 'aaxis.ontology.flow_view.open_count']);
-
-            pick(5, false);
-            pick(3, false);
-            expect([$open().prop('disabled'), label()]).toEqual([true, 'aaxis.ontology.flow_view.open_button']);
-        });
-
-        it('opens the checked flows in one editor, as tabs in the order they were checked', async () => {
-            const {grid} = mountPicking();
-            await flush();
-            renderNames(grid, LIST);
-            pick(5);
-            pick(3);
-
-            const event = $.Event('click');
-            $open().trigger(event);
-
-            expect(navigateTo).toHaveBeenCalledWith('/aaxis_ontology_flow_editor?id=5&tabs=5%2C3', event);
-        });
-
-        it('opens a single checked flow without a tab list, and nothing when none is checked', async () => {
-            const {component, grid} = mountPicking();
-            await flush();
-            component.openPicked();
-            expect(navigateTo).not.toHaveBeenCalled();
-
-            renderNames(grid, LIST);
-            pick(3);
-            $open().trigger('click');
-
-            expect(navigateTo).toHaveBeenCalledWith('/aaxis_ontology_flow_editor?id=3', expect.anything());
-        });
-
-        it('keeps the checks across a re-render and drops flows that are gone after a reload', async () => {
-            const {grid, fetchSpy} = mountPicking();
-            await flush();
-            renderNames(grid, LIST);
-            pick(3);
-            pick(5);
-
-            renderNames(grid, LIST); // a sort/page change re-renders the cells
-            expect($el.find('[data-role="flow-pick"]:checked').map((_i: number, el: HTMLElement) => el.dataset.flowId).get()).toEqual(['3', '5']);
-
-            fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse({records: [LIST[1], LIST[2]]})));
-            $el.find('[data-role="refresh"]').trigger('click');
+    describe('opening flows', () => {
+        it('lists plain names — no pick checkboxes or "Open" button: a row click opens one flow, several open from the editor', async () => {
+            const {grid} = mount();
             await flush();
 
-            expect($el.find('[data-role="open-selected-label"]').text()).toBe('aaxis.ontology.flow_view.open_button'); // one left
-        });
+            expect(grid.options.columns[0]).toEqual({key: 'name', label: 'aaxis.ontology.flow_view.name', type: 'text'});
+            expect($el.find('[data-role="open-selected"], [data-role="flow-pick"]')).toHaveLength(0);
 
-        it('stops reacting to the checkboxes once disposed', async () => {
-            const {component, grid} = mountPicking();
-            await flush();
-            renderNames(grid, LIST);
-            component.dispose();
-
-            pick(3);
-
-            expect($open().prop('disabled')).toBe(true);
+            const event = new MouseEvent('click');
+            grid.options.onRowClick(flow({id: 5}), event);
+            expect(navigateTo).toHaveBeenCalledWith('/aaxis_ontology_flow_editor?id=5', event);
         });
     });
 
@@ -157,6 +68,8 @@ describe('OntologyFlowComponent', () => {
                 ['name', 'type', 'enabled', 'lastExecuted', 'lastFinished', 'lastModified']
             );
             expect(grid.options.gridKey).toBe('ontology-flow-view');
+            // Sort + filters live in the URL, so a refresh keeps them.
+            expect(grid.options.urlState).toBe(true);
             expect(grid.options.preferencesUrl).toBe('/aaxis_common_grid_preference_get?gridKey=ontology-flow-view');
             expect(grid.mount).toHaveBeenCalledWith($el.find('[data-role="list"]'));
         });

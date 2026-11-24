@@ -59,6 +59,29 @@ describe('OntologyFlowEditorComponent — tabs', () => {
         expect(root(editor).find('[data-role="save"]').prop('disabled')).toBe(true);
     });
 
+    it('names the browser tab after the flow being edited: the active tab\'s title, then the page\'s', async () => {
+        document.title = 'Flow Editor - Aaxis';
+        const editor = createEditor({flow: simpleFlow()});
+        expect(document.title).toBe('nightly - Flow Editor - Aaxis');
+
+        root(editor).find('[data-role="tab-add"]').trigger('click');
+        expect(document.title).toBe(`${KEY('name_unset')} - Flow Editor - Aaxis`);
+        tab(0).trigger('click');
+        expect(document.title).toBe('nightly - Flow Editor - Aaxis');
+
+        // A full page load may set Oro's title after the editor started: re-applied once settled.
+        const mediator = (await import('oroui/js/mediator')).default as any;
+        const [, settled] = mediator.once.mock.calls.find((c: any[]) => c[0] === 'page:afterChange');
+        document.title = 'Flow Editor - Aaxis';
+        settled();
+        expect(document.title).toBe('nightly - Flow Editor - Aaxis');
+
+        editor.dispose();
+        expect(mediator.off).toHaveBeenCalledWith('page:afterChange', settled);
+        settled();
+        expect(document.title).toBe('nightly - Flow Editor - Aaxis');
+    });
+
     it('keeps a stashed tab\'s unsaved changes and marks it dirty', () => {
         const editor = createEditor({flow: simpleFlow()});
         expect(tab(0).attr('title')).toBeUndefined();

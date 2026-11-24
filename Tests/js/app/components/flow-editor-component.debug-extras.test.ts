@@ -243,3 +243,85 @@ describe('OntologyFlowEditorComponent — debug breakpoints', () => {
         expect(editor.debugSession.marksByFlow.root).toEqual(['t1', 'd1']);
     });
 });
+
+describe('OntologyFlowEditorComponent — a stopped debug session closes its run on the server', () => {
+    useFlowEditorEnv(FlowEditorComponent);
+
+    const stop = (): JQuery => $('.aaxis-flow-editor__debug-btn--stop');
+    const stopCalls = (spy: any): Array<{key: any; keepalive: boolean}> => spy.mock.calls
+        .filter((c: any[]) => String(c[0]) === '/aaxis_ontology_flow_debug_stop')
+        .map((c: any[]) => ({key: JSON.parse(c[1].body).contextKey, keepalive: c[1].keepalive === true}));
+
+    async function stepOnce(reply: any = tick()): Promise<{editor: any; spy: any}> {
+        const spy = mockFetch({aaxis_ontology_flow_debug_step: reply, aaxis_ontology_flow_debug_stop: {body: {success: true, stopped: true}}});
+        const editor = createEditor({flow: simpleFlow()});
+        await flush();
+        root(editor).find('[data-role="debug-step"]').trigger('click');
+        await flush();
+        return {editor, spy};
+    }
+
+    it('sends the session key when the stop button closes an open walk', async () => {
+        const {spy} = await stepOnce();
+
+        stop().trigger('click');
+        await flush();
+
+        expect(stopCalls(spy)).toEqual([{key: 'k1', keepalive: false}]);
+        expect($('[data-role="debugger"]').prop('hidden')).toBe(true);
+    });
+
+    it('stops nothing once the walk finished, failed, or for Run Now', async () => {
+        const done = await stepOnce(tick({done: true, next: null}));
+        stop().trigger('click');
+        await flush();
+        expect(stopCalls(done.spy)).toEqual([]);
+
+        const failed = await stepOnce({status: 422, body: {success: false, message: 'boom'}});
+        stop().trigger('click');
+        await flush();
+        expect(stopCalls(failed.spy)).toEqual([]);
+
+        const spy = mockFetch({aaxis_ontology_flow_debug: {body: {success: true, output: {}, executedIds: [], contextKey: 'k9'}}});
+        const editor = createEditor({flow: simpleFlow()});
+        await flush();
+        root(editor).find('[data-role="debug"]').trigger('click');
+        await flush();
+        stop().trigger('click');
+        await flush();
+        expect(stopCalls(spy)).toEqual([]);
+    });
+
+    it('lets a tick still running at close send the stop with the key it brings back', async () => {
+        let release!: (reply: any) => void;
+        const spy = mockFetch({
+            aaxis_ontology_flow_debug_step: () => new Promise(resolve => {
+                release = resolve;
+            }),
+            aaxis_ontology_flow_debug_stop: {body: {success: true, stopped: true}}
+        });
+        const editor = createEditor({flow: simpleFlow()});
+        await flush();
+        root(editor).find('[data-role="debug-step"]').trigger('click');
+        await flush();
+
+        stop().trigger('click');
+        await flush();
+        expect(stopCalls(spy)).toEqual([]);
+
+        release(tick({contextKey: 'k2'}));
+        await flush();
+        expect(stopCalls(spy)).toEqual([{key: 'k2', keepalive: false}]);
+    });
+
+    it('stops the open walk with a keepalive request when the page goes away or the editor is disposed', async () => {
+        const {editor, spy} = await stepOnce();
+
+        window.dispatchEvent(new Event('pagehide'));
+        expect(stopCalls(spy)).toEqual([{key: 'k1', keepalive: true}]);
+
+        editor.dispose();
+        expect(stopCalls(spy)).toHaveLength(2);
+        expect(stopCalls(spy)[1]).toEqual({key: 'k1', keepalive: true});
+    });
+});

@@ -618,6 +618,11 @@ function debugFrameKey(frame: {flowId?: number | string | null; depth?: number; 
     return frame && depth > 0 && frame.flowId ? String(frame.flowId) : 'root';
 }
 
+/** Fire-and-forget: closes a step-debug walk's run on the server ("debug-stop"). */
+function sendDebugStop(contextKey: string, keepalive = false): void {
+    apiFetch(routing.generate('aaxis_ontology_flow_debug_stop'), 'POST', {contextKey}, keepalive).catch(() => undefined);
+}
+
 /** Which debugger button a request was started from (it carries the spinner meanwhile). */
 function debugBusyAction(runAll: boolean, stepInto: boolean, stepOut: boolean): 'runAll' | 'out' | 'into' | 'next' {
     if (runAll) {
@@ -774,6 +779,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private lastCanvasPoint!: {x: number; y: number} | null;
     private onOpenLinkBefore!: (e: any) => void;
     private onBeforeRefresh!: (queue: any[]) => void;
+    /** The page's own browser title, which the edited flow's name is put in front of. */
+    private baseTitle!: string;
+    private onPageAfterChange!: () => void;
     // Sub-flow entry marker: the id of the step the flow "starts at" when there is no trigger,
     // drawn as an origin-less arrow into that step.
     private startId!: string | null;
@@ -843,6 +851,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         truncated: Record<string, number>;
         /** Server-side session handle: the context lives in the app cache between step calls. */
         contextKey: string | null;
+        /** A debug-step request is on its way — its answer carries the newest contextKey. */
+        pending: boolean;
         index: number;
         total: number;
         done: boolean;
@@ -960,6 +970,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.dirtyChecker = () => this.anyTabDirty();
         this.lastCanvasPoint = null;
         pageStateChecker.registerChecker(this.dirtyChecker);
+        // Closing or reloading the browser tab ends an open debug session too.
+        $(window).on('pagehide.aaxisFlowEditor', () => this.stopDebugRun(true));
         $(window).on('beforeunload.aaxisFlowEditor', (e: any) => {
             if (this.anyTabDirty()) {
                 e.preventDefault();
@@ -986,6 +998,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
         };
         mediator.on('page:beforeRefresh', this.onBeforeRefresh);
+        // The browser tab names the flow being edited (synced with every tab render). A full page
+        // load may still set Oro's title after this component starts — re-apply once it settled.
+        this.baseTitle = document.title;
+        this.onPageAfterChange = () => this.syncDocumentTitle();
+        mediator.once('page:afterChange', this.onPageAfterChange);
 
         this.buildWires();
         this.restore();
@@ -2600,11 +2617,22 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }).catch(() => undefined);
     }
 
+    /** The browser tab's title: the active flow's name (as its editor tab shows it), then the page's. */
+    private syncDocumentTitle(): void {
+        const tab = this.tabs?.[this.activeTab];
+        if (this.disposed || !tab) {
+            return;
+        }
+        const name = this.tabTitle(tab, true);
+        document.title = this.baseTitle ? `${name} - ${this.baseTitle}` : name;
+    }
+
     private renderTabs(): void {
         const $tabsBar = this.$el.find('[data-role="tabs"]');
         if (!$tabsBar.length || !this.tabs) {
             return;
         }
+        this.syncDocumentTitle();
         // Only the flow tabs re-render (on every change); the action groups at the bar's right
         // edge are the twig's, so their spinners/disabled states survive re-renders.
         let $bar = $tabsBar.find('[data-role="tab-list"]');
@@ -6298,8 +6326,32 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
     }
 
+    /**
+     * Remove: the selection goes — after a confirmation when it holds an inner flow with elements
+     * inside, since those go with it (an inner flow's own lines cannot be removed, and a
+     * right-click on one lands on the box: its Remove must not wipe the box unasked).
+     */
     private removeSelection(): void {
-        this.orderedSelection().forEach(step => this.removeStep(step));
+        const steps = this.orderedSelection();
+        const boxes = steps.filter(step => this.isInner(step) && this.innerMembers(step).length > 0);
+        if (!boxes.length) {
+            this.removeSteps(steps);
+            return;
+        }
+        const count = boxes.reduce((sum, box) => sum + this.innerMembers(box).length, 0);
+        const question = boxes.length === 1
+            ? __('aaxis.ontology.flow_editor.inner_flow_remove_confirm', {name: boxes[0].name, count})
+            : __('aaxis.ontology.flow_editor.inner_flows_remove_confirm', {boxes: boxes.length, count});
+        this.confirmDialog(
+            __('aaxis.ontology.flow_editor.inner_flow_remove_title'),
+            question,
+            __('aaxis.ontology.flow_editor.menu_remove'),
+            () => this.removeSteps(steps)
+        );
+    }
+
+    private removeSteps(steps: PlacedStep[]): void {
+        steps.forEach(step => this.removeStep(step));
         this.clearSelection();
     }
 
@@ -7055,6 +7107,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             context: null,
             truncated: {},
             contextKey: null,
+            pending: false,
             index: -1,
             total: 0,
             done: false,
@@ -7241,6 +7294,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         session.busy = true;
         session.busyAction = debugBusyAction(runAll, stepInto, stepOut);
         session.error = null;
+        session.pending = true;
         this.updateDebugger();
 
         apiFetch(routing.generate('aaxis_ontology_flow_debug_step'), 'POST', {
@@ -7256,8 +7310,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
             // Read per request: a breakpoint added mid-session counts for the next Continue.
             breakpoints: this.debugBreakpointMap(session.homeIndex)
         }).then(res => {
+            session.pending = false;
             if (this.debugSession !== session) {
-                return; // the session was cancelled while the request ran
+                // The session was closed while this tick ran: the walk it left open is stopped
+                // now (closing could not — the key arrives with this answer).
+                if (res.ok && res.data?.success && !res.data.done && res.data.contextKey) {
+                    sendDebugStop(String(res.data.contextKey));
+                }
+                return;
             }
             if (!res.ok || !res.data?.success) {
                 // A failed step paints the canvas too: everything that ran stays green, the
@@ -7293,6 +7353,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.applyDebugTick(session, res.data);
             this.maybeStartDebugAutoClose();
         }).catch((err: Error) => {
+            session.pending = false;
             if (this.debugSession === session) {
                 session.error = err.message || __('aaxis.ontology.flow_editor.debug_error');
                 this.paintDebugNext();
@@ -7617,6 +7678,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (this.debugSession?.autoClose) {
             window.clearInterval(this.debugSession.autoClose.timer);
         }
+        this.stopDebugRun(false);
         this.clearDebugMarks();
         this.$el.find('[data-role="debugger"]').prop('hidden', true).empty();
         this.debugSession = null;
@@ -7624,6 +7686,24 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.syncDebugButtons();
         // The viewport regained the sidebar's width — the clamp keeps the toolbox consistent.
         this.clampToolboxIntoView();
+    }
+
+    /**
+     * Tells the server a step-debug session is over, so its run gets a "debug-stop" event instead
+     * of staying "running" until the inactivity sweep. Only an OPEN walk is stopped (Run Now ended
+     * with its request; a finished or failed walk already closed its run — the server re-checks).
+     * While a tick is in flight its answer sends the stop (it carries the newest key); a page
+     * that is going away cannot wait for it, so `leaving` sends the known key at once.
+     */
+    private stopDebugRun(leaving: boolean): void {
+        const session = this.debugSession;
+        if (!session || session.mode !== 'step' || session.done || session.contextKey === null) {
+            return;
+        }
+        if (session.pending && !leaving) {
+            return;
+        }
+        sendDebugStop(session.contextKey, leaving);
     }
 
     // --- Persistence -----------------------------------------------------------
@@ -7873,9 +7953,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.stepDrag = null;
         $(window).off('resize.aaxisFlowEditor');
         $(window).off('beforeunload.aaxisFlowEditor');
+        $(window).off('pagehide.aaxisFlowEditor');
+        // Leaving the editor in the app (navigation disposes it) ends an open debug session.
+        this.stopDebugRun(true);
         pageStateChecker.removeChecker(this.dirtyChecker);
         mediator.off('openLink:before', this.onOpenLinkBefore);
         mediator.off('page:beforeRefresh', this.onBeforeRefresh);
+        mediator.off('page:afterChange', this.onPageAfterChange);
         window.removeEventListener('pointermove', this.onPointerMove);
         window.removeEventListener('pointerup', this.onPointerUp);
         super.dispose();

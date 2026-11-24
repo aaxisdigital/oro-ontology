@@ -39,7 +39,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 | `OntologyFlow` | `aaxis_ontology_flow` | name, enabled, `type` (`native` = the two fixture-seeded built-ins, read-only in the UI — gates the grid's row-click-to-edit, the editor page and the update endpoint; user flows are `flow` when their steps contain a trigger, else `subflow` — recomputed from the steps on every save via `computeType()`, never taken from the payload), JSON `steps` (`[{type, name, x, y}]`, types validated against `STEP_TYPES`, names non-empty ≤64 chars and unique per flow — 422 `flow_manager.step_names_unique`), JSON `design` (the editor's versioned canvas state — stored opaquely by the server, strictly validated by the editor on load; unreadable/outdated → "corrupted" flash + empty canvas; NULL → canvas rebuilt from `steps`), `last_executed` (datetime NULL — stamped by `FlowDebugExecutor::touchLastExecuted()` at the START of every run with a saved flow: Run Now, each Debug step call, and the future real triggers; failed runs count, unsaved flows don't), `last_modified` (datetime NOT NULL — creation date via the entity CONSTRUCTOR, bumped by every editor save; v1_7 backfilled existing rows with the migration time), `trigger_type` (string(16) NULL — the trigger step's type cron|endpoint|entity_change, denormalized from the steps on every save via `computeTriggerType()` so the SCHEDULER selects candidates with a plain WHERE; v1_8 backfilled from the steps jsonb — that migration still names the OLD `queue` trigger, deliberately: it is applied history, fresh installs skip it (installer ≥ v1_9), and no row ever used it), `last_finished` (datetime NULL — stamped by `FlowDebugExecutor::touchLastFinished()` when a run ENDS, from a `finally` so failures stamp too; v1_9 backfilled it from `last_executed` so pre-existing rows don't look permanently running; installer at v1_9). **`last_executed` + `last_finished` are the running-state pair** — see "Flow concurrency" below |
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique. **Version continuity** (v1_10): `aaxis_ontology_data_upsert` numbers records PAST whatever history survives for the unique id — insert starts at `max(history)+1`, update archives at `GREATEST(live, max(history)+1)` — because a re-created record restarting at version 1 used to CRASH this unique index on its first change (the pre-9582e03 purge deleted data but kept history; inside the async consumer that read as a logged error + a "no changes" event + a silently unchanged record). Never assume live version = history+1 |
-| `OntologyFlowEvent` | `aaxis_ontology_flow_events` | (v1_12 — REPLACED `OntologyDataEvent`/`aaxis_ontology_data_events`, dropped WITH its data) one row per flow-execution EVENT: flow_id/flow_uuid/flow_name (plain copies, NO FK — records survive flow rename/delete), `event` ∈ flow-start/flow-finish/subflow-start/subflow-finish/flow-exception/data-upsert/log-message/step, `datetime` TIMESTAMP(6) (microseconds — parallel consumers make insertion ids useless for ordering; the emit-time stamp is the truth; the ENTITY maps it as a STRING because Oro's global UTCDateTimeType hydrates `datetime` columns with a STRICT 'Y-m-d H:i:s' parse that rejects fractional seconds — the controller date_create()s the raw value for display, and mapping changes here need the doctrine.metadata.cache pools cleared), jsonb `payload`. Written ASYNCHRONOUSLY (topic `aaxis_ontology_flow_event` → `Async/OntologyFlowEventProcessor`, plain DBAL insert) so logging never blocks a run |
+| `OntologyFlowEvent` | `aaxis_ontology_flow_events` | (v1_12 — REPLACED `OntologyDataEvent`/`aaxis_ontology_data_events`, dropped WITH its data) one row per flow-execution EVENT: flow_id/flow_uuid/flow_name (plain copies, NO FK — records survive flow rename/delete), `event` ∈ flow-start/flow-finish/subflow-start/subflow-finish/inner-flow-start/inner-flow-finish/flow-exception/data-upsert/log-message/step (a new kind needs the CONSUMERS RESTARTED — stale ones reject it), `datetime` TIMESTAMP(6) (microseconds — parallel consumers make insertion ids useless for ordering; the emit-time stamp is the truth; the ENTITY maps it as a STRING because Oro's global UTCDateTimeType hydrates `datetime` columns with a STRICT 'Y-m-d H:i:s' parse that rejects fractional seconds — the controller date_create()s the raw value for display, and mapping changes here need the doctrine.metadata.cache pools cleared), jsonb `payload`. Written ASYNCHRONOUSLY (topic `aaxis_ontology_flow_event` → `Async/OntologyFlowEventProcessor`, plain DBAL insert) so logging never blocks a run |
 | *(no entity — DBAL only)* | `aaxis_ontology_flow_runs` | (v1_14) the RUN INDEX, see "Run index" below: one row per run (PK flow_uuid), folded by the event consumer; what the Events page and the stale-debug sweep read |
 
 ## Entities form: System picker (2026-11-24)
@@ -321,6 +321,12 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
 - **Cross-page deep links** follow one pattern: source grid action → `routing.generate(<page route>)`
   + a `?<key>=<name>` query → target page calls `grid.setFilter()` once after its first load.
   Systems → Entities uses `?system=` (filters `systemName`); Entities → Data View uses `?entity=`.
+  **URL state** (2026-11-24): every list grid (Systems, Entities, Flows, Events, Data View) is built
+  with DataGrid `urlState: true`, so its sort + filters live in the URL (`sort=`, `f.<column>=`) and
+  survive a refresh. The deep-link parameter is therefore ONE-SHOT: `takeQueryParam()`
+  (component-support) reads it and DROPS it from the URL before `setFilter()` writes the grid's own
+  `f.<column>` — otherwise a refresh would re-apply a filter the user had cleared. (Connectors is
+  an Oro datagrid, which keeps its own state.)
   ⚠️ Both target routes are **page** routes that now carry `options: ['expose' => true]` purely
   because TypeScript generates their URLs — page routes normally don't need it, which is exactly how
   this was missed the first time (runtime `The route "…" does not exist.`, nothing caught at build).
@@ -601,19 +607,14 @@ The **flow editor** (`aaxis_ontology_flow_editor`, `Flow/editor.html.twig` +
 "Add Flow" and by CLICKING ANYWHERE ON A FLOWS-GRID ROW (`DataGrid.onRowClick` — there is no
 separate edit action anymore, and enabling row click disables the grid's cell click-to-copy;
 built-in `type = native` rows do nothing, enforced again by the editor page + update endpoint).
-**OPEN ALL** (2026-11-18): every editable row has a checkbox at the START OF ITS NAME CELL
-(`nameCell()`, `data-role="flow-pick"`, `.aaxis-flow-pick`; native rows get the same empty slot so
-names align). It sits INSIDE the Name cell rather than in its own column ON PURPOSE: DataGrid
-appends columns unknown to a SAVED layout (gridKey `ontology-flow-view`, saved on any page-size or
-column change) at the END, so a new first column would land last for most users. Clicks on it
-never open the row (row click ignores inputs/labels). The page toolbar's **Open**
-(`open-selected`, before Import; disabled while nothing is checked; the component owns the whole
-label `[data-role="open-selected-label"]`: "Open" for one, "Open (N)" for several — ONE text
-node, since the flex button swallowed the space between two spans) opens ONE editor
-with every checked flow as a tab, in the order they were CHECKED: `editor/{first}?tabs=a,b,c` —
-the editor's own restore-tabs URL (`restoreTabsFromUrl`). Checks survive grid re-renders (the
-component holds `picked`), and a reload drops ids that are gone. cmd/ctrl+click opens it in a new
-browser tab (`navigateTo`).
+The grid's per-row pick checkboxes and the toolbar's "Open (N)" (2026-11-18) were REMOVED on
+2026-11-24: a row click opens one flow, and several are opened from the editor's own **Open
+flows** (folder button, `FlowPickerDialog`) — the editor's `?tabs=a,b,c` URL still restores them.
+**Browser title**: the editor names the browser tab after the ACTIVE flow — `syncDocumentTitle()`
+(every `renderTabs()`, and once on `page:afterChange` since a full page load may set Oro's title
+after the component started) writes `<tab title> - <the page's own title>` (`baseTitle`, read at
+initialize), the tab title being the trigger's name as the editor tab shows it. Never restored on
+dispose: Oro's navigation sets the NEXT page's title before the old component is disposed.
 The flows grid also carries a DELETE action
 (trash, `variant: 'danger'`, disabled for native — enforced again by `deleteAction`, route
 `aaxis_ontology_flow_delete`, ACL `aaxis_ontology_flow_delete`/DELETE): confirm dialog, then the
@@ -702,10 +703,12 @@ an icon-only `__tab--action` (titles are the labels) in two `__tab-group`s, 14px
   - empty page (fa-file-o) = a new empty flow tab (`tab-add`);
   - folder = **Open flows** (`tab-open`): `widgets/flow-picker.ts` (`FlowPickerDialog`, fresh
     `aaxis_ontology_flow_list` fetch, natives left out; 2026-11-19). Top bar, one line: the name
-    filter (takes the remaining width), the sort select (`PICKER_SORTS` via the pure
-    `sortFlows()`: name A–Z/Z–A, last modified newest/oldest, status enabled/disabled first; ties
-    by name; no date = oldest) and the Flows / Subflows toggles (`__kind`, counts follow the
-    filter). The toggles COMBINE — either or both kinds list — and clicking the only one still on
+    filter (takes the remaining width) and the Flows / Subflows toggles (`__kind`, counts follow
+    the filter). SORTING is the COLUMN HEAD (2026-11-24 — the sort select is gone): Name, Status
+    and Last modified are buttons (`picker-sort`, `data-sort`); a click on another column applies
+    its FIRST order (`SORT_COLUMNS`: name A–Z, enabled first, newest first), a click on the active
+    one flips it, and the active one carries `is-active` + an fa-caret and `aria-sort`. The orders
+    are the pure `sortFlows()` (`PICKER_SORTS`; ties by name; no date = oldest). The toggles COMBINE — either or both kinds list — and clicking the only one still on
     does nothing. Rows (a grid shared with the column head): checkbox, name, enabled/disabled
     badge (always), last modified, and an Open button (`flow-open`) that opens THAT flow at once.
     A row click only MARKS (`picked`, marking order); marks survive filter/sort/toggles. Footer:
@@ -1099,7 +1102,10 @@ it (`endStepDrag` → `attachToInner()`, dropping its own links + Start marker; 
 box re-orders; `moved` guards plain clicks), an element released outside its box is detached and
 stays where it was dropped, unconnected; triggers/boxes released over a box go back to `origin`
 (flash `inner_flow_not_allowed`). An element always drags ALONE; a dragged box carries its
-elements (`dragGroup`). Remove on a box removes its elements; Copy brings them along
+elements (`dragGroup`). Remove on a box removes its elements — after a CONFIRMATION when it holds
+any (`removeSelection` → `confirmDialog`, `inner_flow_remove_confirm` / `inner_flows_remove_confirm`;
+an empty box goes unasked). The box's own arrows take no pointer events, so a right-click on one
+opens the BOX's menu — its Remove used to wipe the box and its elements unasked. Copy brings them along
 (`copyableSelection`); paste re-points children and `inner` refs (`remapPastedInner`: pasted box
 → new id, else the original box on this canvas, else cleared + red). `normalizeInnerFlows()`
 (restore + paste) is LENIENT — it drops bad children, links touching boxes/elements and a Start
@@ -1110,8 +1116,10 @@ flow" on callers, "Called by" (this canvas's callers) on boxes. EXECUTOR: `runIn
 (`resolveInnerTarget`; `indexSteps` falls back to a leading inner_flow as the BFS root) and
 `runInfo.inner` = the box name — an inner run skips `assertRunnable` and the
 last_executed/last_finished stamps (a nested last_finished would mark the flow idle mid-run),
-emits subflow-start/-finish under the SAME flow with `inner` in the payload (Events summary
-"subflow — <box>"), keeps the caller's canvas (`$canvasSteps`, `execute()`'s 8th param) so inner
+emits **inner-flow-start/-finish** (2026-11-24; payload `{inner: <box name>}`, Events summary = the
+box name — before that they were subflow-start/-finish with `inner` in the payload, and old rows
+still read "subflow — <box>") under the SAME flow, both in `execute()` (`nestedEventKinds()`) and
+in the debug walk (`frameEventKinds()` on the frame's `inner`), keeps the caller's canvas (`$canvasSteps`, `execute()`'s 8th param) so inner
 flows can call sibling inner flows, and MERGES its executed ids into the caller's trail (same
 canvas — no subflowTrails). Cycle guard: `innerKey()` = `inner:<owner flow id>:<box id>` on
 `subflowStack`. A failing element surfaces as `InnerFlowFailure` → `failedStepId()` paints the
@@ -1356,7 +1364,25 @@ by timeout — restart the debug"; every later step gets the same answer). Aband
 (`ScheduledFlowRunner::sweepStaleDebugSessions`, runs before the due-flows pass): any run of the
 run index with trigger `debug`, NO finish/exception, and no event newer than the window
 (`FlowRunIndex::staleDebugRuns`, a partial index over exactly those rows) gets the same
-debug-timeout exception event, and its cached walk blob is marked terminated too. **Canvas marks** (colours since 2026-11-19; the SCSS declares them in this priority order, so
+debug-timeout exception event, and its cached walk blob is marked terminated too.
+⚠️ That sweep runs only while Oro's cron can dispatch `aaxis:ontology:flows:run-due`: it is a
+UNIQUE MQ job (`oro:cron:run_command:aaxis:ontology:flows:run-due`), and a row left in
+`oro_message_queue_job_unique` whose job row is GONE (braskem7, 2026-11-23: the job table was
+emptied, the unique table kept 27 rows) blocks every later dispatch FOREVER — Oro's
+`time_before_stale` (1800s) can only stale a job row it finds. Symptom: no scheduled runs and no
+debug-timeout events at all. Check: `oro_message_queue_job_unique` rows with no new/running job of
+that name.
+**STOP** (2026-11-24): a session the user ENDS is closed at once instead of waiting for the sweep —
+`aaxis_ontology_flow_debug_stop` (`POST /flows/api/debug-stop {contextKey}`, CSRF, flow update
+ACL; run `fos:js-routing:dump`) emits flow-exception `{message: "debug-stop"}` on the root flow and
+marks the blob `terminated: debug-stop` (later steps: "was stopped — restart the debug"), but only
+for an OPEN walk: done, terminated, expired or Run Now's plain context answer `stopped: false`.
+A failing tick marks the RESUMED blob `terminated: failed` (its flow-exception is already out), so
+a later stop cannot close the run twice. Editor: `closeDebugSession()` → `stopDebugRun(false)`
+(step mode, not done, has a key); while a tick is in flight (`session.pending`) the stop waits
+for that answer — the stale-response branch of `debugAdvance` sends it with the key it brings
+back; `pagehide` and `dispose()` send it AT ONCE with `keepalive` (`apiFetch`'s 4th arg) since the
+page cannot wait. **Canvas marks** (colours since 2026-11-19; the SCSS declares them in this priority order, so
 the later one wins on a tile carrying two):
 - EXECUTED steps are LIGHT GREEN (`is-debug-executed`, was amber `is-debug-active`) for the whole
   session: marks accumulate and are cleared only on session start/close.
@@ -1516,7 +1542,8 @@ step left on stays `config: null`. Validator: `boolOk(log_event)` for every type
 `configLogsEvents($config)`. OFF drops:
 - the step's `step` row (executeStepTracked and every debug-walk emit);
 - an entity_write's `data-upsert` (`upsertRecordsSync(..., $recordEvent)` → `recordUpsert()`);
-- for sub_flow/foreach, the invoked runs' subflow-start/-finish AND their trigger's step row.
+- for sub_flow/foreach, the invoked runs' subflow-start/-finish (inner-flow-start/-finish for an
+  inner flow) AND their trigger's step row.
   The nested `execute()` gets `runInfo.quiet` via `nestedRunInfo()`, and debug frames carry
   `quiet`, read with `?? false` because blobs from older sessions lack it.
 
@@ -1646,7 +1673,7 @@ flow-start/flow-finish/flow-exception boundary rows — every other row shows `+
 PREVIOUS event, computed from the endpoint's `ms` field (micro-precision epoch millis; the ATOM
 `datetime` is second-precision and would render every step as +0s) — and instead of flow name +
 raw payload JSON each row carries a per-kind summary (`summarizeEvent()`): flow/subflow-start =
-trigger + user.name when present, data-upsert = entity + uniqueIds/changedIds counts, step =
+trigger + user.name when present, inner-flow-start = the inner flow's name, data-upsert = entity + uniqueIds/changedIds counts, step =
 name (type), flow-exception/log-message = the message, finishes = nothing. A summary is one line
 with an ellipsis. When it is CUT (scrollWidth > clientWidth) or holds line breaks, the row gets
 `has-overflow` and shows two glyph buttons (2026-11-18):
@@ -1660,7 +1687,7 @@ NO viewport-based max-height of its own: it fills the panel, scrolls when the pa
 dialog's 84vh cap, and GROWS when the user drags the resize handle) and **view flow**
 (opens the editor; disabled when the flow is gone). `?uuid=`
 (first load pre-filters the grid, same pattern as Entities' `?system=` and Data View's
-`?entity=`) — it is what a cmd/ctrl+click on a row's uuid-filter icon opens in a new tab; plain
+`?entity=`; consumed from the URL, the grid's `f.flowUuid` keeps it) — it is what a cmd/ctrl+click on a row's uuid-filter icon opens in a new tab; plain
 click filters in place. Grid actions that NAVIGATE (entity → Data View, system → Entities, flow →
 editor, the Add Flow button) honor cmd/ctrl+click too, via the grid's `navigateTo` helper (see
 oro-common's CLAUDE.md).
@@ -2002,6 +2029,30 @@ migrations (unlike CommonBundle's edit-the-installer-only rule). For each schema
 `Migrations/Schema/OntologyDataFunctions.php` ships PostgreSQL functions (validation, diff/merge,
 upsert) added as post-queries by the installer. The async path is
 `Async/Topic/OntologyDataUpsertTopic` + `Async/OntologyDataUpsertProcessor` (message-queue).
+Changing a function = edit it there + a `vN_M/ResyncDataFunctions` migration replaying `all()`
+(v1_10, v1_15).
+
+**`aaxis_ontology_data_upsert` is SET-BASED (v1_15, 2026-11-24).** After validation it writes
+the whole batch in ONE statement: a MATERIALIZED `plan` CTE (each record joined to its live row
+and to its highest surviving history version → action insert / same / update + the version),
+then the inserts, the history archive and the updates as data-modifying CTEs over it, and the
+response aggregated once (`jsonb_object_agg`). The old per-record loop grew its response with
+`v_changes := v_changes || …`, which COPIES the whole object per record — O(N²): 4k records
+took 26 s, and a flow writing a big SAP file pinned a Postgres CPU until the PHP container was
+restarted. Now (PG 18, 31-key records): 50k inserts 1.4 s, 50k unchanged 0.6 s, 50k updates
+3.4 s. Never accumulate into a jsonb/text variable inside a loop in these functions.
+- RESPONSE: `{uuid, entity_id, payload: {<uid>: null | {uuid, version}}}` (null = unchanged).
+  The record's payload/diff is NOT echoed anymore (it made the response as large as the batch);
+  both callers only need changed-vs-unchanged (`OntologyDataApiManager::parseUpsertResponse`).
+  `aaxis_ontology_jsonb_diff` is therefore no longer called by the upsert (kept, harmless).
+- `aaxis_ontology_jsonb_diff_previous` iterates only the keys whose value differs, and
+  `aaxis_ontology_jsonb_deep_merge` is `p_old || p_new` plus a recursive merge of the keys that are
+  objects on both sides (it did a whole-object `jsonb_set` per key).
+- Validated against the previous definitions in a throwaway postgres:18.3 container: the same
+  17-batch sequence (inserts, re-runs, partial/nested/array updates, non-object payloads, history
+  from an earlier generation, NULL payloads, every validation error, empty batch, two entities)
+  left identical data + history rows and identical responses (old ones reduced to
+  `{uuid, version}`), and the two helpers matched on all 625 pairs of a tricky-value grid.
 
 ## Bucket entity-data backend (`use_bucket_for_entity_data`)
 

@@ -109,6 +109,8 @@ describe('OntologyDataViewComponent — grid, loading and version lookup', () =>
             await flush();
 
             expect(grid.setFilter).toHaveBeenCalledWith('entity', {operator: 'equals', value: 'Order'});
+            expect(grid.options.urlState).toBe(true);
+            expect(window.location.search).toBe('');
 
             $el.find('[data-role="refresh"]').trigger('click');
             await flush();
