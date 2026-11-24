@@ -403,6 +403,23 @@ class OntologyEntityControllerTest extends TestCase
         return self::entity(10, 'Order', self::system(1, 'ERP'));
     }
 
+    public function testThePlaygroundReadsAnInternalEntityFromItsOroTable(): void
+    {
+        $entity = self::entity(10, 'NotAClass', self::system(1, 'OroCommerce', false));
+        $this->kit->granted = [self::VIEW_DATA];
+        $this->kit->orm->managesClasses = false;
+        $this->guard->method('check')->willReturn(null);
+        $this->formatter->method('detect')->willReturn(['format' => 'json', 'mime' => 'application/json', 'extension' => 'json']);
+        $this->dwl->expects(self::never())->method('transform');
+
+        $body = ControllerKit::decode($this->controller->dwlAction($entity, self::post(['script' => 'payload'])));
+
+        // Not a managed class: no Oro table to read — reported like a script error, not a 500.
+        self::assertFalse($body['success']);
+        self::assertStringContainsString('NotAClass', $body['error']);
+        self::assertSame([0, 0], [$body['rows'], $body['total']]);
+    }
+
     public function testThePlaygroundNeedsToReadTheRecordContentToo(): void
     {
         $this->guard->expects(self::never())->method('check');

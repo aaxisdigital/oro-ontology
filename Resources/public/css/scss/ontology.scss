@@ -1119,6 +1119,552 @@
     }
 }
 
+// --- Data Playground page (data-playground-component.ts) -----------------------------------------
+// Saved scripts on the left (~20%), the selected script on the right: the top row (name, INPUT
+// chips with their dropdown, Public, actions), the code and the result row (status, Max rows, Run,
+// Save as…) over the result. The component sizes the root to the window below the title; the code
+// and the result share the height that is left.
+.aaxis-dwl-pg {
+    display: flex;
+    gap: 14px;
+    min-height: 420px;
+    padding: 0 16px 8px;
+    box-sizing: border-box;
+
+    &__sidebar {
+        flex: 0 0 20%;
+        min-width: 210px;
+        max-width: 360px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+        padding-right: 14px;
+        border-right: 1px solid #e3e8ee;
+    }
+
+    &__sidebar-bar,
+    &__head,
+    &__result-head {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+    }
+
+    // Oro's form-control margin/width would push these off the line.
+    &__filter.form-control,
+    &__name.form-control,
+    &__limit-value.form-control,
+    &__menu-name.form-control,
+    &__menu-filter.form-control {
+        margin: 0;
+        min-width: 0;
+    }
+
+    &__filter.form-control {
+        flex: 1 1 auto;
+        width: auto;
+    }
+
+    &__new,
+    &__icon-btn {
+        flex: 0 0 auto;
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        border: 1px solid #d6dde4;
+        border-radius: 4px;
+        background: #f5f8fb;
+        color: #2b6cb0;
+        cursor: pointer;
+
+        &:hover {
+            background: #eaf1f8;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+    }
+
+    &__icon-btn--danger {
+        color: #c0392b;
+
+        &:hover {
+            background: #fdecea;
+        }
+    }
+
+    &__list {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        overflow-y: auto;
+    }
+
+    &__item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 100%;
+        min-height: 32px;
+        padding: 5px 8px;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: none;
+        color: #2b3a4a;
+        font-size: 13px;
+        text-align: left;
+        cursor: pointer;
+
+        &:hover {
+            background: #f2f6fa;
+        }
+
+        &.is-active {
+            border-color: #b9cfe6;
+            background: #eaf1f8;
+            font-weight: font-weight('bold');
+        }
+
+        &.is-draft {
+            font-style: italic;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+
+        &:focus-visible {
+            outline: 2px solid #2b6cb0;
+            outline-offset: -2px;
+        }
+    }
+
+    &__item-name {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    // The editor tabs' unsaved dot.
+    &__item-dirty {
+        flex: 0 0 7px;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #2b6cb0;
+    }
+
+    // The API collection's padlock (oro-tools api-collection.scss): red = private, green = public.
+    &__item-lock {
+        flex: 0 0 auto;
+        width: 12px;
+        color: #c0392b;
+        text-align: center;
+
+        &.is-public {
+            color: #1e7e45;
+        }
+    }
+
+    &__item-owner {
+        flex: 0 1 auto;
+        max-width: 90px;
+        overflow: hidden;
+        color: #7a8a9a;
+        font-size: 11.5px;
+        font-weight: normal;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    // Delete (own scripts only), at the row's right end: shown on hover, focus and the open row.
+    &__item-delete {
+        flex: 0 0 auto;
+        visibility: hidden;
+        padding: 0 2px;
+        border: 0;
+        background: none;
+        color: #c0392b;
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+
+        &:hover {
+            color: #962d22;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+    }
+
+    &__item:hover &__item-delete,
+    &__item:focus-within &__item-delete,
+    &__item.is-active &__item-delete {
+        visibility: visible;
+    }
+
+    &__empty {
+        margin: 6px 2px;
+        color: #7a8a9a;
+        font-size: 12.5px;
+    }
+
+    &__main {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+    }
+
+    &__head {
+        align-items: flex-start;
+    }
+
+    &__name.form-control {
+        flex: 0 1 240px;
+        width: auto;
+
+        &[readonly] {
+            background: #f5f7f9;
+        }
+    }
+
+    &__public {
+        flex: 0 0 auto;
+        min-height: 32px;
+    }
+
+    // Read-only notice of someone else's public script, under the top row.
+    &__owner {
+        flex: 0 0 auto;
+        margin-top: -4px;
+        color: #7a8a9a;
+        font-size: 12px;
+
+        &[hidden] {
+            display: none;
+        }
+    }
+
+    &__head-actions {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-left: auto;
+    }
+
+    // The spinner a Save / Save a copy button shows while its request is under way.
+    &__saving {
+        margin-right: 6px;
+    }
+
+    // The inputs: chips `variable ← entity · records` + "Add input"; the dropdown anchors here.
+    &__inputs {
+        position: relative;
+        flex: 1 1 auto;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        min-height: 32px;
+    }
+
+    &__input {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        max-width: 100%;
+        height: 28px;
+        padding: 0 6px 0 10px;
+        border: 1px solid #c9dbed;
+        border-radius: 14px;
+        background: #eef4fa;
+        color: #2b3a4a;
+        font-size: 12.5px;
+        white-space: nowrap;
+        cursor: pointer;
+
+        &:hover,
+        &.is-open {
+            border-color: #2b6cb0;
+        }
+
+        &.is-invalid {
+            border-color: #e2a39b;
+            background: #fdecea;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+    }
+
+    &__input-name {
+        font-family: monospace;
+        font-weight: font-weight('bold');
+        color: #1b3a5b;
+    }
+
+    &__input-arrow {
+        color: #8a99a8;
+    }
+
+    &__input-entity {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    &__input-count {
+        padding-left: 5px;
+        border-left: 1px solid #c9dbed;
+        color: #6b7a89;
+        font-size: 11.5px;
+    }
+
+    &__input-remove {
+        padding: 2px 4px;
+        color: #8a99a8;
+        font-size: 11px;
+
+        &:hover {
+            color: #c0392b;
+        }
+    }
+
+    &__input-add {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        height: 28px;
+        padding: 0 10px;
+        border: 1px dashed #b9cfe6;
+        border-radius: 14px;
+        background: none;
+        color: #2b6cb0;
+        font-size: 12.5px;
+        white-space: nowrap;
+        cursor: pointer;
+
+        &:hover:not(:disabled) {
+            background: #f2f6fa;
+        }
+
+        &:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        &:focus:not(:focus-visible) {
+            outline: none;
+        }
+    }
+
+    // An input's dropdown: variable name, then the type-to-filter entity list.
+    &__input-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        z-index: 20;
+        width: 340px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px 12px;
+        border: 1px solid #d6dde4;
+        border-radius: 6px;
+        background: #fff;
+        box-shadow: 0 6px 18px rgba(30, 50, 70, 0.18);
+    }
+
+    &__menu-label {
+        margin: 2px 0 0;
+        color: #2b3a4a;
+        font-size: 12px;
+        font-weight: font-weight('bold');
+    }
+
+    &__menu-name.form-control {
+        font-family: monospace;
+
+        &.is-invalid {
+            border-color: #c0392b;
+        }
+    }
+
+    &__menu-hint {
+        color: #6b7a89;
+        font-size: 11.5px;
+
+        &.is-error {
+            color: #c0392b;
+        }
+    }
+
+    &__menu-list {
+        max-height: 220px;
+        overflow-y: auto;
+        border: 1px solid #e3e8ee;
+        border-radius: 4px;
+    }
+
+    &__menu-group {
+        padding: 5px 8px 2px;
+        color: #7a8a9a;
+        font-size: 11px;
+        letter-spacing: .03em;
+        text-transform: uppercase;
+    }
+
+    &__menu-option {
+        display: block;
+        width: 100%;
+        padding: 4px 8px 4px 16px;
+        border: 0;
+        background: none;
+        color: #2b3a4a;
+        font-size: 12.5px;
+        text-align: left;
+        cursor: pointer;
+
+        &:hover {
+            background: #f2f6fa;
+        }
+
+        &.is-selected {
+            background: #eaf1f8;
+            font-weight: font-weight('bold');
+        }
+    }
+
+    &__menu-actions {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 2px;
+    }
+
+    // The code and the result split the height that is left.
+    &__code,
+    &__result {
+        flex: 1 1 50%;
+        min-height: 120px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    &__script,
+    &__output {
+        flex: 1 1 auto;
+        width: 100% !important;
+        max-width: 100% !important;
+        min-height: 0;
+        height: auto !important;
+        box-sizing: border-box;
+        margin: 0;
+        resize: none;
+        padding: 8px 10px;
+        font-family: monospace;
+        font-size: 12.5px;
+        line-height: 1.5;
+        white-space: pre;
+        overflow: auto;
+    }
+
+    // Beats Oro's grey `.form-control[readonly]`, so a current result reads white and only a
+    // STALE one greys out.
+    &__output.form-control[readonly] {
+        background: #fcfdfe;
+        color: #2b3a4a;
+
+        // The script, inputs or max rows changed since this result (not run again yet).
+        &.is-stale {
+            background: #eceff2;
+            color: #606e7b;
+        }
+
+        &.is-error {
+            color: #c0392b;
+            white-space: pre-wrap;
+        }
+    }
+
+    &__result-label {
+        margin: 0;
+        color: #2b3a4a;
+        font-size: 12.5px;
+        font-weight: font-weight('bold');
+        white-space: nowrap;
+    }
+
+    &__status {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        color: #6b7a89;
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    &__limit {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+        color: #5c6b7a;
+        font-size: 12.5px;
+        white-space: nowrap;
+        cursor: pointer;
+
+        input {
+            margin: 0;
+        }
+    }
+
+    &__limit-value.form-control {
+        flex: 0 0 auto;
+        width: 84px;
+
+        &[disabled] {
+            background: #f4f6f8;
+            color: #69727a;
+        }
+    }
+
+    &__run,
+    &__save-as {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+    }
+
+    &__run {
+        &.is-busy .fa-play::before {
+            content: '\f110'; // fa-spinner
+        }
+
+        &.is-busy .fa-play {
+            animation: fa-spin 1s infinite linear;
+        }
+    }
+}
+
 // --- Connector config (read-only JSON + "Configure…" popup) ----------------
 
 // Block-level row so the button always lands on its own line BELOW the (inline-block)

@@ -40,6 +40,7 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 | `OntologyData` | `aaxis_ontology_data` | latest record; `(entity, unique_id)` unique; `payload` jsonb |
 | `OntologyDataHistory` | `aaxis_ontology_data_history` | per-version diffs; `(entity, unique_id, version)` unique. **Version continuity** (v1_10): `aaxis_ontology_data_upsert` numbers records PAST whatever history survives for the unique id — insert starts at `max(history)+1`, update archives at `GREATEST(live, max(history)+1)` — because a re-created record restarting at version 1 used to CRASH this unique index on its first change (the pre-9582e03 purge deleted data but kept history; inside the async consumer that read as a logged error + a "no changes" event + a silently unchanged record). Never assume live version = history+1 |
 | `OntologyFlowEvent` | `aaxis_ontology_flow_events` | (v1_12 — REPLACED `OntologyDataEvent`/`aaxis_ontology_data_events`, dropped WITH its data) one row per flow-execution EVENT: flow_id/flow_uuid/flow_name (plain copies, NO FK — records survive flow rename/delete), `event` ∈ flow-start/flow-finish/subflow-start/subflow-finish/inner-flow-start/inner-flow-finish/flow-exception/data-upsert/log-message/step (a new kind needs the CONSUMERS RESTARTED — stale ones reject it), `datetime` TIMESTAMP(6) (microseconds — parallel consumers make insertion ids useless for ordering; the emit-time stamp is the truth; the ENTITY maps it as a STRING because Oro's global UTCDateTimeType hydrates `datetime` columns with a STRICT 'Y-m-d H:i:s' parse that rejects fractional seconds — the controller date_create()s the raw value for display, and mapping changes here need the doctrine.metadata.cache pools cleared), jsonb `payload`. Written ASYNCHRONOUSLY (topic `aaxis_ontology_flow_event` → `Async/OntologyFlowEventProcessor`, plain DBAL insert) so logging never blocks a run |
+| `OntologyDwlScript` | `aaxis_ontology_dwl_script` | (v1_16, reshaped by v1_17/v1_18 before release) a Data Playground script: owner (oro_user, CASCADE), name (unique PER OWNER), `script` text and the playground METADATA — `is_public`, `inputs` jsonb `[{entityId, name}]` (the default inputs; NOT foreign keys — gone entities are dropped by the page), `row_limit` (default MAX ROWS of the result, null = all — never a read limit). Schema in `Migrations/Schema/DwlScriptTable` (installer + v1_16) |
 | *(no entity — DBAL only)* | `aaxis_ontology_flow_runs` | (v1_14) the RUN INDEX, see "Run index" below: one row per run (PK flow_uuid), folded by the event consumer; what the Events page and the stale-debug sweep read |
 
 ## Entities form: System picker (2026-11-24)
@@ -148,8 +149,9 @@ Key facts:
   (`assertValid` still runs). The QUEUED path (`upsertRecords` — Add Data modal, REST API) throws
   `invalid_payload` for internal entities instead of silently storing rows nothing reads.
   Failures: `internal_entity_unwritable` (422).
-  KNOWN GAPS: the paged `query()` endpoint, the Data View listing and the entities playground still
-  read only `aaxis_ontology_data` (empty for internal entities).
+  KNOWN GAPS: the paged `query()` endpoint and the Data View listing still read only
+  `aaxis_ontology_data` (empty for internal entities). The DWL popup and the Data Playground read
+  internal entities from the Oro table since 2026-11-24 (`Manager/EntityPayloadReader`).
 - **The back-office "Add Data" modal reuses this**: `OntologyDataController::createAction` decodes the
   payload (JSON/CSV/XML), normalizes single-object-vs-array, and calls `upsertRecords()` — so the
   modal behaves exactly like the API (no Mode selector, no Unique Id field; the uid is inferred from
@@ -412,6 +414,85 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
   `fill: true`, so ONLY its rows scroll while the fields above, the "Attributes" title and the
   Add attribute button stay in view (oro-common ≥ the release carrying `FormField.fill`).
 
+### Data Playground page (2026-11-24)
+
+`aaxis_ontology_data_playground` (`/data-playground`, menu after Data View, position 70) =
+`DataPlayground/index.html.twig` + `data-playground-component.ts` + `Controller/
+OntologyDataPlaygroundController` + `Manager/DwlScriptManager` + `Manager/DwlInputs`. Saved scripts
+left (~20%: filter, New, own + public ones — globe, owner name). Right:
+- LIST rows: the API collection's PADLOCK before the name (oro-tools `api-collection`: red
+  `fa-lock` = private, green `fa-unlock-alt is-public` = public; the open row follows the Public
+  switch before it is saved — an indicator here, not a toggle), the unsaved dot, the owner of
+  someone else's script, and a TRASH (`script-item-delete`) on the user's OWN saved scripts only
+  (with delete permission; shown on hover / focus / the open row). Rows are `div[role=option]`
+  (a button cannot hold the trash button): Enter/Space open them. Deleting the open script gives
+  way to a new draft; deleting another leaves the open one alone.
+- TOP ROW: Public switch · name · the INPUTS · Save (owner; a SPINNER `data-role=saving` +
+  `aria-busy` while its request runs, also on "Save a copy") or "Save a copy" (others' public
+  script; the "by <owner> — read-only" line sits under the row).
+  Each input is a CHIP `variable ← entity · records` (red `is-invalid` while it cannot run). A
+  chip — or "Add input" — opens its DROPDOWN (`input-menu`): the variable name, then a
+  type-to-filter entity list grouped by system (pick on pointerdown, Enter takes the first match),
+  plus Remove / Done. Escape, Done or an outside pointerdown close it; an input left WITHOUT an
+  entity is dropped.
+- the always-DWL code (`createDwlField` fixed);
+- the RESULT ROW: status (`100 of 6,236 rows shown · orders: 6,236 records · …`) · Max rows
+  (checkbox + number) · Run · **Save as…**, over the read-only result.
+- ⚠️ MAX ROWS CUTS THE OUTPUT, NEVER THE READ (2026-11-24 — it first capped every input, so a
+  10k-record entity reached the script as 100 records): every input is read IN FULL, and a LIST
+  result keeps its first N rows (`cutRows()`; the rows CSV/XML would write). An object or a single
+  value is a result of its own and is shown whole (`output: null`). The Entities `dwl` popup's
+  "Limit rows" is different on purpose: there it SAMPLES the input.
+There is NO format selector: the script's own `output` header decides it (server-side
+`DwlOutputFormatter`, as in the Entities popup).
+- INPUTS (`DwlInputs`, shared by run and save): a list of ≤ 10 `{entityId, name}`. The name must
+  be a DWL variable — `[A-Za-z_]\w*`, ≤ 64, NOT one of the lexer's keywords (case-insensitive;
+  `DwlInputs::KEYWORDS` mirrors `Dwl/Language/Lexer::KEYWORDS`, and the page's `DWL_KEYWORDS`
+  mirrors that — keep the three in step) — and unique; the same entity may be read twice under
+  two names. Refusals: `inputs_invalid`, `input_name_invalid`, `input_name_duplicate`,
+  `entity_missing`. Page naming: an input is named after its ENTITY (`inputNameFor`: an Oro class
+  keeps its short name `…\\Entity\\Product` → `Product`, non-word → `_`, a leading digit gets `_`, a
+  keyword gets a trailing `_`, unique `_2`…), and a page-chosen name follows a re-picked entity
+  until the user types their own. A new script opens with the pass-through `output application/json
+  --- payload`; while it is UNTOUCHED and there is exactly one input, it follows that input's name
+  (`followPassThrough`) — the user's own code is never rewritten.
+- VISIBILITY: private unless `is_public`; the list = own OR public (`DwlScriptManager::visibleTo`).
+  Only the OWNER changes/deletes (`OntologyDwlScript::isOwnedBy`, 403 `not_owner`); somebody
+  else's PRIVATE script answers 404 (existence not leaked). "Save a copy" = a create with
+  `<name> (copy)` / `(copy N)`, private.
+- METADATA: the inputs and max rows are saved with the script as DEFAULTS (they count as changes).
+  The run itself takes the CURRENT picks:
+  `POST /data-playground/api/run {script, inputs?, limit?}` →
+  `{success, result: <rendered text>, format, mime, extension, inputs: [{name, records}],
+  output: {rows, shown, truncated} | null}`.
+- RUN = the Entities `dwl` popup's rules: `Manager/EntityPayloadReader` (EXTRACTED from
+  OntologyEntityController, which now builds one per call from its current services — so its
+  tests, which swap the bucket store mid-test, did not change) reads/counts each input (bucket-backed
+  entities from the bucket), `DwlScriptGuard` screens, inputs need `OntologyData` VIEW (403), each
+  input is bound under its name (no inputs = no bindings), a refused input list is a 422
+  `{success: false, error}`, script errors are `{success: false, error, inputs}` 200.
+- SAVE AS…: the last result's text, named `<script name>.<extension>` (filename-unsafe characters →
+  `_`). It uses `window.showSaveFilePicker` (File System Access API, Chromium) when present — a
+  cancel (AbortError) is silent — else a Blob download.
+- ACLs (entity, no ownership — None/System): `aaxis_ontology_dwl_script_view` (page, list, run),
+  `_create`, `_update` (EDIT), `_delete`. Routes `aaxis_ontology_dwl_script_list|create|update|delete|
+  run` (all exposed + in features.yml). The chips' record counts reuse `aaxis_ontology_entity_dwl_count`
+  (cached per entity on the page).
+- PAGE: `?script=<id>` follows the selection (read in initialize BEFORE the first draft renders —
+  showing a draft rewrites the URL); unsaved changes are guarded (switch → discard dialog;
+  beforeunload; `openLink:before`); a result older than script/inputs/max rows greys (`is-stale`;
+  the output's background needs `.form-control[readonly]` specificity to beat Oro's grey);
+  Ctrl/⌘+Enter runs, Ctrl/⌘+S saves.
+- MIGRATIONS: v1_16 creates the table from `DwlScriptTable` (the FINAL shape). The first, never
+  released shape (single `entity_id` FK + `render`) only ever existed on braskem7: v1_17 adds
+  `inputs` and copies `entity_id` into `[{entityId, name: payload}]`, v1_18 drops `entity_id` (FK,
+  index) and `render`. Both are no-ops on a table v1_16 created in the final shape.
+- ⚠️ DEPLOY GOTCHA (hit here): after `oro:migration:load` the new entity had NO `oro_entity_config`
+  row (the migration's config update ran on stale metadata) and then `oro:translation:load` failed
+  with "Entity … OntologyDwlScript is not configurable". Fix: `oro:entity-config:update` +
+  `oro:entity-config:cache:clear` (NOT cache:clear), then reload/dump the translations. Run the
+  same two after any mapping change of this entity.
+
 ### DWL playground (Entities grid → `dwl` badge action)
 
 A DataWeave scratchpad over one entity's stored records, modelled on the official DataWeave
@@ -430,11 +511,13 @@ playground. Pieces:
 - **Row limit + total**: the limit box is followed by a `/ N total records` label, filled on open by
   `GET /entities/api/{id}/dwl/count` (`aaxis_ontology_entity_dwl_count`, exposed, same permission pair
   as the run) and refreshed from every run's `total`, so the cap can be judged against the real volume
-  before running. ⚠️ That count is **not** the grid's `recordCount` column: `recordCount()` reports the
-  **OroCommerce table** size for internal-system entities, while the playground always reads
-  `OntologyData` — reusing the column would show a total the run then contradicts. Both endpoints go
-  through `dwlPayloadTotal()` so they can never drift. A failed count blanks the label and never
-  blocks running.
+  before running. Both endpoints go through `dwlPayloadTotal()` → `Manager/EntityPayloadReader`
+  (shared with the Data Playground), which reads and counts like a flow's Entity Read: INTERNAL
+  entities from the Oro table (`OroEntityReader::readAll`, `COUNT` on the class — they read nothing
+  before 2026-11-24, the gap the user hit), bucket-backed ones from the bucket, the rest from
+  `aaxis_ontology_data`. An internal entity whose name is no readable Oro class fails the RUN like a
+  script error (200 `{success: false, error}`), never a 500. A failed count blanks the label and
+  never blocks running.
 - **Deliberately not live**: nothing runs until **Run** is pressed. The pane remembers the
   script+limit signature of the last run and greys the Result out (`.is-stale`, light grey) as soon
   as either drifts — so a shown result is never mistaken for the current script's output. The limit

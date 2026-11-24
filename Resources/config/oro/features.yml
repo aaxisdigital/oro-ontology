@@ -10,6 +10,7 @@ features:
             - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_flows
             - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_events
             - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_data_view
+            - application_menu.aaxis_tab.aaxis_ontology.aaxis_ontology_data_playground
         routes:
             - aaxis_ontology_systems
             - aaxis_ontology_system_list
@@ -34,6 +35,12 @@ features:
             - aaxis_ontology_data_list
             - aaxis_ontology_data_versions
             - aaxis_ontology_data_create
+            - aaxis_ontology_data_playground
+            - aaxis_ontology_dwl_script_list
+            - aaxis_ontology_dwl_script_create
+            - aaxis_ontology_dwl_script_update
+            - aaxis_ontology_dwl_script_delete
+            - aaxis_ontology_dwl_script_run
             - aaxis_ontology_api_data_read
             - aaxis_ontology_api_data_upsert
             - aaxis_ontology_api_data_query

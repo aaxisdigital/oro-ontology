@@ -12,6 +12,7 @@ use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlOutputFormatter;
 use Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard;
+use Aaxis\Bundle\OntologyBundle\Manager\EntityPayloadReader;
 use Aaxis\Bundle\OntologyBundle\Manager\EntityRecordEraser;
 use Aaxis\Bundle\OntologyBundle\Manager\OroEntityReader;
 use Aaxis\Bundle\OntologyBundle\Manager\RecordFilter;
@@ -180,12 +181,14 @@ class OntologyEntityController extends AbstractOntologyController
         $limit = is_numeric($rawLimit) && (int) $rawLimit > 0 ? (int) $rawLimit : null;
 
         $total = $this->dwlPayloadTotal($entity);
-        $payload = $this->loadEntityPayloads($entity, $limit);
+        $payload = [];
 
         $formatter = $this->container->get(DwlOutputFormatter::class);
         $output = $formatter->detect($script);
 
         try {
+            // Inside the try: an internal entity whose class cannot be read fails like a script would.
+            $payload = $this->loadEntityPayloads($entity, $limit);
             $result = $this->container->get(DwlTransformer::class)->transform($script, ['payload' => $payload]);
         } catch (\Throwable $e) {
             return new JsonResponse([
@@ -333,11 +336,7 @@ class OntologyEntityController extends AbstractOntologyController
     /** Number of records available to a playground run (single source of truth for both endpoints). */
     private function dwlPayloadTotal(OntologyEntity $entity): int
     {
-        if ($this->bucketBacked($entity)) {
-            return $this->container->get(BucketEntityDataStore::class)->countLatest($entity);
-        }
-
-        return (int) $this->registry()->getRepository(OntologyData::class)->count(['entity' => $entity]);
+        return $this->payloadReader()->total($entity);
     }
 
     /**
@@ -346,42 +345,24 @@ class OntologyEntityController extends AbstractOntologyController
      */
     private function bucketBacked(OntologyEntity $entity): bool
     {
-        return ($entity->getSystem()?->isExternal() ?? false)
-            && !$entity->isForceDbStorage()
-            && $this->container->get(BucketEntityDataStore::class)->isEnabled();
+        return $this->payloadReader()->bucketBacked($entity);
     }
 
     /**
-     * The entity's stored record payloads, oldest first. Projects the payload column only (no entity
-     * hydration) since an unlimited playground run can span the whole table.
+     * The entity's stored record payloads, oldest first ({@see EntityPayloadReader} — shared with
+     * the Data Playground page).
      *
      * @return list<array<string, mixed>>
      */
     private function loadEntityPayloads(OntologyEntity $entity, ?int $limit): array
     {
-        if ($this->bucketBacked($entity)) {
-            $payloads = array_map(
-                static fn (array $envelope): array => \is_array($envelope['payload']) ? $envelope['payload'] : [],
-                $this->container->get(BucketEntityDataStore::class)->listLatest($entity)
-            );
+        return $this->payloadReader()->payloads($entity, $limit);
+    }
 
-            return $limit !== null ? \array_slice($payloads, 0, $limit) : $payloads;
-        }
-
-        $query = $this->registry()->getManagerForClass(OntologyData::class)
-            ->createQuery(
-                'SELECT d.payload FROM ' . OntologyData::class . ' d'
-                . ' WHERE d.entity = :entity ORDER BY d.id ASC'
-            )
-            ->setParameter('entity', $entity);
-        if ($limit !== null) {
-            $query->setMaxResults($limit);
-        }
-
-        return array_map(
-            static fn (array $row): array => \is_array($row['payload'] ?? null) ? $row['payload'] : [],
-            $query->getArrayResult()
-        );
+    /** Built per call from the CURRENT services (a test may swap the bucket store mid-way). */
+    private function payloadReader(): EntityPayloadReader
+    {
+        return new EntityPayloadReader($this->registry(), $this->container->get(BucketEntityDataStore::class));
     }
 
     /**

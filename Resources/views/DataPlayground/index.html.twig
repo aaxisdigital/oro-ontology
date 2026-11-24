@@ -1,0 +1,26 @@
+{% extends '@OroUI/actions/index.html.twig' %}
+
+{% set pageTitle = 'aaxis.ontology.data_playground.title'|trans %}
+
+{% block content %}
+    <div class="layout-content">
+        {# The component builds the whole playground: saved scripts on the left (filter + new),
+           the code, the Run bar (input entity at run time) and the rendered result. #}
+        <div class="content"
+             data-page-component-module="aaxisontology/js/app/components/data-playground-component"
+             data-page-component-options="{{ {
+                 canCreate: is_granted('aaxis_ontology_dwl_script_create'),
+                 canEdit: is_granted('aaxis_ontology_dwl_script_update'),
+                 canDelete: is_granted('aaxis_ontology_dwl_script_delete')
+             }|json_encode }}">
+            <div class="container-fluid page-title">
+                <div class="aaxis-ontology-sys__titlebar">
+                    <h1 class="page-title__entity-title aaxis-ontology-sys__title">
+                        {{ 'aaxis.ontology.data_playground.title'|trans }}
+                    </h1>
+                </div>
+            </div>
+            <div class="aaxis-dwl-pg" data-role="playground"></div>
+        </div>
+    </div>
+{% endblock %}

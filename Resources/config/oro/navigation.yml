@@ -57,6 +57,14 @@ navigation:
                     routes: ['aaxis_ontology_data_view']
                     description: 'aaxis.ontology.menu.aaxis_ontology_data_view.description'
 
+            aaxis_ontology_data_playground:
+                label: 'aaxis.ontology.menu.aaxis_ontology_data_playground.label'
+                route: 'aaxis_ontology_data_playground'
+                position: 70
+                extras:
+                    routes: ['aaxis_ontology_data_playground']
+                    description: 'aaxis.ontology.menu.aaxis_ontology_data_playground.description'
+
         tree:
             application_menu:
                 children:
@@ -70,6 +78,7 @@ navigation:
                                     aaxis_ontology_flows: ~
                                     aaxis_ontology_events: ~
                                     aaxis_ontology_data_view: ~
+                                    aaxis_ontology_data_playground: ~
 
     titles:
         aaxis_ontology_systems: 'aaxis.ontology.menu.aaxis_ontology_systems.label'
@@ -78,3 +87,4 @@ navigation:
         aaxis_ontology_flows: 'aaxis.ontology.menu.aaxis_ontology_flows.label'
         aaxis_ontology_events: 'aaxis.ontology.menu.aaxis_ontology_events.label'
         aaxis_ontology_data_view: 'aaxis.ontology.menu.aaxis_ontology_data_view.label'
+        aaxis_ontology_data_playground: 'aaxis.ontology.menu.aaxis_ontology_data_playground.label'

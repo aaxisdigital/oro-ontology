@@ -24,7 +24,7 @@ class AaxisOntologyBundleInstaller implements Installation
     #[\Override]
     public function getMigrationVersion(): string
     {
-        return 'v1_15';
+        return 'v1_18';
     }
 
     #[\Override]
@@ -41,6 +41,8 @@ class AaxisOntologyBundleInstaller implements Installation
         $this->createFlowTable($schema);
 
         $this->addForeignKeys($schema);
+        // After the entity table: the playground scripts reference it (and oro_user).
+        DwlScriptTable::create($schema);
 
         // Data upsert PostgreSQL functions (validation, diff/merge helpers, upsert routine).
         foreach (OntologyDataFunctions::all() as $functionSql) {

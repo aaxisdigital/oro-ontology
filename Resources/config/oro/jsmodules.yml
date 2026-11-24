@@ -3,6 +3,7 @@ dynamic-imports:
         - aaxisontology/js/app/components/system-component
         - aaxisontology/js/app/components/entity-component
         - aaxisontology/js/app/components/data-view-component
+        - aaxisontology/js/app/components/data-playground-component
         - aaxisontology/js/app/components/event-component
         - aaxisontology/js/app/components/flow-component
         - aaxisontology/js/app/components/flow-editor-component

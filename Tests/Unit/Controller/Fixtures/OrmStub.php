@@ -35,6 +35,9 @@ final class OrmStub
 
     public ?\Throwable $managerFailure = null;
 
+    /** When set, flush() throws it (after counting the call). */
+    public ?\Throwable $flushFailure = null;
+
     /** @var array<int, array{dql: string, parameters: array<string, mixed>, maxResults: int|null, method: string}> */
     public array $queries = [];
 
@@ -64,6 +67,9 @@ final class OrmStub
         });
         $this->em->method('flush')->willReturnCallback(function (): void {
             ++$this->flushes;
+            if ($this->flushFailure !== null) {
+                throw $this->flushFailure;
+            }
         });
         $this->em->method('createQuery')->willReturnCallback(fn (string $dql): Query => $this->newQuery($dql));
 

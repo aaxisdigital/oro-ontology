@@ -259,6 +259,11 @@ services:
     # Screens playground scripts for environment introspection (dw::Runtime::props).
     Aaxis\Bundle\OntologyBundle\Manager\DwlScriptGuard: ~
 
+    # Data Playground: saved scripts (visibility, validation) — Controller/OntologyDataPlaygroundController.
+    Aaxis\Bundle\OntologyBundle\Manager\DwlScriptManager:
+        arguments:
+            - '@doctrine'
+
     # System Configuration: read-only DB-usage widget (table sizes for the retention settings).
     # Settings page: the run index's read-only status + "Rebuild run index" button.
     Aaxis\Bundle\OntologyBundle\Form\Type\FlowRunIndexStatusType:

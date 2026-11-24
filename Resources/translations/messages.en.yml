@@ -22,6 +22,9 @@ aaxis:
             aaxis_ontology_data_view:
                 label: Data View
                 description: Consolidated view of the data model
+            aaxis_ontology_data_playground:
+                label: Data Playground
+                description: Saved DataWeave scripts run against the ontology's data
         feature:
             label: 'Ontology'
         config:
@@ -251,6 +254,26 @@ aaxis:
         ontologydataevent:
             entity_label: Event
             entity_plural_label: Events
+        ontologydwlscript:
+            entity_label: Data Playground Script
+            entity_plural_label: Data Playground Scripts
+
+        data_playground:
+            title: Data Playground
+            script_empty: 'The script is empty.'
+            name_required: 'Give the script a name.'
+            name_too_long: 'The name can be at most %max% characters.'
+            name_taken: 'You already have a script with this name.'
+            script_invalid: 'The script must be text.'
+            public_invalid: 'The public flag must be true or false.'
+            limit_invalid: 'Max rows (how many rows of the result are shown) must be a whole number from 1 to 1,000,000 — or none.'
+            inputs_invalid: 'The inputs must be a list of at most 10 entities, each with a variable name.'
+            input_name_invalid: 'An input name must be a DWL variable name: letters, digits and _, not starting with a digit, and not a DWL keyword.'
+            input_name_duplicate: 'Two inputs cannot have the same name.'
+            entity_missing: 'An input entity no longer exists.'
+            not_found: 'Script not found.'
+            not_owner: 'Only the owner of this script can change or delete it.'
+
         ontologyflow:
             entity_label: Flow
             entity_plural_label: Flows

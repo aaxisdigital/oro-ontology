@@ -32,6 +32,12 @@ services:
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager, key: Aaxis\Bundle\OntologyBundle\Manager\OntologyDataApiManager }
             - { name: container.service_subscriber, id: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore, key: Aaxis\Bundle\OntologyBundle\Manager\BucketEntityDataStore }
 
+    Aaxis\Bundle\OntologyBundle\Controller\OntologyDataPlaygroundController:
+        calls:
+            - [setContainer, ['@Psr\Container\ContainerInterface']]
+        tags:
+            - { name: container.service_subscriber }
+
     Aaxis\Bundle\OntologyBundle\Controller\OntologyConfigController:
         calls:
             - [setContainer, ['@Psr\Container\ContainerInterface']]
