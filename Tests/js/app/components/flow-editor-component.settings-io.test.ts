@@ -41,22 +41,43 @@ const FLOWS = {records: [
     {id: 30, name: 'Main', type: 'flow'}
 ]};
 
+/** The visible dropdown input of an Entity Read / Write name picker (System / Entity). */
+function namePick(labelKey: string): any {
+    return field(labelKey).find('.aaxis-flow-editor__combo input');
+}
+
+/** The option texts the name picker lists right now (open it first). */
+function nameOptions(labelKey: string): string[] {
+    return field(labelKey).find('.aaxis-flow-editor__combo-option').map((_i: number, el: HTMLElement) => el.textContent).get();
+}
+
+/** Picks `name` in a name picker's dropdown. */
+function pickName(labelKey: string, name: string): void {
+    namePick(labelKey).trigger('focus');
+    const option = field(labelKey).find('.aaxis-flow-editor__combo-option')
+        .filter((_i: number, el: HTMLElement) => el.textContent === name)[0];
+    option.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true, cancelable: true}));
+}
+
+/** Flips a name picker's DWL switch. */
+function nameDwl(labelKey: string, on: boolean): void {
+    field(labelKey).find('.aaxis-dwl-input__switch input').prop('checked', on).trigger('change');
+}
+
 describe('OntologyFlowEditorComponent — Entity Read / Entity Write settings', () => {
     useFlowEditorEnv(FlowEditorComponent);
 
-    it('gives the reader the medium panel, so its Load row selects show their values', async () => {
+    it('gives the reader and the writer the same medium panel, so their fields show their values', async () => {
         await open(st('r', 'entity_read', 'read', 300, 0));
         expect($('.aaxis-flow-editor__settings').hasClass('is-medium')).toBe(true);
         $('.aaxis-flow-editor__settings').remove();
 
         await open(st('w', 'entity_write', 'write', 300, 0, {system: 'crm', entity: 'order'}));
-        expect($('.aaxis-flow-editor__settings').hasClass('is-medium')).toBe(false);
+        expect($('.aaxis-flow-editor__settings').hasClass('is-medium')).toBe(true);
     });
 
     it('reads all records with optional ordering and limit from the entity\'s reader attributes', async () => {
         const editor = await open(st('r', 'entity_read', 'read', 300, 0));
-        const $system = field('config_system_label');
-        const $entity = field('config_entity_label');
         const $mode = field('reader_mode_label');
         const $orderBy = field('reader_order_by_label');
 
@@ -64,8 +85,8 @@ describe('OntologyFlowEditorComponent — Entity Read / Entity Write settings', 
         expect(visible($orderBy)).toBe(true);
         expect(visible(field('reader_order_dir_label'))).toBe(false);
         expect(visible(field('reader_record_id_label'))).toBe(false);
-        $system.val('crm').trigger('change');
-        $entity.val('customer').trigger('change');
+        pickName('config_system_label', 'crm');
+        pickName('config_entity_label', 'customer');
         expect(options($orderBy)).toEqual(['', 'id', 'email', 'name']);
         $orderBy.val('email').trigger('change');
         expect(visible(field('reader_order_dir_label'))).toBe(true);
@@ -126,7 +147,7 @@ describe('OntologyFlowEditorComponent — Entity Read / Entity Write settings', 
     });
 
     it.each([
-        ['no entity', {mode: 'all'}, () => field('config_entity_label').val('')],
+        ['no entity', {mode: 'all'}, () => namePick('config_entity_label').trigger('focus').val('').trigger('input')],
         ['by id without an id', {mode: 'by_id', record_id: 'x'}, () => field('reader_record_id_label').val(' ')],
         ['by attribute without the attribute', {mode: 'by_attribute', attribute: 'email', attr_value: 'x'}, () => field('reader_attribute_label').val('')],
         ['by attribute without a value', {mode: 'by_attribute', attribute: 'email', attr_value: 'x'}, () => field('reader_attr_value_label').val('')],
@@ -158,12 +179,78 @@ describe('OntologyFlowEditorComponent — Entity Read / Entity Write settings', 
         expect(tile('write').classList.contains('is-config-invalid')).toBe(true);
     });
 
+    it('picks the entity among the chosen system\'s, and drops a pick another system lacks', async () => {
+        const editor = await open(st('r', 'entity_read', 'read', 300, 0, {system: 'crm', entity: 'customer'}));
+
+        expect(namePick('config_system_label').val()).toBe('crm');
+        // A field showing its pick lists everything when focused.
+        namePick('config_entity_label').trigger('focus');
+        expect(nameOptions('config_entity_label')).toEqual(['customer', 'order']);
+        pickName('config_system_label', 'erp');
+        expect(namePick('config_entity_label').val()).toBe('');
+        pickName('config_entity_label', 'item');
+        confirmSettings();
+
+        expect(configOf(editor, 'read')).toEqual({destination: 'payload', system: 'erp', entity: 'item', mode: 'all'});
+    });
+
+    it('takes the system and entity names from DWL expressions, with free-text attributes', async () => {
+        const editor = await open(st('r', 'entity_read', 'read', 300, 0, {
+            system: 'crm', entity: 'customer', mode: 'by_attribute', attribute: 'email', attr_value: 'a@b.c'
+        }));
+        expect(field('config_system_label').find('.aaxis-dwl-input__input').not('.aaxis-flow-editor__combo input').is(':visible')).toBe(false);
+
+        nameDwl('config_system_label', true);
+        field('config_system_label').find('[aria-label="aaxis.ontology.flow_editor.config_system_label"]').val(' payload.system ').trigger('input');
+        // A computed system: the entity dropdown offers every known entity name.
+        namePick('config_entity_label').trigger('focus').val('').trigger('input');
+        expect(nameOptions('config_entity_label')).toEqual(['customer', 'item', 'order']);
+        pickName('config_entity_label', 'order');
+        // Its attributes are unknown until it runs: the attribute is typed.
+        expect(visible($('[data-role="attribute-text"]'))).toBe(true);
+        expect($('[data-role="attribute-text"]').val()).toBe('email');
+        $('[data-role="attribute-text"]').val(' total ');
+        confirmSettings();
+
+        expect(configOf(editor, 'read')).toEqual({
+            destination: 'payload', system: 'payload.system', system_dwl: true, entity: 'order',
+            mode: 'by_attribute', attribute: 'total', attr_value: 'a@b.c'
+        });
+        expect(tile('read').classList.contains('is-config-invalid')).toBe(false);
+    });
+
+    it('reopens a computed entity name with its switch on, and back to a pick when switched off', async () => {
+        const editor = await open(st('w', 'entity_write', 'write', 300, 0, {
+            system: 'crm', entity: 'payload.kind', entity_dwl: true, content: 'payload'
+        }));
+        const $expression = field('config_entity_label').find('[aria-label="aaxis.ontology.flow_editor.config_entity_label"]');
+
+        expect(field('config_entity_label').find('.aaxis-dwl-input__switch input').prop('checked')).toBe(true);
+        expect($expression.val()).toBe('payload.kind');
+        expect(namePick('config_entity_label').is(':visible')).toBe(false);
+        nameDwl('config_entity_label', false);
+        expect(namePick('config_entity_label').val()).toBe('');
+        pickName('config_entity_label', 'customer');
+        confirmSettings();
+
+        expect(configOf(editor, 'write')).toEqual({destination: 'payload', system: 'crm', entity: 'customer', content: 'payload', content_dwl: false});
+    });
+
+    it('marks an empty name expression red', async () => {
+        await open(st('r', 'entity_read', 'read', 300, 0, {system: 'crm', entity: 'customer'}));
+
+        nameDwl('config_system_label', true);
+        confirmSettings();
+
+        expect(tile('read').classList.contains('is-config-invalid')).toBe(true);
+    });
+
     it('reports a failed entity catalog and retries on the next open', async () => {
         const spy = mockFetch({aaxis_ontology_entity_list: new Error('down')});
         await open(st('r', 'entity_read', 'read', 300, 0));
 
         expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', KEY('catalog_load_error'));
-        expect(field('config_system_label').prop('disabled')).toBe(true);
+        expect(namePick('config_system_label').prop('disabled')).toBe(true);
         const before = spy.mock.calls.length;
         $('.aaxis-flow-editor__settings .btn').not('.btn-primary').trigger('click');
         openSettings('read');

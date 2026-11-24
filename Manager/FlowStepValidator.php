@@ -30,6 +30,11 @@ class FlowStepValidator
         // HTTP Request: the path is a single-line DWL expression while its toggle is on.
         ['invoke', 'path', 'path_dwl'],
         ['entity_write', 'content', 'content_dwl'],
+        // Entity Read / Write: the system and entity NAMES may be computed at run time.
+        ['entity_read', 'system', 'system_dwl'],
+        ['entity_read', 'entity', 'entity_dwl'],
+        ['entity_write', 'system', 'system_dwl'],
+        ['entity_write', 'entity', 'entity_dwl'],
         ['file_write', 'content', 'content_dwl'],
         // File Operations: the path (all five) and the rename's new name are DWL-capable too.
         ['file_*', 'path', 'path_dwl'],
@@ -151,30 +156,52 @@ class FlowStepValidator
      */
     public function stepErrors(array $steps): array
     {
+        return $this->problemReport($steps)['errors'];
+    }
+
+    /**
+     * Per-step problems in one pass: `errors` = the first problem per step NAME (what
+     * {@see stepErrors()} returns), `fields` = the config KEYS only the server can judge — a
+     * DWL text that does not parse, an invalid cron expression — each with its message, per step
+     * name. The editor paints those fields red in the step's settings popup (it checks missing
+     * values itself); steps without such a problem are absent.
+     *
+     * @param array<int, array<string, mixed>> $steps
+     *
+     * @return array{errors: array<string, string>, fields: array<string, array<string, string>>}
+     */
+    public function problemReport(array $steps): array
+    {
         $errors = [];
+        $fields = [];
         foreach ($steps as $step) {
             $name = (string) $step['name'];
+            $stepFields = [];
             $expression = $step['config']['expression'] ?? null;
             if ($step['type'] === 'cron' && $expression !== null
                 && !CronExpression::isValidExpression((string) $expression)
             ) {
-                $errors[$name] ??= $this->trans('invalid_cron', ['{{ name }}' => $name]);
+                $stepFields['expression'] = $errors[$name] ??= $this->trans('invalid_cron', ['{{ name }}' => $name]);
             }
             if (!$this->isStepConfigValid($step)) {
                 $errors[$name] ??= $this->trans('invalid_step_config', ['{{ name }}' => $name]);
             }
-            foreach ($this->stepDwlSnippets($step) as $snippet) {
+            foreach ($this->stepDwlSnippets($step) as $key => $snippet) {
                 $dwlError = $this->dwl->validate($snippet);
                 if ($dwlError !== null) {
-                    $errors[$name] ??= $this->trans('invalid_dwl', [
+                    $stepFields[$key] = $this->trans('invalid_dwl', [
                         '{{ name }}' => $name,
                         '{{ error }}' => $dwlError,
                     ]);
+                    $errors[$name] ??= $stepFields[$key];
                 }
+            }
+            if ($stepFields !== []) {
+                $fields[$name] = $stepFields;
             }
         }
 
-        return $errors;
+        return ['errors' => $errors, 'fields' => $fields];
     }
 
     /**
@@ -190,6 +217,11 @@ class FlowStepValidator
         return array_keys($this->stepErrors($steps));
     }
 
+    /**
+     * The step's DWL texts to parse-check, by config key.
+     *
+     * @return array<string, string>
+     */
     private function stepDwlSnippets(array $step): array
     {
         $config = $step['config'];
@@ -202,7 +234,7 @@ class FlowStepValidator
                 && ($toggle === null || ($config[$toggle] ?? false) === true)
                 && \is_string($config[$key] ?? null) && trim($config[$key]) !== ''
             ) {
-                $snippets[] = $config[$key];
+                $snippets[$key] = $config[$key];
             }
         }
 

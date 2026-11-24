@@ -61,7 +61,7 @@ export const PALETTE: Array<[string, Array<[string, string, string]>]> = [
     ['trigger', [['cron', 'fa-clock-o', 'Schedule'], ['endpoint', 'fa-plug', 'Endpoint'],
         ['entity_change', 'fa-database', 'Entity Change'], ['subflow', 'fa-sign-in', 'Subflow']]],
     ['action', [['choice', 'fa-code-fork', 'Choice'], ['sub_flow', 'fa-sitemap', 'Call Subflow'],
-        ['foreach', 'fa-repeat', 'Foreach Loop']]],
+        ['foreach', 'fa-repeat', 'Foreach Loop'], ['inner_flow', 'fa-object-group', 'Inner Flow']]],
     ['operation', [['dwl_transform', 'fa-random', 'DWL Transform'], ['entity_read', 'fa-download', 'Entity Read'],
         ['entity_write', 'fa-upload', 'Entity Write'], ['invoke', 'fa-bolt', 'HTTP Request'],
         ['sql_query', 'fa-table', 'SQL Query'], ['invoke_php', 'fa-code', 'Invoke PHP']]],

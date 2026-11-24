@@ -471,6 +471,47 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
         $this->runStep('entity_read', ['destination' => 'rows', 'system' => 'Erp']);
     }
 
+    public function testEntityReadNamesTheEntityThroughDwlExpressions(): void
+    {
+        $this->dataApi->expects(self::once())->method('read')->with('Erp', 'Order', '7')->willReturn(['id' => 7]);
+
+        $context = $this->runStep('entity_read', [
+            'destination' => 'row', 'mode' => 'by_id', 'record_id' => '7',
+            'system' => 'payload.sys', 'system_dwl' => true,
+            'entity' => '"Ord" ++ payload.kind', 'entity_dwl' => true,
+        ], ['sys' => 'Erp', 'kind' => 'er']);
+
+        self::assertSame(['id' => 7], $context['row']);
+    }
+
+    public function testEntityWriteNamesTheEntityThroughADwlExpression(): void
+    {
+        $entity = $this->entity('Erp', 'Order');
+        $this->dataApi->expects(self::once())->method('upsertRecordsSync')
+            ->with($entity, [['id' => 1]])
+            ->willReturn(['uuid' => 'run-uuid', 'seen' => ['1'], 'changed' => []]);
+
+        $context = $this->runStep('entity_write', [
+            'destination' => 'receipt', 'system' => 'Erp', 'entity' => '"Ord" ++ "er"', 'entity_dwl' => true, 'content' => 'payload',
+        ], [['id' => 1]]);
+
+        self::assertSame(1, $context['receipt']['count']);
+    }
+
+    public function testADwlEntityNameMustYieldText(): void
+    {
+        $this->expectExceptionMessage('Step "Step": the entity expression must produce a non-empty text, got null.');
+
+        $this->runStep('entity_read', ['destination' => 'row', 'system' => 'Erp', 'entity' => 'payload.missing', 'entity_dwl' => true], ['x' => 1]);
+    }
+
+    public function testAnUnknownComputedEntityIsNamedInTheFailure(): void
+    {
+        $this->expectExceptionMessage('Step "Step": unknown entity "Nope" in system "Erp".');
+
+        $this->runStep('entity_write', ['destination' => 'r', 'system' => 'Erp', 'entity' => 'payload.e', 'entity_dwl' => true, 'content' => 'payload'], ['e' => 'Nope']);
+    }
+
     public function testEntityWriteUpsertsSynchronouslyUnderTheRunUuid(): void
     {
         $entity = $this->entity('Erp', 'Order');

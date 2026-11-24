@@ -162,6 +162,24 @@ describe('OntologySystemComponent', () => {
             ]);
         });
 
+        it('opens the create form at once for ?add=1 and drops the parameter', () => {
+            window.history.replaceState({}, '', '/systems?add=1&x=2');
+            mount();
+
+            expect(FakeRecordForm.instances).toHaveLength(1);
+            expect(FakeRecordForm.instances[0].options.title).toBe('aaxis.ontology.system_manager.create_title');
+            expect(window.location.search).toBe('?x=2');
+            window.history.replaceState({}, '', '/');
+        });
+
+        it('ignores ?add=1 for a user who may not create systems', () => {
+            window.history.replaceState({}, '', '/systems?add=1');
+            mount({canCreate: false});
+
+            expect(FakeRecordForm.instances).toHaveLength(0);
+            window.history.replaceState({}, '', '/');
+        });
+
         it('opens the edit form preloaded with the row', () => {
             const {grid} = mount();
 

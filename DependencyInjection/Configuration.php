@@ -93,6 +93,7 @@ class Configuration implements ConfigurationInterface
             'flow_element_choice' => ['type' => 'boolean', 'value' => true],
             'flow_element_sub_flow' => ['type' => 'boolean', 'value' => true],
             'flow_element_foreach' => ['type' => 'boolean', 'value' => true],
+            'flow_element_inner_flow' => ['type' => 'boolean', 'value' => true],
             'flow_element_dwl_transform' => ['type' => 'boolean', 'value' => true],
             'flow_element_entity_read' => ['type' => 'boolean', 'value' => true],
             'flow_element_entity_write' => ['type' => 'boolean', 'value' => true],

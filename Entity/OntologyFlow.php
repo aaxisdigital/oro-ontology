@@ -60,8 +60,9 @@ class OntologyFlow
     public const array STEP_TYPES = [
         'cron', 'endpoint', 'entity_change', 'subflow', // triggers (subflow = callable entry point)
         // Flow Control: "choice" acts as an if; `sub_flow` calls a subflow once, `foreach` once
-        // per element of an array variable.
-        'choice', 'sub_flow', 'foreach',
+        // per element of an array variable; `inner_flow` is a subflow drawn INSIDE this flow (a
+        // container of auto-chained steps, called by sub_flow/foreach like a subflow).
+        'choice', 'sub_flow', 'foreach', 'inner_flow',
         // Operations. entity_read/entity_write are the typed successors of the REMOVED generic
         // reader/writer (v1_10's ConvertLegacyReaderWriterSteps rewrote stored flows); `invoke`
         // is the "HTTP Request" step (rest_api connectors only); `sql_query` runs SQL against

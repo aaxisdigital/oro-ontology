@@ -322,7 +322,9 @@ class FlowPortability
     }
 
     /**
-     * Every (system, entity) pair referenced by a flow's steps, keyed to de-duplicate.
+     * Every (system, entity) pair referenced by a flow's steps, keyed to de-duplicate. A pair named
+     * by a DWL expression (`system_dwl` / `entity_dwl`) is resolved only at run time, so it is
+     * neither listed nor checked.
      *
      * @return array<string, array{0: string, 1: string}>
      */
@@ -330,6 +332,9 @@ class FlowPortability
     {
         $refs = [];
         foreach ($this->allConfigs($steps, $design) as $config) {
+            if (($config['system_dwl'] ?? false) === true || ($config['entity_dwl'] ?? false) === true) {
+                continue;
+            }
             $system = \is_string($config[self::KEY_SYSTEM] ?? null) ? trim($config[self::KEY_SYSTEM]) : '';
             $entity = \is_string($config[self::KEY_ENTITY] ?? null) ? trim($config[self::KEY_ENTITY]) : '';
             if ($system !== '' && $entity !== '') {

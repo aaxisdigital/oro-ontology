@@ -72,7 +72,7 @@ class FlowDebugExecutorDebugWalkTest extends FlowDebugExecutorTestCase
             'done' => false,
             'transition' => null,
             'iteration' => null,
-            'frame' => ['flowId' => 1, 'flowName' => 'Main', 'depth' => 0],
+            'frame' => ['flowId' => 1, 'flowName' => 'Main', 'depth' => 0, 'canvasDepth' => 0, 'innerId' => null],
             'executedIds' => ['t'],
             'context' => ['flowUuid' => 'run-uuid'],
             'next' => ['id' => 'a', 'name' => 'Init', 'type' => 'dwl_transform'],
@@ -86,7 +86,7 @@ class FlowDebugExecutorDebugWalkTest extends FlowDebugExecutorTestCase
         $entered = $this->tick($second['blob']);
         self::assertSame('entered', $entered['response']['transition']);
         self::assertSame(['id' => 'st', 'name' => 'Enrich', 'type' => 'subflow'], $entered['response']['step']);
-        self::assertSame(['flowId' => 20, 'flowName' => 'Enrich', 'depth' => 1], $entered['response']['frame']);
+        self::assertSame(['flowId' => 20, 'flowName' => 'Enrich', 'depth' => 1, 'canvasDepth' => 1, 'innerId' => null], $entered['response']['frame']);
         self::assertSame(0, $entered['response']['index']);
         self::assertSame(2, $entered['response']['total']);
         self::assertSame(['id' => 'sa', 'name' => 'Add', 'type' => 'dwl_transform'], $entered['response']['next']);
@@ -174,7 +174,10 @@ class FlowDebugExecutorDebugWalkTest extends FlowDebugExecutorTestCase
 
         self::assertTrue($result['response']['done']);
         self::assertSame(['flowUuid' => 'run-uuid', 'n' => 2, 'result' => 20], $result['response']['context']);
-        self::assertSame(['b'], $result['response']['executedIds']);
+        // Everything the run did on the debugged flow's canvas (it used to report the last tick only).
+        self::assertSame(['t', 'a', 'call', 'b'], $result['response']['executedIds']);
+        self::assertSame(['t', 'a', 'call', 'b'], $result['response']['rootExecutedIds']);
+        self::assertArrayNotHasKey('breakpoint', $result['response']);
         self::assertSame([['flowId' => 20, 'flowName' => 'Enrich', 'executedIds' => ['st', 'sa']]], $result['response']['subflowTrails']);
         self::assertSame([
             'flow-start', 'step', 'step', 'subflow-start', 'step', 'step', 'subflow-finish', 'step', 'step', 'flow-finish',

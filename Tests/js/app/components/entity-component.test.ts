@@ -396,6 +396,82 @@ describe('OntologyEntityComponent', () => {
             expect(attributes.fields[1].options).toEqual(DATATYPES);
         });
 
+        it('picks the system with a type-to-filter picker and a refresh, without "Add new" by default', async () => {
+            const {modal} = await openForm(null);
+            const picker = modal.field('systemId').picker;
+
+            expect(picker.placeholder).toBe('aaxis.ontology.entity_manager.system_filter_placeholder');
+            expect(typeof picker.refresh).toBe('function');
+            expect(picker.addNew).toBeUndefined();
+        });
+
+        it('reloads the systems through the entity list and keeps them for later rebuilds', async () => {
+            const {modal, fetchSpy} = await openForm(null);
+            fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse({entities: [], datatypes: DATATYPES, systems: [...SYSTEMS, {id: 3, name: 'CRM', external: true}]})));
+
+            const options = await modal.field('systemId').picker.refresh();
+
+            expect(options).toEqual([{value: '1', label: 'ERP'}, {value: '2', label: 'OroCommerce'}, {value: '3', label: 'CRM'}]);
+            // A later rebuild offers the fresh list too.
+            const rebuilt: any[] = [];
+            modal.options.onFieldChange({key: 'systemId', value: '3', api: {
+                values: () => ({systemId: '3', name: '', attributes: []}),
+                rebuildFields: (fields: any[]) => rebuilt.push(fields),
+                setRowValue: vi.fn()
+            }});
+            expect(rebuilt[0].find((f: any) => f.key === 'systemId').options).toHaveLength(3);
+        });
+
+        it('reports a failed system reload', async () => {
+            const {modal, fetchSpy} = await openForm(null);
+            fetchSpy.mockImplementation(() => Promise.reject(new Error('down')));
+
+            await expect(modal.field('systemId').picker.refresh()).rejects.toThrow('down');
+            expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', 'aaxis.ontology.entity_manager.load_error');
+        });
+
+        it('adds a new system in a new tab and picks it on coming back', async () => {
+            const {modal} = await openForm(null, {}, {systemCreateUrl: '/systems?add=1'});
+            const open = vi.spyOn(window, 'open').mockReturnValue(null);
+            let values = ['1', '2'];
+            const api = {
+                values: () => values,
+                refresh: vi.fn(() => {
+                    values = ['1', '2', '7'];
+                    return Promise.resolve();
+                }),
+                pick: vi.fn()
+            };
+
+            const addNew = modal.field('systemId').picker.addNew;
+            expect(addNew.label).toBe('aaxis.ontology.entity_manager.system_add');
+            addNew.onAdd(api);
+            expect(open).toHaveBeenCalledWith('/systems?add=1', '_blank');
+            expect(api.refresh).not.toHaveBeenCalled();
+
+            window.dispatchEvent(new Event('focus'));
+            await flush();
+            expect(api.refresh).toHaveBeenCalledTimes(1);
+            expect(api.pick).toHaveBeenCalledWith('7');
+
+            // Only the NEXT focus counts.
+            window.dispatchEvent(new Event('focus'));
+            await flush();
+            expect(api.refresh).toHaveBeenCalledTimes(1);
+        });
+
+        it('picks nothing when no single new system appeared', async () => {
+            const {modal} = await openForm(null, {}, {systemCreateUrl: '/systems?add=1'});
+            vi.spyOn(window, 'open').mockReturnValue(null);
+            const api = {values: () => ['1', '2'], refresh: vi.fn(() => Promise.resolve()), pick: vi.fn()};
+
+            modal.field('systemId').picker.addNew.onAdd(api);
+            window.dispatchEvent(new Event('focus'));
+            await flush();
+
+            expect(api.pick).not.toHaveBeenCalled();
+        });
+
         it('lays the rows out as system + name (50/50), then unique attribute + enabled + storage (50/15/35)', async () => {
             const {modal} = await openForm(null);
 

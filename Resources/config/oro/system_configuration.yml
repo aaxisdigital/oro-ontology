@@ -296,6 +296,12 @@ system_configuration:
             options:
                 label: aaxis.ontology.config.flow_elements.foreach.label
                 required: false
+        aaxis_ontology.flow_element_inner_flow:
+            data_type: boolean
+            type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
+            options:
+                label: aaxis.ontology.config.flow_elements.inner_flow.label
+                required: false
         aaxis_ontology.flow_element_dwl_transform:
             data_type: boolean
             type: Oro\Bundle\ConfigBundle\Form\Type\ConfigCheckbox
@@ -459,6 +465,7 @@ system_configuration:
                                             - aaxis_ontology.flow_element_choice
                                             - aaxis_ontology.flow_element_sub_flow
                                             - aaxis_ontology.flow_element_foreach
+                                            - aaxis_ontology.flow_element_inner_flow
                                             - aaxis_ontology.flow_element_dwl_transform
                                             - aaxis_ontology.flow_element_entity_read
                                             - aaxis_ontology.flow_element_entity_write

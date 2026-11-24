@@ -5,7 +5,7 @@ import messenger from 'oroui/js/messenger';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import DataGrid, {GridAction, navigateTo} from 'aaxiscommon/js/app/widgets/data-grid';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
-import RecordFormModal, {FieldChangeContext, FormField, SelectOption} from 'aaxiscommon/js/app/widgets/record-form-modal';
+import RecordFormModal, {FieldChangeContext, FormField, SelectOption, SelectPickerApi} from 'aaxiscommon/js/app/widgets/record-form-modal';
 import DwlPlayground from '../widgets/dwl-playground';
 import EraseRecordsDialog from '../widgets/erase-records';
 import {apiFetch, bindGridToolbar, setRefreshBusy} from './component-support';
@@ -15,6 +15,15 @@ interface OntologyEntityOptions {
     canCreate: boolean;
     canUpdate: boolean;
     canDelete: boolean;
+    /** The Systems page opening its create form — offered as "Add new system…" (null = not allowed). */
+    systemCreateUrl?: string | null;
+}
+
+/** A system as the entity list ships it. */
+interface SystemOption {
+    id: number;
+    name: string;
+    external?: boolean;
 }
 
 interface AttributeRecord {
@@ -69,11 +78,14 @@ class OntologyEntityComponent extends BaseComponent {
      * has already called initialize() (see CommonBundle/CLAUDE.md).
      */
     private systemFilterApplied!: boolean;
+    /** Where "Add new system…" leads (the Systems page with its create form open); null = hidden. */
+    private systemCreateUrl!: string | null;
 
     initialize(options: OntologyEntityOptions): void {
         this.$el = options._sourceElement;
         this.opts = options;
         this.systemFilterApplied = false;
+        this.systemCreateUrl = options.systemCreateUrl || null;
 
         // The DWL playground is read-only (it evaluates, never writes), so viewing the page is
         // enough — and it leads the action list, before the edit/delete icons.
@@ -137,18 +149,58 @@ class OntologyEntityComponent extends BaseComponent {
         this.setBusy(true);
         fetch(routing.generate('aaxis_ontology_entity_list'), {credentials: 'same-origin'})
             .then(r => r.json())
-            .then((data: {entities: EntityRecord[]; systems: {id: number; name: string; external: boolean}[]; datatypes: SelectOption[]}) => {
-                this.systems = (data.systems || []).map(s => ({value: String(s.id), label: s.name}));
-                this.systemExternalById = {};
-                (data.systems || []).forEach(s => {
-                    this.systemExternalById[String(s.id)] = s.external !== false;
-                });
+            .then((data: {entities: EntityRecord[]; systems: SystemOption[]; datatypes: SelectOption[]}) => {
+                this.applySystems(data.systems || []);
                 this.datatypes = data.datatypes || [];
                 this.grid.setRows(data.entities || []);
                 this.applySystemFromUrl();
             })
             .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.entity_manager.load_error')))
             .finally(() => this.setBusy(false));
+    }
+
+    /** Takes a fresh systems list: the System picker's options and which ones are external. */
+    private applySystems(systems: SystemOption[]): void {
+        this.systems = systems.map(s => ({value: String(s.id), label: s.name}));
+        this.systemExternalById = {};
+        systems.forEach(s => {
+            this.systemExternalById[String(s.id)] = s.external !== false;
+        });
+    }
+
+    /**
+     * The System picker's refresh: re-reads the systems (through the entity list this page already
+     * reads — no extra permission needed), keeping the page's own copy in step for later rebuilds.
+     */
+    private reloadSystems(): Promise<SelectOption[]> {
+        return fetch(routing.generate('aaxis_ontology_entity_list'), {credentials: 'same-origin'})
+            .then(r => r.json())
+            .then((data: {systems?: SystemOption[]}) => {
+                this.applySystems(data.systems || []);
+                return this.systems;
+            })
+            .catch((error: unknown) => {
+                messenger.notificationFlashMessage('error', __('aaxis.ontology.entity_manager.load_error'));
+                throw error;
+            });
+    }
+
+    /**
+     * "Add new system…" (the flow editor's "Add new connector…"): the Systems page opens in a NEW
+     * browser tab with its create form; on this window's next focus the list is reloaded and the new
+     * system is picked when exactly one appeared.
+     */
+    private addSystem(api: SelectPickerApi): void {
+        const known = new Set(api.values());
+        window.open(String(this.systemCreateUrl), '_blank');
+        $(window).off('focus.aaxisEntitySystemAdd').one('focus.aaxisEntitySystemAdd', () => {
+            void api.refresh().then(() => {
+                const fresh = api.values().filter(value => !known.has(value));
+                if (fresh.length === 1) {
+                    api.pick(fresh[0]);
+                }
+            });
+        });
     }
 
     /**
@@ -295,8 +347,17 @@ class OntologyEntityComponent extends BaseComponent {
         // the "Attributes" title and the Add attribute button stay in view.
         return [
             {
+                // A type-to-filter picker (like the flow editor's connector picker): "Add new
+                // system…" when the user may create one, and a refresh beside it.
                 key: 'systemId', label: __('aaxis.ontology.entity.system.label'), type: 'select',
-                required: true, options: this.systems, row: 'identity', width: '50%'
+                required: true, options: this.systems, row: 'identity', width: '50%',
+                picker: {
+                    placeholder: __('aaxis.ontology.entity_manager.system_filter_placeholder'),
+                    refresh: () => this.reloadSystems(),
+                    ...(this.systemCreateUrl
+                        ? {addNew: {label: __('aaxis.ontology.entity_manager.system_add'), onAdd: (api: SelectPickerApi) => this.addSystem(api)}}
+                        : {})
+                }
             },
             nameField,
             {

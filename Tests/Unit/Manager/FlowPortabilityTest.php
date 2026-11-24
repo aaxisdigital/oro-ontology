@@ -189,6 +189,18 @@ class FlowPortabilityTest extends TestCase
         ], $document['entities']);
     }
 
+    public function testComputedEntityNamesAreNeitherListedNorChecked(): void
+    {
+        $steps = [
+            ['type' => 'entity_read', 'name' => 'Dynamic', 'config' => ['system' => 'payload.s', 'system_dwl' => true, 'entity' => 'Order']],
+            ['type' => 'entity_write', 'name' => 'Half', 'config' => ['system' => 'Erp', 'entity' => 'payload.e', 'entity_dwl' => true]],
+        ];
+
+        $document = $this->portability->export((new OntologyFlow())->setName('Dyn')->setSteps($steps));
+
+        self::assertSame([], $document['entities']);
+    }
+
     public function testExportOfAnEmptyFlow(): void
     {
         $document = $this->portability->export((new OntologyFlow())->setName('Empty'));

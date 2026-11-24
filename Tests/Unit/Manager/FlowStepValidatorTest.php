@@ -120,6 +120,27 @@ class FlowStepValidatorTest extends TestCase
         self::assertSame(['Bad cron', 'Bad dwl', 'Both'], $this->validator->invalidStepNames($steps));
     }
 
+    public function testTheProblemReportNamesTheFieldsOnlyTheServerCanJudge(): void
+    {
+        $badDwl = 'invalid_dwl {"{{ name }}":"%s","{{ error }}":"Expected RIGHT_BRACE but got EOF \'\' at line 1, column 2"}';
+        $report = $this->validator->problemReport([
+            self::step('cron', ['mode' => 'cron', 'expression' => 'not a cron'], 'Bad cron'),
+            // Every failing DWL field, by config key; a missing destination is the editor's to show.
+            self::step('invoke', ['connector' => 1, 'path' => '{', 'path_dwl' => true, 'body_content' => '{', 'body_dwl' => true], 'Two'),
+            // A DWL field whose toggle is off is plain text — never judged.
+            self::step('logger', ['message' => '{', 'message_dwl' => false], 'Text'),
+            self::step('dwl_transform', ['code' => 'payload'], 'Missing only'),
+        ]);
+
+        self::assertSame(['Bad cron', 'Two', 'Missing only'], array_keys($report['errors']));
+        self::assertSame([
+            'Bad cron' => ['expression' => 'invalid_cron {"{{ name }}":"Bad cron"}'],
+            'Two' => ['body_content' => sprintf($badDwl, 'Two'), 'path' => sprintf($badDwl, 'Two')],
+        ], $report['fields']);
+        // The first problem stays the completeness one when the config is incomplete too.
+        self::assertSame('invalid_step_config {"{{ name }}":"Two"}', $report['errors']['Two']);
+    }
+
     /**
      * @dataProvider configurations
      */
@@ -221,6 +242,26 @@ class FlowStepValidatorTest extends TestCase
             'foreach reserved item' => ['foreach', ['subflow' => '4', 'array' => 'rows', 'item' => 'flowUuid'], false],
             'foreach without array' => ['foreach', ['subflow' => '4', 'item' => 'row'], false],
             'foreach without subflow' => ['foreach', ['array' => 'rows', 'item' => 'row'], false],
+            // Entity Read / Write: names picked or computed (`<key>_dwl`, booleans only).
+            'entity read computed names' => ['entity_read', ['destination' => 'x', 'system' => 'payload.s', 'system_dwl' => true, 'entity' => 'e', 'entity_dwl' => false], true],
+            'entity write computed entity' => ['entity_write', ['destination' => 'x', 'system' => 's', 'entity' => 'payload.e', 'entity_dwl' => true, 'content' => 'payload'], true],
+            'entity read name switch not bool' => ['entity_read', ['destination' => 'x', 'system' => 's', 'system_dwl' => 'yes', 'entity' => 'e'], false],
+            'entity write empty computed system' => ['entity_write', ['destination' => 'x', 'system' => ' ', 'system_dwl' => true, 'entity' => 'e', 'content' => 'payload'], false],
+            // Inner flows: invoked by step id (`inner`) instead of a flow id — exactly one target.
+            'call inner flow' => ['sub_flow', ['inner' => 'sabc123'], true],
+            'call inner flow and subflow' => ['sub_flow', ['inner' => 'sabc123', 'subflow' => 4], false],
+            'foreach over inner flow' => ['foreach', ['inner' => 'sabc123', 'array' => 'rows', 'item' => 'row'], true],
+            'inner flow empty' => ['inner_flow', [], true],
+            'inner flow children' => ['inner_flow', ['children' => ['s1', 's2']], true],
+            'inner flow children not a list' => ['inner_flow', ['children' => ['a' => 's1']], false],
+            'inner flow blank child' => ['inner_flow', ['children' => ['s1', '']], false],
+            'inner flow child twice' => ['inner_flow', ['children' => ['s1', 's1']], false],
+            'inner flow log event not bool' => ['inner_flow', ['log_event' => 'no'], false],
+            'inner flow false lanes' => ['inner_flow', ['children' => ['g', 'a'], 'branches' => ['g' => ['x', 'y']]], true],
+            'inner flow false lanes as a list' => ['inner_flow', ['children' => ['g'], 'branches' => [['x']]], false],
+            'inner flow false lane not a list' => ['inner_flow', ['children' => ['g'], 'branches' => ['g' => 'x']], false],
+            'inner flow element in two lanes' => ['inner_flow', ['children' => ['g', 'x'], 'branches' => ['g' => ['x']]], false],
+            'inner flow blank false-lane id' => ['inner_flow', ['children' => ['g'], 'branches' => ['g' => ['']]], false],
             'invoke php' => ['invoke_php', ['destination' => 'r', 'class' => 'A\\B', 'method' => 'm', 'params' => '{}'], true],
             'invoke php without params' => ['invoke_php', ['destination' => 'r', 'class' => 'A\\B', 'method' => 'm'], true],
             'invoke php structured params' => ['invoke_php', ['destination' => 'r', 'class' => 'A\\B', 'method' => 'm', 'params' => []], false],
@@ -263,6 +304,9 @@ class FlowStepValidatorTest extends TestCase
             'http path' => ['invoke', ['destination' => 'r', 'connector' => 1, 'path' => $broken, 'path_dwl' => true], false],
             'http path as text' => ['invoke', ['destination' => 'r', 'connector' => 1, 'path' => $broken, 'path_dwl' => false], true],
             'entity write content' => ['entity_write', ['destination' => 'w', 'system' => 's', 'entity' => 'e', 'content' => $broken, 'content_dwl' => true], false],
+            'entity read computed system' => ['entity_read', ['destination' => 'r', 'system' => $broken, 'system_dwl' => true, 'entity' => 'e'], false],
+            'entity write computed entity' => ['entity_write', ['destination' => 'w', 'system' => 's', 'entity' => $broken, 'entity_dwl' => true, 'content' => 'payload'], false],
+            'entity read picked name' => ['entity_read', ['destination' => 'r', 'system' => $broken, 'entity' => 'e'], true],
             'file write content' => ['file_write', ['destination' => 'f', 'connector' => 1, 'path' => 'p', 'content' => $broken, 'content_dwl' => true], false],
             'file path' => ['file_read', $file, false],
             'file path as text' => ['file_read', ['path_dwl' => false] + $file, true],

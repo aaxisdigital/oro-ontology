@@ -42,6 +42,19 @@ top-level "Aaxis" menu group). Independent of the other feature bundles.
 | `OntologyFlowEvent` | `aaxis_ontology_flow_events` | (v1_12 — REPLACED `OntologyDataEvent`/`aaxis_ontology_data_events`, dropped WITH its data) one row per flow-execution EVENT: flow_id/flow_uuid/flow_name (plain copies, NO FK — records survive flow rename/delete), `event` ∈ flow-start/flow-finish/subflow-start/subflow-finish/flow-exception/data-upsert/log-message/step, `datetime` TIMESTAMP(6) (microseconds — parallel consumers make insertion ids useless for ordering; the emit-time stamp is the truth; the ENTITY maps it as a STRING because Oro's global UTCDateTimeType hydrates `datetime` columns with a STRICT 'Y-m-d H:i:s' parse that rejects fractional seconds — the controller date_create()s the raw value for display, and mapping changes here need the doctrine.metadata.cache pools cleared), jsonb `payload`. Written ASYNCHRONOUSLY (topic `aaxis_ontology_flow_event` → `Async/OntologyFlowEventProcessor`, plain DBAL insert) so logging never blocks a run |
 | *(no entity — DBAL only)* | `aaxis_ontology_flow_runs` | (v1_14) the RUN INDEX, see "Run index" below: one row per run (PK flow_uuid), folded by the event consumer; what the Events page and the stale-debug sweep read |
 
+## Entities form: System picker (2026-11-24)
+
+The Entities create/edit form's System is RecordFormModal's type-to-filter `picker` (see
+oro-common's CLAUDE.md) — the flow editor's connector picker look: a filter box, "Add new
+system…" when the user may create systems (twig option `systemCreateUrl` =
+`path('aaxis_ontology_systems', {add: 1})` only when `is_granted('aaxis_ontology_system_create')`)
+and a refresh button. Refresh re-reads the systems through `aaxis_ontology_entity_list` (the page's
+own endpoint — no extra ACL) and keeps `this.systems`/`systemExternalById` in step for later
+`rebuildFields`. "Add new system…" opens the Systems page in a NEW tab; `?add=1` there opens the
+create form at once and is dropped from the URL (`openCreateFromUrl`, canCreate only). On this
+window's next `focus` the picker refreshes and picks the new system when exactly one appeared
+(the pick fires the field change, so internal/external re-shaping still applies).
+
 ## Data HTTP API (OAuth) — `Api/` + `Manager/OntologyDataApiManager`
 
 OAuth-authenticated REST endpoints over `OntologyData`, addressed by **system name + entity name**.
@@ -735,7 +748,8 @@ the ring stays for keyboard focus only. Do the same for new icon buttons. The dr
 (Triggers: cron/endpoint/entity change/Subflow (`subflow` — the ENTRY POINT of a callable
 subflow; a step TYPE, distinct from the flow TYPE 'subflow' and from the "Call Subflow" action
 `sub_flow`) · Flow Control: Choice (an "if")/Call Subflow (`sub_flow`)/Foreach Loop
-(`foreach`, IMPLEMENTED — see the step docs) · Operations: DWL transform/Entity
+(`foreach`, IMPLEMENTED — see the step docs)/Inner Flow (`inner_flow`, a CONTAINER — see the
+step docs) · Operations: DWL transform/Entity
 Read/Entity Write/HTTP Request/SQL Query/Invoke PHP (`invoke_php`, IMPLEMENTED — see the step
 docs) · File Operations:
 Read File/Write File/List Folder/Delete/Rename · Notification: Logger + Event + MS Teams
@@ -890,6 +904,21 @@ numbers numerically, strings lexically, id as tiebreaker); `by_attribute` reads 
 Oro column compared, a value the column type can't hold = no match) and yield the LIST of
 matches, [] when none. Validator: shared `$entityReadOk`/`$entityWriteOk` closures; executor:
 the `readEntity`/`writeEntity` arms.
+**COMPUTED ENTITY NAMES** (2026-11-24): System and Entity are each picked from the known names (a
+type-to-filter dropdown — `stringCombo` with `pickShowsAll`, entities following the picked
+system) OR, with the DWL switch inside the field's left end (the HTTP Request path's switch), a
+single-line DWL expression yielding the name at run time: config `system_dwl` / `entity_dwl`
+(stored only while ON, so existing configs are unchanged). Editor: `entityTargetSection()` +
+`entityNamePicker()` (the dropdown lives INSIDE the `createDwlInput` box and swaps with its
+input, so the switch stays put; the entity_change trigger keeps the old two selects —
+`systemEntitySection`). While either name is computed the entity's attributes are unknown, so
+the reader's Attribute / Order by become free-text inputs (`attribute-text` / `order-by-text`;
+`attributes()` returns null). Server: `FlowStepConfigRules::entityTargetOk` (both names filled,
+toggles bool), the four `[entity_read|entity_write, system|entity, <key>_dwl]` DWL_FIELDS
+(parse-checked, red fields), `FlowDebugExecutor::entityNames()` → `resolveDwlText()` (must
+yield non-empty text) in both arms, and `FlowPortability::entityRefs()` SKIPS a pair with a
+computed name (it can only be resolved at run time — not exported in `entities`, not checked on
+import).
 **The LEGACY generic reader/writer types are REMOVED** (they were these steps plus a type
 selector and a connector variant): v1_10's `ConvertLegacyReaderWriterSteps` migration rewrote
 stored flows — reader/entity → entity_read, writer/entity → entity_write, connector variants →
@@ -1027,6 +1056,70 @@ around the nested run (finally) so the caller's debug trail keeps CALLER step id
 nested failures are re-wrapped `Step "<caller step>": <inner message>`. The nested run's inner
 trigger step is a no-op (triggers are skipped as entry markers), and `touchLastExecuted/`
 `touchLastFinished` stamp the SUBFLOW row too (it ran).
+**inner_flow** ("Inner Flow", 2026-11-24) is a subflow DRAWN INSIDE the flow: a box with no ports
+holding an ordered row of elements, invoked ONLY by sub_flow/foreach (their pickers list the
+canvas's inner flows FIRST, label jsmessage `inner_flow_option`, via `invokeTargets()` — never the
+box holding the step itself). MODEL: membership + order live in the CONTAINER's config,
+`children: [step ids]` (config, not a design-only key, because every executor input — debug
+payload, `FlowDesignParserTrait`, `normalizeDesignSteps` — keeps only {id, type, name, config});
+the elements are ordinary steps in `steps`/`design.steps`; the chain between them is DERIVED,
+never stored in `links`. A caller stores `inner: <container step id>` INSTEAD of `subflow`
+(`FlowStepConfigRules::targetOk` = exactly one of the two; `invokeKeyOf`/`invokeConfig` map the
+picker keys `inner:<id>`/`flow:<id>`). Ids, not names, so renames are free; the server cannot check
+an `inner` target on SAVE (logical steps carry no ids), so the editor paints a caller red itself
+(`innerRefBroken()`, folded into `applyInvalidStepNames()`, re-run when a box is removed), and the
+EXECUTOR's run gate checks it (`innerFlowProblem()` in `assertRunnable`: target exists and is an
+inner_flow; children exist, are not triggers/inner_flows, and no element sits in two boxes).
+Portability needs nothing: ids travel inside the design, and `subflow` ⇄ `subflowRef` only
+rewrites the `subflow` key. EDITOR: `portCount('inner_flow') = 0`; box = 2 tiles tall × max(2
+tiles, pad + n·(tile+pad)) wide with pad = half a tile (`innerBoxSize`, `stepSize()` — use it
+instead of `tileSize` wherever a FOOTPRINT matters: obstacles, canvas extent, marquee, Organize);
+`layoutInner()` places the elements and draws the automatic arrows INSIDE the box's own svg
+(`data-role="inner-wires"`, entry arrow + one per pair, green after a Choice — port 0); boxes are
+inserted right AFTER the wires svg so every tile paints above them. **FALSE LANES**
+(2026-11-24): every Choice in a box has a false lane — config `branches: {<choice id>: [ids]}`
+(only non-empty lanes stored, so boxes without any keep `{children}`; `innerLanesConfig`), laid
+out by `innerGrid()` as a cell grid: main row on row 0, each lane starting right BELOW its Choice
+on the first row where it fits and the red line (`data-branch="not-matched"`) drops straight to
+it; an EMPTY lane keeps one dashed slot (`data-role="inner-slot"`) as its drop target; Choices are
+handled right to left (depth first) so a left lane always passes below the right ones (a hopeless
+nesting crosses instead of looping). Box = 2 tiles tall + one tile+pad per extra row. Drops go
+through `innerDropTarget()` (the row's lane whose span — one slot past its end — holds the point,
+else the row's nearest, else the main row); a Choice moving within its box keeps its lane but can't
+go into it (`laneWithin`, flash `inner_flow_branch_cycle`); a Choice LEAVING (drag out / remove)
+leaves its lane in its place (`detachFromInner`). Server: `FlowStepConfigRules::childrenOk`
+(lists, ids once across all lanes) and `FlowDebugExecutor::innerChain()` — the ONE place an inner
+flow becomes steps + links (lanes chained on port 0, a lane hangs off its Choice's port 1; null =
+unrunnable: element missing/trigger/inner_flow, held twice, or a lane nothing reaches), used by both
+the run gate and `resolveInnerTarget`. Elements
+get `is-inner-child` (ports hidden by CSS, link drags refused, no anchor/Start-here menus).
+Gestures: a toolbox drop inside a box → `dropIntoInner()` at `innerInsertIndex()` (count of
+elements whose center is left of the release x); a SINGLE dragged step released inside a box joins
+it (`endStepDrag` → `attachToInner()`, dropping its own links + Start marker; a re-drop in its own
+box re-orders; `moved` guards plain clicks), an element released outside its box is detached and
+stays where it was dropped, unconnected; triggers/boxes released over a box go back to `origin`
+(flash `inner_flow_not_allowed`). An element always drags ALONE; a dragged box carries its
+elements (`dragGroup`). Remove on a box removes its elements; Copy brings them along
+(`copyableSelection`); paste re-points children and `inner` refs (`remapPastedInner`: pasted box
+→ new id, else the original box on this canvas, else cleared + red). `normalizeInnerFlows()`
+(restore + paste) is LENIENT — it drops bad children, links touching boxes/elements and a Start
+marker on them instead of reporting "corrupted". Reachability follows invocations (a reachable
+sub_flow/foreach makes its box + elements reachable, transitively). Context menu: "Go to inner
+flow" on callers, "Called by" (this canvas's callers) on boxes. EXECUTOR: `runInnerFlow` /
+`foreachInnerFlow` re-enter `execute()` with [container, ...children] and the derived chain
+(`resolveInnerTarget`; `indexSteps` falls back to a leading inner_flow as the BFS root) and
+`runInfo.inner` = the box name — an inner run skips `assertRunnable` and the
+last_executed/last_finished stamps (a nested last_finished would mark the flow idle mid-run),
+emits subflow-start/-finish under the SAME flow with `inner` in the payload (Events summary
+"subflow — <box>"), keeps the caller's canvas (`$canvasSteps`, `execute()`'s 8th param) so inner
+flows can call sibling inner flows, and MERGES its executed ids into the caller's trail (same
+canvas — no subflowTrails). Cycle guard: `innerKey()` = `inner:<owner flow id>:<box id>` on
+`subflowStack`. A failing element surfaces as `InnerFlowFailure` → `failedStepId()` paints the
+ELEMENT red, not the invoker. DEBUG: `openInnerFrame()` pushes a frame on the caller's flow with
+`inner {key,id,name}`, `canvas` and `canvasDepth`; responses carry `frame.canvasDepth` + `innerId`
+(flowName = the box name), `debugFrameKey()` keys marks by canvasDepth so inner frames paint the
+SAME tab, `isRootCanvas()` decides rootExecuted vs trails, a stepped-OVER inner invoker returns
+the inner ids in its own `executedIds`, and a 'reentered' inner tick wipes only that box's marks.
 Every visibility
 toggle calls `reposition()` and the panel is viewport-capped (`max-height` + scrolling middle) so
 Cancel/Confirm always stay reachable. The modal blocks Confirm on missing
@@ -1043,6 +1136,23 @@ config is NOT a free pass: `isStepConfigValid` swaps it for `[]` and runs the ty
 freshly-dropped dwl_transform/choice/file op/… is exactly as red and run-blocking as a
 half-confirmed one (triggers pass via `$onlyEnabled()`, parameterless placeholders via the
 default arm) — the editor pre-marks those drops red client-side via `REQUIRES_CONFIG`.
+**RED FIELDS** (2026-11-24): opening the popup of a RED tile paints its wrong fields with a red
+border (`aaxis-flow-editor__field--invalid`, the problem as the field's tooltip — the field's own
+title is kept in `data-title-before` and restored), re-evaluated live on input/change/focusout/
+pointer events (after the catalogs' `ready` — selects are empty before). Green tiles are never
+painted. Two sources, merged by config KEY in `paintFieldProblems()`: (1) every section declares
+its rules ONCE as ordered `[configKey, () => message]` pairs via `ruled()`, which yields both the
+old `error()` (first message — unchanged semantics) and `problems()` (all failing keys), plus
+`fields` (config key → the control: a DWL field's `$textarea`, a combo's input, the connector
+picker's VISIBLE filter via `connectorFilter()`); (2) what only the SERVER can judge — DWL that
+does not parse, an invalid cron expression — comes as `invalidFields` (per step NAME: key →
+message; `FlowStepValidator::problemReport()` computes errors + fields in one pass, the serializer
+ships both; `(object)` so an empty map is `{}`), lands on `PlacedStep.serverProblems`
+(`applyInvalidStepNames(names, fields)`; stashed per tab as `fieldProblems`; refreshed from save
+responses) and applies to a key only while its value is unchanged (`sameConfigValue`). A confirm
+keeps the unchanged server keys and stays RED with them (it used to turn a tile with broken DWL
+green until the next save). New section rules: add them to the section's `ruled([...])` list and
+its control to `fields`, or the popup cannot point at them.
 **Flow HISTORY** (`aaxis_ontology_flow_history`, v1_11 + installer): every editor save of an
 EXISTING flow first hands the replaced definition to `Manager/FlowHistoryArchiver` (hooked in
 OntologyFlowController::save() — the pre-payload name/steps/design are snapshotted at the top of
@@ -1245,6 +1355,38 @@ the later one wins on a tile carrying two):
 - A FAILED step is LIGHT RED (`is-debug-failed`), in Run Now and Debug alike, with the error text
   in the sidebar.
 
+**VARIABLES PANE LIMIT** (2026-11-24): the pane shows at most 100 entries per object/array (at any
+depth, the top level included) and then "… N more — use the DWL evaluator" (`debug_more_items`).
+The server sends the pane only a PREVIEW: `Manager/DebugContextPreview::of()` cuts every array
+over `LIMIT` (100) to its first entries and returns `truncated` = JSON Pointer → true size
+(RFC 6901, "" = the whole context) beside `context` (debug-step) / `output` (Run Now); the FULL
+context stays in the session blob, so the evaluator still sees everything. The editor
+(`renderVariablesList(context, truncated)` → `jsonTreeNode(…, TreeLimit)`) shows the true
+size in the collapsed preview, and cuts what it renders itself too. The evaluator's result dialog
+(`renderJsonTree`) is NOT limited — that is where the user looks at something specific.
+**DEBUG BREAKPOINTS** (2026-11-24): the tile menu's "Debug Breakpoint" (`menu_breakpoint`, a
+toggle shown active while set; not on triggers or inner-flow boxes — `canBreak()`) puts a red
+dot on the tile (`has-breakpoint` ::before). Breakpoints are a WORKSPACE preference like the
+toolbox spot, never flow state: localStorage `aaxis.ontology.flowEditor.breakpoints` =
+{"<flow id>": [step ids]}, in memory (`this.breakpoints`, stashed per tab) for a never-saved
+flow until its first save (save / Save all then store them). Toggling never dirties the flow;
+removing a step drops its breakpoint; restore drops stale ids. Only the Debug MODE honors
+them: every debug-step request carries `breakpoints` = `debugBreakpointMap()`: 'root' (the
+debugged flow and its inner flows) plus each subflow REACHABLE from it (sub_flow/foreach
+`subflow` targets, transitively through the catalog records) that has stored ones — read per
+request, so a breakpoint added mid-session counts. Starting Debug with a non-empty map runs
+straight to the first breakpoint (runAll); Continue (runAll) stops BEFORE the next step carrying
+one: `FlowDebugExecutor::breakpointAhead()` checks `upcomingStep()` against the map under the
+top frame's canvas key ('root' via `isRootCanvas`, else the subflow id). While any breakpoint is
+set, runAll steps INTO every invoker (frame by frame — slower, but a breakpoint inside a subflow
+or inner flow is reachable); without breakpoints it still steps OVER atomically. The response
+then carries `breakpoint` {id,name,type} (status "paused at breakpoint …", no visit animation —
+trails are stored silently) and runAll responses now ACCUMULATE: `executedIds` = everything the
+walk ran on the canvas of the frame it ended in (before 2026-11-24 only the LAST tick's ids came
+back, so Run all painted just the final step), `rootExecutedIds` = the debugged flow's own (kept
+in `marksByFlow.root` when the pause is inside a subflow). Entry steps consumed by enter/re-enter
+ticks (a subflow's trigger, an inner box) are credited to their canvas (`creditEntry`). Step out
+and single ticks ignore breakpoints; Run Now and the real triggers too.
 Both debug endpoints return `executedIds` (this call's successful trail —
 `FlowDebugExecutor::lastExecutedIds()`, reset per execute/tick) and, on a step failure,
 `failedStepId` + `executedIds` via `Exception/FlowStepFailure`. EVERY step error is wrapped —

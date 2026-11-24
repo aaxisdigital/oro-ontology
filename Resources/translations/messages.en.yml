@@ -134,6 +134,8 @@ aaxis:
                     label: 'Flow Control: Call Subflow'
                 foreach:
                     label: 'Flow Control: Foreach Loop'
+                inner_flow:
+                    label: 'Flow Control: Inner Flow'
                 dwl_transform:
                     label: 'Operations: DWL transform'
                 entity_read:
@@ -434,6 +436,7 @@ aaxis:
                     choice: 'Choice'
                     sub_flow: 'Call Subflow'
                     foreach: 'Foreach Loop'
+                    inner_flow: 'Inner Flow'
                     entity_read: 'Entity Read'
                     entity_write: 'Entity Write'
                     invoke: 'HTTP Request'

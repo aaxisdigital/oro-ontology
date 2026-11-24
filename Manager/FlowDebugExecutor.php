@@ -12,6 +12,7 @@ use Aaxis\Bundle\OntologyBundle\Async\Topic\OntologyHttpRequestTopic;
 use Aaxis\Bundle\OntologyBundle\Exception\ConnectorRequestFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowExecutionFailure;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
+use Aaxis\Bundle\OntologyBundle\Exception\InnerFlowFailure;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologySystem;
 use Aaxis\Bundle\OntologyBundle\Exception\OntologyApiException;
 use Doctrine\Persistence\ManagerRegistry;
@@ -62,8 +63,23 @@ class FlowDebugExecutor
     /** @var array<int, string> step ids the LAST run executed successfully, in order */
     private array $lastExecutedIds = [];
 
-    /** @var array<int, int> flow ids currently on the CALL SUBFLOW stack (cycle/depth guard) */
+    /**
+     * What is currently on the CALL stack (cycle/depth guard): subflow ids, and `inner:<flow>:<id>`
+     * keys for the inner flows being run ({@see innerKey()}).
+     *
+     * @var array<int, int|string>
+     */
     private array $subflowStack = [];
+
+    /**
+     * The steps of the CANVAS the running steps belong to — the whole flow (or subflow) design.
+     * An INNER FLOW is a container drawn on that canvas: a Call Subflow / Foreach Loop pointing at
+     * one (`inner` = the container's step id) resolves it here, and its run keeps the canvas, so an
+     * inner flow can call a sibling inner flow too.
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private array $canvasSteps = [];
 
     /**
      * The nested subflow trails of the CURRENT top-level run: [{flowId, flowName, executedIds}],
@@ -88,6 +104,9 @@ class FlowDebugExecutor
     private const string VARIABLE_UNDEFINED = 'Step "%s": the variable "%s" is not defined.';
     private const string TOO_DEEP = 'Step "%s": subflow calls nested deeper than 10 levels.';
     private const string CIRCULAR = 'Step "%s": circular subflow call — "%s" is already running in this execution.';
+    private const string INNER_GONE = 'Step "%s": the configured inner flow no longer exists.';
+    private const string INNER_BROKEN = 'Step "%s": this inner flow holds an element it cannot run (missing, a trigger, another inner flow or one held twice).';
+    private const string INNER_UNREADABLE = 'Step "%s": the inner flow "%s" holds an element it cannot run (missing, a trigger or another inner flow).';
 
     public function __construct(
         private readonly OntologyDataApiManager $dataApi,
@@ -117,9 +136,149 @@ class FlowDebugExecutor
     private function assertRunnable(array $steps): void
     {
         $problems = $this->stepValidator->validate($steps);
-        if ($problems !== []) {
-            throw new FlowExecutionFailure($problems[0]);
+        $problem = $problems[0] ?? self::innerFlowProblem($steps);
+        if ($problem !== null) {
+            throw new FlowExecutionFailure($problem);
         }
+    }
+
+    /**
+     * The first INNER FLOW problem of a canvas — null when every Call Subflow / Foreach Loop
+     * pointing at an inner flow finds it, and every inner flow holds only runnable elements (each
+     * at most once across the canvas). The editor never produces anything else; this keeps a
+     * hand-edited or imported design from failing halfway through a run.
+     *
+     * @param array<int, array<string, mixed>> $steps the whole canvas
+     */
+    private static function innerFlowProblem(array $steps): ?string
+    {
+        $byId = [];
+        foreach ($steps as $step) {
+            $byId[(string) ($step['id'] ?? '')] = $step;
+        }
+        $owned = [];
+        foreach ($steps as $step) {
+            $config = \is_array($step['config'] ?? null) ? $step['config'] : [];
+            if (\in_array($step['type'], ['sub_flow', 'foreach'], true) && self::targetsInner($config)
+                && (($byId[(string) $config['inner']]['type'] ?? null) !== 'inner_flow')
+            ) {
+                return sprintf(self::INNER_GONE, $step['name']);
+            }
+            if ($step['type'] !== 'inner_flow') {
+                continue;
+            }
+            $chain = self::innerChain($step, $byId);
+            if ($chain === null) {
+                return sprintf(self::INNER_BROKEN, $step['name']);
+            }
+            foreach ($chain[2] as $childId) {
+                if (isset($owned[$childId])) {
+                    return sprintf(self::INNER_BROKEN, $step['name']); // held by another inner flow too
+                }
+                $owned[$childId] = true;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * An inner flow as a runnable chain: its container first (the entry marker), then every
+     * element — the main row (`children`) linked one after the other on port 0, and from every
+     * Choice holding a FALSE lane (`branches[<choice id>]`) a port-1 link into that lane, chained
+     * the same way (lanes nest). Null when the structure cannot run: an element missing, a trigger
+     * or another inner flow, one held twice, or a false lane nothing reaches (its key is no Choice
+     * of this inner flow).
+     *
+     * @param array<string, mixed>                $container
+     * @param array<string, array<string, mixed>> $byId the canvas steps by id
+     *
+     * @return array{0: array<int, array<string, mixed>>, 1: array<int, array{from: string, fromPort: int, to: string}>, 2: array<int, string>}|null
+     *         [steps, links, element ids]
+     */
+    private static function innerChain(array $container, array $byId): ?array
+    {
+        $config = \is_array($container['config'] ?? null) ? $container['config'] : [];
+        $branches = self::innerBranches($config);
+        $steps = [$container];
+        $links = [];
+        $seen = [];
+        $lane = static function (string $from, int $fromPort, array $ids) use (&$lane, &$steps, &$links, &$seen, $byId, $branches): bool {
+            $previous = $from;
+            $port = $fromPort;
+            foreach ($ids as $id) {
+                $child = $byId[$id] ?? null;
+                if (isset($seen[$id]) || !self::isInnerRunnable($child)) {
+                    return false;
+                }
+                $seen[$id] = true;
+                $steps[] = $child;
+                $links[] = ['from' => $previous, 'fromPort' => $port, 'to' => $id];
+                if ($child['type'] === 'choice' && isset($branches[$id]) && !$lane($id, 1, $branches[$id])) {
+                    return false;
+                }
+                $previous = $id;
+                $port = 0;
+            }
+
+            return true;
+        };
+        $members = \count(self::innerChildren($config)) + array_sum(array_map('count', $branches));
+        if (!$lane((string) $container['id'], 0, self::innerChildren($config)) || \count($seen) !== $members) {
+            return null;
+        }
+
+        return [$steps, $links, array_map('strval', array_keys($seen))];
+    }
+
+    /** Whether a Call Subflow / Foreach Loop config points at an inner flow (vs a subflow). */
+    private static function targetsInner(array $config): bool
+    {
+        return is_scalar($config['inner'] ?? null) && (string) $config['inner'] !== '';
+    }
+
+    /**
+     * An inner flow's element ids, in execution order (the editor keeps `children` in config).
+     *
+     * @param array<string, mixed> $config
+     *
+     * @return array<int, string>
+     */
+    private static function innerChildren(array $config): array
+    {
+        $children = $config['children'] ?? [];
+
+        return \is_array($children) ? array_values(array_map('strval', array_filter($children, 'is_scalar'))) : [];
+    }
+
+    /**
+     * An inner flow's FALSE lanes (editor-managed `branches`): Choice id → its element ids.
+     *
+     * @param array<string, mixed> $config
+     *
+     * @return array<string, array<int, string>>
+     */
+    private static function innerBranches(array $config): array
+    {
+        $branches = $config['branches'] ?? [];
+        if (!\is_array($branches) || ($branches !== [] && array_is_list($branches))) {
+            return [];
+        }
+        $lanes = [];
+        foreach ($branches as $choice => $ids) {
+            if (\is_array($ids)) {
+                $lanes[(string) $choice] = array_values(array_map('strval', array_filter($ids, 'is_scalar')));
+            }
+        }
+
+        return $lanes;
+    }
+
+    /** A step an inner flow may hold: anything but a trigger or another inner flow. */
+    private static function isInnerRunnable(?array $step): bool
+    {
+        return $step !== null && $step['type'] !== 'inner_flow'
+            && !\in_array($step['type'], OntologyFlow::TRIGGER_STEP_TYPES, true);
     }
 
     /**
@@ -134,6 +293,8 @@ class FlowDebugExecutor
     {
         return array_filter([
             'trigger' => (string) ($runInfo['trigger'] ?? 'debug'),
+            // An INNER FLOW run (subflow-start of a container drawn on the caller's canvas).
+            'inner' => \is_string($runInfo['inner'] ?? null) ? $runInfo['inner'] : null,
             'user' => \is_array($runInfo['user'] ?? null) ? $runInfo['user'] : null,
         ], static fn ($v) => $v !== null);
     }
@@ -147,17 +308,28 @@ class FlowDebugExecutor
      * @param string|null          $executionUuid the CALLER's execution uuid — sub-flows never mint
      *                                            their own, they inherit it; null (a top-level run)
      *                                            mints a fresh one
+     * @param array<int, array<string, mixed>>|null $canvasSteps the whole canvas the steps belong
+     *                                            to — given only for an INNER FLOW run, whose
+     *                                            $steps are just its container + elements
      *
      * @return array<string, mixed> the accumulated output context
      *
      * @throws \RuntimeException with a user-readable message when a step cannot execute
      *                           ({@see FlowStepFailure} for a failing step)
      */
-    public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null, ?array $seedContext = null, array $runInfo = []): array
+    public function execute(array $steps, array $links, array $input, ?OntologyFlow $flow = null, ?string $executionUuid = null, ?array $seedContext = null, array $runInfo = [], ?array $canvasSteps = null): array
     {
-        $this->assertRunnable($steps);
+        // An INNER FLOW run is a part of its caller's run, on the caller's canvas: the canvas was
+        // validated as a whole when the run started, and the flow row's running-state stamps
+        // belong to the outer run (stamping last_finished here would mark the flow idle mid-run).
+        $isInner = isset($runInfo['inner']);
+        if (!$isInner) {
+            $this->assertRunnable($steps);
+        }
         $order = $this->executionOrder($steps, $links);
-        $this->touchLastExecuted($flow);
+        if (!$isInner) {
+            $this->touchLastExecuted($flow);
+        }
 
         // One uuid identifies the WHOLE execution: every writer stamps its upsert with it (all
         // events/records of a run group under it), and steps can read it from the context as
@@ -183,6 +355,8 @@ class FlowDebugExecutor
         // the caller continues with the result (shared-context semantics).
         $context = $seedContext ?? $this->initialContext($order[0], $input, $executionUuid);
         $this->lastExecutedIds = [];
+        $outerCanvas = $this->canvasSteps;
+        $this->canvasSteps = $canvasSteps ?? $steps;
         try {
             // The order is re-derived after every choice: its verdict (just recorded in the
             // context) extends the walk with the branch it picked — or ends it, when the picked
@@ -201,7 +375,10 @@ class FlowDebugExecutor
         } finally {
             // finally, not a happy-path call: a failed run must still release the "running" state
             // or the flow would be blocked from ever being scheduled again.
-            $this->touchLastFinished($flow);
+            if (!$isInner) {
+                $this->touchLastFinished($flow);
+            }
+            $this->canvasSteps = $outerCanvas;
         }
         if (!$quiet) {
             $this->flowEvents->emit($flow, $executionUuid, $isNested ? 'subflow-finish' : 'flow-finish');
@@ -246,7 +423,7 @@ class FlowDebugExecutor
         try {
             $this->executeStep($step, $context, $flow, $executionUuid);
         } catch (\Throwable $e) {
-            throw new FlowStepFailure(self::stepErrorMessage($step, $e), $step['id'], $this->lastExecutedIds, $e);
+            throw new FlowStepFailure(self::stepErrorMessage($step, $e), self::failedStepId($step, $e), $this->lastExecutedIds, $e);
         }
         $this->lastExecutedIds[] = $step['id'];
         // Every executed step leaves one event — the run's step-by-step trail — unless its
@@ -254,6 +431,17 @@ class FlowDebugExecutor
         if (self::logsEvents($step, $quietRun)) {
             $this->flowEvents->emit($flow, $executionUuid, 'step', ['name' => $step['name'], 'type' => $step['type']]);
         }
+    }
+
+    /**
+     * The step a failure is painted on: the step itself — or, when it invoked an INNER FLOW (drawn
+     * on the same canvas), the inner element that actually failed.
+     *
+     * @param array{id: string} $step
+     */
+    private static function failedStepId(array $step, \Throwable $e): string
+    {
+        return $e instanceof InnerFlowFailure ? $e->stepId : $step['id'];
     }
 
     /**
@@ -269,7 +457,8 @@ class FlowDebugExecutor
      */
     private static function logsEvents(array $step, bool $quietRun = false): bool
     {
-        if (\in_array($step['type'] ?? null, OntologyFlow::TRIGGER_STEP_TYPES, true)) {
+        // An inner flow's container opens its run like a subflow's trigger (no switch of its own).
+        if (\in_array($step['type'] ?? null, OntologyFlow::TRIGGER_STEP_TYPES, true) || ($step['type'] ?? null) === 'inner_flow') {
             return !$quietRun;
         }
 
@@ -298,14 +487,20 @@ class FlowDebugExecutor
      *    step — it is only now complete).
      *
      * With $runAll the ticks loop to the end in one call (per-subflow trails are aggregated for
-     * the editor's visit animation instead of transitions).
+     * the editor's visit animation instead of transitions) — or, with DEBUG BREAKPOINTS, until
+     * the next step to execute carries one ({@see breakpointAhead()}; the response then names it
+     * under `breakpoint`).
+     *
+     * @param array<string, array<int, string>> $breakpoints per canvas — 'root' (the debugged flow
+     *                                                       and its inner flows) or a subflow's id —
+     *                                                       the step ids to pause BEFORE
      *
      * @return array{blob: array<string, mixed>, response: array<string, mixed>}
      *
      * @throws FlowStepFailure when a step fails (the response fields ride on the exception via
      *                         its public properties; flow-exception events are emitted here)
      */
-    public function debugWalk(array $steps, array $links, array $input, ?array $blob, ?OntologyFlow $flow = null, bool $runAll = false, array $runInfo = [], bool $stepInto = true, bool $stepOut = false): array
+    public function debugWalk(array $steps, array $links, array $input, ?array $blob, ?OntologyFlow $flow = null, bool $runAll = false, array $runInfo = [], bool $stepInto = true, bool $stepOut = false, array $breakpoints = []): array
     {
         $this->touchLastExecuted($flow);
         try {
@@ -318,7 +513,7 @@ class FlowDebugExecutor
 
             $response = $stepOut && \count($blob['frames']) > 1
                 ? $this->debugStepOut($blob)
-                : $this->debugStep($blob, $runAll, $stepInto);
+                : $this->debugStep($blob, $runAll, $stepInto, $breakpoints);
             unset($response['rootExecuted'], $response['_overTrails']);
             $response['context'] = $blob['context'];
             // What the NEXT tick would execute — the editor shows "Step into" when it is a
@@ -388,24 +583,63 @@ class FlowDebugExecutor
      *
      * @return array<string, mixed>
      */
-    private function debugStep(array &$blob, bool $runAll, bool $stepInto): array
+    private function debugStep(array &$blob, bool $runAll, bool $stepInto, array $breakpoints = []): array
     {
         $trails = [];
+        $rootRan = [];
+        $paused = null;
         do {
-            // Run all steps OVER subflows (atomic — fewer ticks, identical events/trails);
-            // a single tick honors the caller's choice: step INTO or OVER the invoker.
-            $response = $this->debugTick($blob, $trails, !$runAll && $stepInto);
-        } while ($runAll && !$blob['done'] && \count($blob['frames'] ?? []) > 0);
+            // Run all steps OVER subflows (atomic — fewer ticks, identical events/trails) — but
+            // with breakpoints set it descends INTO every invoker, so one inside a subflow or an
+            // inner flow is reached too. A single tick honors the caller's choice.
+            $response = $this->debugTick($blob, $trails, $runAll ? $breakpoints !== [] : $stepInto);
+            $rootRan = array_merge($rootRan, $response['rootExecuted'] ?? []);
+            if ($runAll && $breakpoints !== []) {
+                $paused = $this->breakpointAhead($blob, $breakpoints);
+            }
+        } while ($runAll && $paused === null && !$blob['done'] && \count($blob['frames'] ?? []) > 0);
 
         if ($runAll) {
             $response['subflowTrails'] = array_values($trails);
-            $response['executedIds'] = $response['rootExecuted'] ?? [];
+            // Everything the walk ran on the canvas of the frame it ENDED in (what the editor
+            // shows next) — and the debugged flow's own canvas apart, for a pause inside a subflow.
+            $rootRan = array_values(array_unique($rootRan));
+            $top = $blob['frames'][\count($blob['frames']) - 1] ?? null;
+            $response['executedIds'] = $top === null || self::isRootCanvas($top)
+                ? $rootRan
+                : ($trails[(int) $top['flowId']]['executedIds'] ?? []);
+            $response['rootExecutedIds'] = $rootRan;
+            if ($paused !== null) {
+                $response['breakpoint'] = $paused;
+            }
         } elseif (($response['_overTrails'] ?? []) !== []) {
             // A stepped-OVER invoker: its nested trails feed the editor's visit animation.
             $response['subflowTrails'] = $response['_overTrails'];
         }
 
         return $response;
+    }
+
+    /**
+     * The step the walk would execute next when it carries a breakpoint on ITS canvas — 'root'
+     * for the debugged flow and its inner flows, else the subflow's id — null otherwise (or when
+     * the next tick is a return/re-enter, or the run is done).
+     *
+     * @param array<string, mixed>              $blob
+     * @param array<string, array<int, string>> $breakpoints
+     *
+     * @return array{id: string, name: string, type: string}|null
+     */
+    private function breakpointAhead(array $blob, array $breakpoints): ?array
+    {
+        $next = $this->upcomingStep($blob);
+        if ($next === null) {
+            return null;
+        }
+        $top = $blob['frames'][\count($blob['frames']) - 1];
+        $canvas = self::isRootCanvas($top) ? 'root' : (string) $top['flowId'];
+
+        return \in_array($next['id'], $breakpoints[$canvas] ?? [], true) ? $next : null;
     }
 
     /**
@@ -459,7 +693,7 @@ class FlowDebugExecutor
         // A subflow invoker DESCENDS when stepping INTO; stepping OVER falls through to the
         // atomic arm below (callSubflow/foreachSubflow — events and trails as a full run).
         if ($stepInto && \in_array($step['type'], ['sub_flow', 'foreach'], true)) {
-            return $this->debugEnterFrame($blob, $step, $executionUuid);
+            return $this->debugEnterFrame($blob, $step, $executionUuid, $trails);
         }
 
         // A plain step (or a stepped-OVER invoker): execute it against the shared context.
@@ -467,13 +701,18 @@ class FlowDebugExecutor
         if ($this->subflowStack === []) {
             $this->subflowTrails = []; // per-tick: a stepped-over invoker reports ITS trails
         }
+        // Inner flows resolve against the frame's canvas (an inner frame keeps its caller's).
+        $this->canvasSteps = $frame['canvas'] ?? $frame['steps'];
         try {
             $this->executeStep($step, $context, $frameFlow, $executionUuid);
         } catch (\Throwable $e) {
             $message = self::stepErrorMessage($step, $e);
             $this->emitDebugException($blob, $message, $executionUuid);
-            throw new FlowStepFailure($message, $step['id'], [], $e);
+            throw new FlowStepFailure($message, self::failedStepId($step, $e), $this->lastExecutedIds, $e);
         }
+        // A stepped-OVER invoker of an INNER flow ran its elements on THIS canvas: they are part of
+        // the tick's trail (subflows, on other canvases, travel as trails instead).
+        $innerIds = $this->lastExecutedIds;
         $tickOverTrails = array_values($this->subflowTrails);
         $this->mergeSubflowTrails($trails);
         if (self::logsEvents($step, (bool) ($frame['quiet'] ?? false))) {
@@ -483,8 +722,9 @@ class FlowDebugExecutor
             ]);
         }
         $frame['index']++;
-        if ($frame['kind'] !== 'flow') {
-            $this->recordDebugTrail($trails, $frame, [$step['id']]);
+        $ranIds = array_merge($innerIds, [$step['id']]);
+        if (!self::isRootCanvas($frame)) {
+            $this->recordDebugTrail($trails, $frame, $ranIds);
         }
 
         // A CHOICE extends the walk with the branch its verdict just picked (the pre-verdict
@@ -501,8 +741,8 @@ class FlowDebugExecutor
             $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'flow-finish');
         }
 
-        return $this->debugResponse($blob, $step, $order, null) + [
-            'rootExecuted' => $frame['kind'] === 'flow' ? [$step['id']] : [],
+        return $this->debugResponse($blob, $step, $order, null, $ranIds) + [
+            'rootExecuted' => self::isRootCanvas($frame) ? $ranIds : [],
             // Only a stepped-OVER invoker carries trails on ITS OWN tick (the visit animation);
             // in-frame walk bookkeeping must not — it made the editor bounce home every step.
             '_overTrails' => $tickOverTrails,
@@ -536,7 +776,7 @@ class FlowDebugExecutor
      * @param array<string, mixed> $blob
      * @param array<string, mixed> $step
      */
-    private function debugEnterFrame(array &$blob, array $step, string $executionUuid): array
+    private function debugEnterFrame(array &$blob, array $step, string $executionUuid, array &$trails = []): array
     {
         $config = \is_array($step['config']) ? $step['config'] : [];
 
@@ -563,14 +803,35 @@ class FlowDebugExecutor
         $blob['frames'][] = $frame;
         $trigger = $subOrder[0];
         if (!$frame['quiet']) {
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', self::frameStartPayload($frame));
             $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
                 'name' => $trigger['name'],
                 'type' => $trigger['type'],
             ]);
         }
 
-        return $this->debugResponse($blob, $trigger, $subOrder, 'entered') + ['rootExecuted' => []];
+        return $this->debugResponse($blob, $trigger, $subOrder, 'entered') + ['rootExecuted' => $this->creditEntry($frame, $trigger, $trails)];
+    }
+
+    /**
+     * Credits a frame's entry step (the subflow's trigger / the inner flow's container, consumed
+     * by an enter or re-enter tick) to the canvas it is drawn on: the root ids it adds (an inner
+     * flow of the debugged flow), or — for another canvas — the walk's per-subflow trails.
+     *
+     * @param array<string, mixed>            $frame
+     * @param array<string, mixed>            $entry
+     * @param array<int, array<string,mixed>> $trails
+     *
+     * @return array<int, string>
+     */
+    private function creditEntry(array $frame, array $entry, array &$trails): array
+    {
+        if (self::isRootCanvas($frame)) {
+            return [$entry['id']];
+        }
+        $this->recordDebugTrail($trails, $frame, [$entry['id']]);
+
+        return [];
     }
 
     /**
@@ -587,6 +848,9 @@ class FlowDebugExecutor
     {
         if (\count($frames) >= 10) {
             throw new FlowExecutionFailure(sprintf(self::TOO_DEEP, $step['name']));
+        }
+        if (self::targetsInner($config)) {
+            return $this->openInnerFrame($frames, $step, $config);
         }
         [$id, $target, $subStepsRaw, $subLinksRaw] = $this->resolveSubflowTarget($step['name'], $config);
         foreach ($frames as $open) {
@@ -614,6 +878,67 @@ class FlowDebugExecutor
     }
 
     /**
+     * The frame a sub_flow/foreach opens on an INNER FLOW: the caller's canvas and flow (the inner
+     * flow is drawn there — `canvasDepth` tells the editor which canvas the frame paints on), the
+     * container + elements as its steps, the container consumed by the ENTER tick.
+     *
+     * @param array<int, array<string, mixed>> $frames
+     * @param array<string, mixed>             $step
+     * @param array<string, mixed>             $config
+     *
+     * @return array{0: array<string, mixed>, 1: array<int, array<string, mixed>>}
+     */
+    private function openInnerFrame(array $frames, array $step, array $config): array
+    {
+        $caller = $frames[\count($frames) - 1];
+        $this->canvasSteps = $caller['canvas'] ?? $caller['steps'];
+        [$key, $container, $innerSteps, $innerLinks] = $this->resolveInnerTarget($step['name'], $config, $caller['flowId']);
+        foreach ($frames as $open) {
+            if (($open['inner']['key'] ?? null) === $key) {
+                throw new FlowExecutionFailure(sprintf(self::CIRCULAR, $step['name'], (string) $container['name']));
+            }
+        }
+
+        return [[
+            'kind' => $step['type'] === 'foreach' ? 'each' : 'sub',
+            'flowId' => $caller['flowId'],
+            'flowName' => $caller['flowName'],
+            'inner' => ['key' => $key, 'id' => (string) $container['id'], 'name' => (string) $container['name']],
+            'canvas' => $this->canvasSteps,
+            'canvasDepth' => $caller['canvasDepth'] ?? \count($frames) - 1,
+            'steps' => $innerSteps,
+            'links' => $innerLinks,
+            'index' => 1, // the container is consumed by the ENTER tick itself
+            'callerStepId' => $step['id'],
+            'callerStepName' => $step['name'],
+            'quiet' => !self::configLogsEvents($config),
+        ], $this->executionOrder($innerSteps, $innerLinks)];
+    }
+
+    /**
+     * Whether a frame's steps are drawn on the ROOT canvas: the debugged flow itself, or an inner
+     * flow of it — their executed ids paint the home tab, not a subflow visit.
+     *
+     * @param array<string, mixed> $frame
+     */
+    private static function isRootCanvas(array $frame): bool
+    {
+        return $frame['kind'] === 'flow' || (isset($frame['inner']) && (int) ($frame['canvasDepth'] ?? -1) === 0);
+    }
+
+    /**
+     * The subflow-start payload of a frame: a nested run, naming the inner flow when it is one.
+     *
+     * @param array<string, mixed> $frame
+     *
+     * @return array<string, string>
+     */
+    private static function frameStartPayload(array $frame): array
+    {
+        return ['trigger' => 'subflow'] + (isset($frame['inner']) ? ['inner' => (string) $frame['inner']['name']] : []);
+    }
+
+    /**
      * A foreach over an empty list: the loop step completes in the caller's frame at once.
      *
      * @param array<string, mixed> $blob
@@ -638,7 +963,7 @@ class FlowDebugExecutor
         unset($caller);
 
         return $this->debugResponse($blob, $step, $callerOrder, null)
-            + ['rootExecuted' => \count($frames) === 1 ? [$step['id']] : []];
+            + ['rootExecuted' => self::isRootCanvas($frames[\count($frames) - 1]) ? [$step['id']] : []];
     }
 
     /**
@@ -664,7 +989,7 @@ class FlowDebugExecutor
         }
 
         if ($frame['kind'] === 'each' && $frame['iteration'] + 1 < \count($frame['list'])) {
-            return $this->debugNextIteration($blob, $executionUuid);
+            return $this->debugNextIteration($blob, $executionUuid, $trails);
         }
 
         return $this->debugReturnToCaller($blob, $trails, $executionUuid);
@@ -675,7 +1000,7 @@ class FlowDebugExecutor
      *
      * @param array<string, mixed> $blob
      */
-    private function debugNextIteration(array &$blob, string $executionUuid): array
+    private function debugNextIteration(array &$blob, string $executionUuid, array &$trails = []): array
     {
         $context = &$blob['context'];
         $frame = &$blob['frames'][\count($blob['frames']) - 1];
@@ -690,15 +1015,16 @@ class FlowDebugExecutor
         $subOrder = $this->executionOrder($frame['steps'], $frame['links'], self::choiceResults($context));
         $trigger = $subOrder[0];
         if (!$quiet) {
-            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', ['trigger' => 'subflow']);
+            $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'subflow-start', self::frameStartPayload($frame));
             $this->flowEvents->emitRaw($frame['flowId'], $frame['flowName'], $executionUuid, 'step', [
                 'name' => $trigger['name'],
                 'type' => $trigger['type'],
             ]);
         }
+        $credited = $this->creditEntry($frame, $trigger, $trails);
         unset($frame, $context);
 
-        return $this->debugResponse($blob, $trigger, $subOrder, 'reentered') + ['rootExecuted' => []];
+        return $this->debugResponse($blob, $trigger, $subOrder, 'reentered') + ['rootExecuted' => $credited];
     }
 
     /**
@@ -741,8 +1067,8 @@ class FlowDebugExecutor
             $blob['done'] = true;
             $this->flowEvents->emitRaw($caller['flowId'], $caller['flowName'], $executionUuid, 'flow-finish');
         }
-        $rootExecuted = $caller['kind'] === 'flow' ? [$callerStepId] : [];
-        if ($caller['kind'] !== 'flow') {
+        $rootExecuted = self::isRootCanvas($caller) ? [$callerStepId] : [];
+        if ($rootExecuted === []) {
             $this->recordDebugTrail($trails, $caller, [$callerStepId]);
         }
         unset($caller);
@@ -755,10 +1081,11 @@ class FlowDebugExecutor
      * @param array<string, mixed>             $step
      * @param array<int, array<string,mixed>>  $order the CURRENT frame's order
      */
-    private function debugResponse(array $blob, array $step, array $order, ?string $transition): array
+    private function debugResponse(array $blob, array $step, array $order, ?string $transition, ?array $executedIds = null): array
     {
         $frames = $blob['frames'];
         $frame = $frames[\count($frames) - 1];
+        $depth = \count($frames) - 1;
 
         return [
             'step' => ['id' => $step['id'], 'name' => $step['name'], 'type' => $step['type']],
@@ -769,10 +1096,15 @@ class FlowDebugExecutor
             'iteration' => $frame['kind'] === 'each' ? (int) $frame['iteration'] : null,
             'frame' => [
                 'flowId' => $frame['flowId'],
-                'flowName' => $frame['flowName'],
-                'depth' => \count($frames) - 1,
+                // An inner frame is named after its inner flow (the status line's "<frame>: ").
+                'flowName' => $frame['inner']['name'] ?? $frame['flowName'],
+                'depth' => $depth,
+                // The depth of the frame whose CANVAS this one paints on (an inner flow is drawn
+                // on its caller's) and, for an inner frame, its container's id.
+                'canvasDepth' => (int) ($frame['canvasDepth'] ?? $depth),
+                'innerId' => $frame['inner']['id'] ?? null,
             ],
-            'executedIds' => [$step['id']],
+            'executedIds' => $executedIds ?? [$step['id']],
         ];
     }
 
@@ -893,6 +1225,10 @@ class FlowDebugExecutor
             if ($trigger === null && \in_array($step['type'], OntologyFlow::TRIGGER_STEP_TYPES, true)) {
                 $trigger = $step;
             }
+        }
+        // An INNER FLOW run has no trigger: its container (first) is the entry marker instead.
+        if ($trigger === null && (($steps[0]['type'] ?? null) === 'inner_flow')) {
+            $trigger = $steps[0];
         }
         if ($trigger === null) {
             throw new FlowExecutionFailure('The flow has no trigger to debug.');
@@ -1106,10 +1442,10 @@ class FlowDebugExecutor
         if ($step['type'] === 'sub_flow') {
             // Call Subflow: the subflow runs over the caller's context and whatever it wrote there
             // is what the next main-flow element sees.
-            $context = $this->callSubflow($step['name'], $config, $context, $executionUuid);
+            $context = $this->callSubflow($step['name'], $config, $context, $executionUuid, $flow);
         } elseif ($step['type'] === 'foreach') {
             // Foreach Loop shares the context the same way — one subflow run per array element.
-            $context = $this->foreachSubflow($step['name'], $config, $context, $executionUuid);
+            $context = $this->foreachSubflow($step['name'], $config, $context, $executionUuid, $flow);
         } elseif ($step['type'] === 'logger') {
             // Logger emits ONE line into the PHP application log, prefixed with the flow's name.
             $text = $this->messageText($step['name'], $config, 'message', $context);
@@ -1169,7 +1505,7 @@ class FlowDebugExecutor
             'invoke_php' => $this->phpInvoker->invoke($step['name'], $config, $context),
             // The typed successors of the generic reader/writer (same config, no discriminator),
             // and "HTTP Request" (`invoke`) — a rest_api connector call.
-            'entity_read' => $this->readEntity($step['name'], $config),
+            'entity_read' => $this->readEntity($step['name'], $config, $context),
             'entity_write' => $this->writeEntity($step['name'], $config, $context, $flow, $executionUuid),
             'invoke' => $this->readConnector($step['name'], $config, $context),
             'sql_query' => $this->sqlQuery($step['name'], $config, $context),
@@ -1202,10 +1538,9 @@ class FlowDebugExecutor
     /**
      * @param array<string, mixed> $config
      */
-    private function readEntity(string $stepName, array $config): mixed
+    private function readEntity(string $stepName, array $config, array $context = []): mixed
     {
-        $system = (string) ($config['system'] ?? '');
-        $entityName = (string) ($config['entity'] ?? '');
+        [$system, $entityName] = $this->entityNames($stepName, $config, $context);
         $limit = $config['limit'] ?? null;
         try {
             return match ($config['mode'] ?? 'all') {
@@ -1275,16 +1610,16 @@ class FlowDebugExecutor
             ));
         }
 
-        $system = $this->doctrine->getRepository(OntologySystem::class)
-            ->findOneBy(['name' => (string) ($config['system'] ?? '')]);
+        [$systemName, $entityName] = $this->entityNames($stepName, $config, $context);
+        $system = $this->doctrine->getRepository(OntologySystem::class)->findOneBy(['name' => $systemName]);
         $entity = $system === null ? null : $this->doctrine->getRepository(OntologyEntity::class)
-            ->findOneBy(['system' => $system, 'name' => (string) ($config['entity'] ?? '')]);
+            ->findOneBy(['system' => $system, 'name' => $entityName]);
         if ($entity === null) {
             throw new FlowExecutionFailure(sprintf(
                 'Step "%s": unknown entity "%s" in system "%s".',
                 $stepName,
-                (string) ($config['entity'] ?? ''),
-                (string) ($config['system'] ?? '')
+                $entityName,
+                $systemName
             ));
         }
 
@@ -1494,6 +1829,24 @@ class FlowDebugExecutor
     }
 
     /**
+     * The system and entity NAMES an Entity Read / Write addresses: as configured, or — with a
+     * name's `<key>_dwl` switch on — what its expression yields against the current context
+     * (it must produce a non-empty text).
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function entityNames(string $stepName, array $config, array $context): array
+    {
+        return [
+            $this->resolveDwlText($stepName, 'system', (string) ($config['system'] ?? ''), ($config['system_dwl'] ?? false) === true, $context),
+            $this->resolveDwlText($stepName, 'entity', (string) ($config['entity'] ?? ''), ($config['entity_dwl'] ?? false) === true, $context),
+        ];
+    }
+
+    /**
      * The value a writer step is asked to write: the named context key, or the result of its DWL
      * expression when `content_dwl` is on. Shared by the entity and connector writers so both read
      * the step config the same way.
@@ -1540,8 +1893,11 @@ class FlowDebugExecutor
      *
      * @return array<string, mixed> the context after the subflow ran
      */
-    private function callSubflow(string $stepName, array $config, array $context, string $executionUuid): array
+    private function callSubflow(string $stepName, array $config, array $context, string $executionUuid, ?OntologyFlow $flow = null): array
     {
+        if (self::targetsInner($config)) {
+            return $this->runInnerFlow($stepName, $config, $context, $executionUuid, $flow);
+        }
         [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config);
 
         // The nested run resets the executed-ids trail (its step ids belong to ANOTHER canvas) —
@@ -1572,9 +1928,12 @@ class FlowDebugExecutor
      *
      * @return array<string, mixed> the context after the last iteration
      */
-    private function foreachSubflow(string $stepName, array $config, array $context, string $executionUuid): array
+    private function foreachSubflow(string $stepName, array $config, array $context, string $executionUuid, ?OntologyFlow $flow = null): array
     {
         [$list, $itemVar] = $this->loopItems($stepName, $config, $context);
+        if (self::targetsInner($config)) {
+            return $this->foreachInnerFlow($stepName, $config, $context, $executionUuid, $flow, $list, $itemVar);
+        }
         [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config);
         $scope = self::loopScope($itemVar, $context);
 
@@ -1599,6 +1958,153 @@ class FlowDebugExecutor
         self::restoreLoopScope($scope, $context);
 
         return $context;
+    }
+
+    /**
+     * "Call Subflow" on an INNER FLOW: its elements run in order (container first, as the entry
+     * marker) over the caller's context — like a subflow, but on the caller's canvas and as a part
+     * of the caller's run: same flow row, no running-state stamps, and the executed elements join
+     * the CALLER's trail (the editor paints them on the same canvas). A failing element is reported
+     * as an {@see InnerFlowFailure} naming it.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     *
+     * @return array<string, mixed> the context after the inner flow ran
+     */
+    private function runInnerFlow(string $stepName, array $config, array $context, string $executionUuid, ?OntologyFlow $flow): array
+    {
+        [$key, $container, $innerSteps, $innerLinks] = $this->resolveInnerTarget($stepName, $config, $flow?->getId());
+        $this->guardInnerCall($stepName, $key, (string) $container['name']);
+
+        $canvas = $this->canvasSteps;
+        $outerTrail = $this->lastExecutedIds;
+        $this->lastExecutedIds = [];
+        $this->subflowStack[] = $key;
+        try {
+            return $this->execute($innerSteps, $innerLinks, [], $flow, $executionUuid, $context, self::innerRunInfo($config, $container), $canvas);
+        } catch (\RuntimeException $e) {
+            throw self::innerFailure(sprintf(self::STEP_DETAIL, $stepName, $e->getMessage()), $e);
+        } finally {
+            array_pop($this->subflowStack);
+            $this->lastExecutedIds = array_merge($outerTrail, $this->lastExecutedIds);
+        }
+    }
+
+    /**
+     * "Foreach Loop" on an INNER FLOW: one inner run per element (see {@see runInnerFlow()}), with
+     * the same loop scoping as a subflow loop.
+     *
+     * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
+     * @param array<int, mixed>    $list
+     *
+     * @return array<string, mixed>
+     */
+    private function foreachInnerFlow(string $stepName, array $config, array $context, string $executionUuid, ?OntologyFlow $flow, array $list, string $itemVar): array
+    {
+        [$key, $container, $innerSteps, $innerLinks] = $this->resolveInnerTarget($stepName, $config, $flow?->getId());
+        $this->guardInnerCall($stepName, $key, (string) $container['name']);
+        $scope = self::loopScope($itemVar, $context);
+
+        $canvas = $this->canvasSteps;
+        $outerTrail = $this->lastExecutedIds;
+        $ran = [];
+        $this->subflowStack[] = $key;
+        try {
+            foreach ($list as $index => $element) {
+                $context[$itemVar] = $element;
+                $context['index'] = $index;
+                $this->lastExecutedIds = [];
+                try {
+                    $context = $this->execute($innerSteps, $innerLinks, [], $flow, $executionUuid, $context, self::innerRunInfo($config, $container), $canvas);
+                } catch (\RuntimeException $e) {
+                    throw self::innerFailure(sprintf('Step "%s" (iteration %d): %s', $stepName, $index, $e->getMessage()), $e);
+                } finally {
+                    $ran = array_values(array_unique(array_merge($ran, $this->lastExecutedIds)));
+                }
+            }
+        } finally {
+            array_pop($this->subflowStack);
+            $this->lastExecutedIds = array_merge($outerTrail, $ran);
+        }
+        self::restoreLoopScope($scope, $context);
+
+        return $context;
+    }
+
+    /**
+     * Resolves the inner flow a sub_flow/foreach config points at on the CURRENT canvas: its
+     * container and elements as a runnable chain — container → first element → … → last (port 0
+     * each, so a Choice element continues on a match and ENDS the inner flow otherwise).
+     *
+     * @param array<string, mixed> $config
+     *
+     * @return array{0: string, 1: array<string, mixed>, 2: array<int, array<string, mixed>>, 3: array<int, array{from: string, fromPort: int, to: string}>}
+     */
+    private function resolveInnerTarget(string $stepName, array $config, int|string|null $ownerFlowId): array
+    {
+        $byId = [];
+        foreach ($this->canvasSteps as $step) {
+            if (\is_array($step) && isset($step['id'])) {
+                $byId[(string) $step['id']] = $step;
+            }
+        }
+        $id = (string) $config['inner'];
+        $container = $byId[$id] ?? null;
+        if ($container === null || $container['type'] !== 'inner_flow') {
+            throw new FlowExecutionFailure(sprintf(self::INNER_GONE, $stepName));
+        }
+        $chain = self::innerChain($container, $byId);
+        if ($chain === null) {
+            throw new FlowExecutionFailure(sprintf(self::INNER_UNREADABLE, $stepName, (string) $container['name']));
+        }
+
+        return [self::innerKey($ownerFlowId, $id), $container, $chain[0], $chain[1]];
+    }
+
+    /** The call-stack key of an inner flow: its container id, scoped by the flow that holds it. */
+    private static function innerKey(int|string|null $ownerFlowId, string $containerId): string
+    {
+        return sprintf('inner:%s:%s', $ownerFlowId ?? '-', $containerId);
+    }
+
+    /** The atomic path's cycle/depth guard for an inner flow call (the subflow rules). */
+    private function guardInnerCall(string $stepName, string $key, string $name): void
+    {
+        if (\in_array($key, $this->subflowStack, true)) {
+            throw new FlowExecutionFailure(sprintf(self::CIRCULAR, $stepName, $name));
+        }
+        if (\count($this->subflowStack) >= 10) {
+            throw new FlowExecutionFailure(sprintf(self::TOO_DEEP, $stepName));
+        }
+    }
+
+    /**
+     * How an inner run reports itself: a nested ('subflow') run naming the inner flow — quiet
+     * when the invoker's "Log event" switch is off.
+     *
+     * @param array<string, mixed> $config    the invoker's config
+     * @param array<string, mixed> $container the inner flow's container step
+     *
+     * @return array{trigger: string, quiet: bool, inner: string}
+     */
+    private static function innerRunInfo(array $config, array $container): array
+    {
+        return self::nestedRunInfo($config) + ['inner' => (string) $container['name']];
+    }
+
+    /**
+     * The invoker's failure for an error inside an inner run ($message already names the invoker)
+     * — carrying, when an inner element failed, that element's id for the editor.
+     */
+    private static function innerFailure(string $message, \RuntimeException $e): FlowExecutionFailure
+    {
+        if ($e instanceof FlowStepFailure && $e->stepId !== null) {
+            return new InnerFlowFailure($message, $e->stepId, $e);
+        }
+
+        return $e instanceof InnerFlowFailure ? new InnerFlowFailure($message, $e->stepId, $e) : new FlowExecutionFailure($message, 0, $e);
     }
 
     /**

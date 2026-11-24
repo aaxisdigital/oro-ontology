@@ -634,6 +634,14 @@
     &__node.is-collapsed > &__line &__preview {
         display: inline;
     }
+
+    // The debugger pane shows up to 100 entries per object/array; this line stands for the rest.
+    &__more {
+        padding-left: 14px;
+        white-space: normal;
+        font-style: italic;
+        color: #8a98a6;
+    }
 }
 
 // The debugger evaluator's error, rendered inside a body-level dialog (so not nested above).
@@ -2343,6 +2351,133 @@
         box-shadow: 0 0 0 2px rgba(192, 57, 43, 0.45);
     }
 
+    // INNER FLOW: a box holding a row of auto-chained elements (sized inline by the component —
+    // two tiles tall, as wide as its row). It sits BELOW the tiles (the component inserts it right
+    // after the wires layer), so its elements paint on top of it. Declared after the generic tile
+    // marks so its lighter fills win.
+    &__step--inner {
+        display: block;
+        padding: 0;
+        background: rgba(43, 108, 176, 0.04);
+        border: 1.5px dashed #8fb3d9;
+        border-radius: 10px;
+        box-shadow: none;
+
+        // A single element being dragged over the box would join it if released now.
+        &.is-drop-target {
+            border-style: solid;
+            border-color: #2c7a3f;
+            background: rgba(44, 122, 63, 0.07);
+            box-shadow: 0 0 0 2px rgba(44, 122, 63, 0.3);
+        }
+
+        &.is-unreachable {
+            background: rgba(236, 239, 242, 0.6);
+        }
+
+        &.is-debug-executed {
+            background: rgba(233, 247, 238, 0.6);
+        }
+
+        &.is-debug-next {
+            background: rgba(255, 247, 230, 0.6);
+        }
+
+        &.is-debug-failed {
+            background: rgba(253, 236, 234, 0.6);
+        }
+
+        &.is-empty > .aaxis-flow-editor__inner-hint {
+            display: flex;
+        }
+    }
+
+    // The box's title: icon + name along its top edge (the elements' row sits below it).
+    &__inner-header {
+        position: absolute;
+        top: 5px;
+        left: 10px;
+        right: 10px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        pointer-events: none;
+
+        .aaxis-flow-editor__step-name {
+            -webkit-line-clamp: 1;
+            line-clamp: 1;
+            text-align: left;
+            font-weight: 600;
+        }
+    }
+
+    // The automatic connections between the elements (drawn by the component, inside the box).
+    &__inner-wires {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+        pointer-events: none;
+
+        [data-role='inner-wire'] {
+            fill: none;
+            stroke: #2b6cb0;
+            stroke-width: 2;
+        }
+
+        // After a Choice the row continues on its green (matched) branch; its red line drops
+        // into the FALSE lane below it.
+        [data-role='inner-wire'][data-branch='matched'] {
+            stroke: #2c7a3f;
+        }
+
+        [data-role='inner-wire'][data-branch='not-matched'] {
+            stroke: #c0392b;
+        }
+
+        // The slot an empty false lane keeps below its Choice — a drop target.
+        [data-role='inner-slot'] {
+            fill: rgba(192, 57, 43, 0.04);
+            stroke: #e3a39b;
+            stroke-width: 1.5;
+            stroke-dasharray: 5 4;
+        }
+    }
+
+    &__inner-hint {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding-top: 12px;
+        color: #8a99a8;
+        font-size: 12px;
+        pointer-events: none;
+    }
+
+    // An inner flow's elements are chained automatically — no ports to drag lines from.
+    &__step.is-inner-child .aaxis-flow-editor__port {
+        display: none;
+    }
+
+    // A DEBUG BREAKPOINT (tile menu): a red dot on the tile's top-left corner — the Debug mode
+    // pauses before this step.
+    &__step.has-breakpoint::before {
+        content: '';
+        position: absolute;
+        top: -6px;
+        left: -6px;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #c0392b;
+        box-shadow: 0 0 0 2px #fff;
+        pointer-events: none;
+    }
+
     // macOS-style rubber-band selection rectangle.
     &__marquee {
         position: absolute;
@@ -2605,6 +2740,14 @@
         font-size: 11px;
         font-weight: font-weight('bold');
         color: #5a6b7d;
+    }
+
+    // A settings-popup field whose value keeps the step from running (the tile is red): red
+    // border, the problem in its tooltip. Beats Oro's .form-control border (and its :focus ring).
+    &__field--invalid,
+    &__field--invalid:focus {
+        border-color: #c0392b !important;
+        box-shadow: 0 0 0 1px rgba(192, 57, 43, 0.35) !important;
     }
 
     // Schedule trigger, cron mode: the expression tints light red while invalid…

@@ -368,6 +368,7 @@ describe('OntologyEventComponent', () => {
         it.each([
             ['flow-start', {trigger: 'schedule', user: {name: 'Ann'}}, 'schedule — Ann'],
             ['subflow-start', {trigger: 'subflow'}, 'subflow'],
+            ['subflow-start', {trigger: 'subflow', inner: 'Box'}, 'subflow — Box'],
             ['flow-start', {user: {name: 'Bob'}}, ' — Bob'],
             ['flow-start', {user: {}}, ''],
             ['data-upsert', {entity: 'Order', uniqueIds: [1, 2, 3], changedIds: [2]}, 'Order — 3 ids, 1 changed'],

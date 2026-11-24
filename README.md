@@ -176,6 +176,62 @@ records to an API) where the flow does not need the answers.
 
 ---
 
+## Inner flows
+
+An **Inner Flow** (toolbox → Flow Control) is a subflow drawn inside the flow that uses it. It has
+no Subflow trigger of its own, and it is invoked exactly like a subflow: wherever a **Call Subflow**
+or **Foreach Loop** lets you pick a subflow, the canvas's inner flows are offered too, listed first
+as "*name* (inner flow)".
+
+- On the canvas it is a box two tiles tall, as wide as the elements it holds (at least two tiles).
+- Drop elements from the toolbox, or drag existing ones, into the box. They line up left to right
+  and are **connected automatically** in that order. Where you release an element decides its
+  place: before or after the elements next to it. Dragging one within the box re-orders it.
+- An element dragged **out** of the box lands on the canvas unconnected. An element dragged **in**
+  loses its own flow lines.
+- The box itself takes no flow lines. Triggers and other inner flows cannot go inside one.
+- A **Choice** inside an inner flow continues to the right when it matches. When it does not
+  match, it follows its red line down into its **false** row, which always has a slot below the
+  Choice. Drop elements there; they chain left to right like the main row, and the inner flow ends
+  when that row does. A Choice in a false row gets a false row of its own further down. Dragging a
+  Choice within the box takes its false row along; a Choice that leaves the box (or is removed)
+  leaves its false row behind, in its place.
+- Removing the box removes everything inside it. A Call Subflow / Foreach Loop that pointed at it
+  turns red until it is pointed somewhere else.
+
+At run time an inner flow behaves like a subflow call: its elements share the caller's context, and
+a Foreach Loop runs it once per element. It is still part of the caller's run (same flow, same
+events, no separate "last executed" stamps). The Events page shows its boundaries as
+`subflow-start` / `subflow-finish` naming the inner flow. In the debugger, **Step into** walks it
+on the same canvas, and a failing element is painted red where it sits.
+
+Config: the box stores its elements' step ids in order (`children`); a caller stores
+`inner: <the box's step id>` instead of `subflow: <flow id>`. Element visibility in the toolbox
+follows System Configuration like every other element (`flow_element_inner_flow`, on by default).
+
+---
+
+## Debugging flows: breakpoints and large variables
+
+- **Debug Breakpoint** (right-click a tile): a red dot marks the element. In the editor's **Debug**
+  mode, starting a session and **Continue** run up to the next breakpoint and pause *before* it,
+  including breakpoints inside subflows and inner flows the run reaches. Run Now and the real
+  triggers ignore breakpoints. They belong to your browser (stored per flow, like the toolbox
+  position), not to the flow: setting one does not change the flow.
+- The **Variables** pane shows at most 100 entries of any object or array, then how many more
+  there are. Use the DWL evaluator under it to look into the rest; the evaluator always sees the
+  whole context.
+
+## Computed entity names (Entity Read / Write)
+
+System and Entity are normally picked from the known names. Turn on the **DWL** switch inside
+either field to compute the name at run time instead (e.g. `payload.system`). The expression must
+produce a non-empty text. While a name is computed, the reader's Attribute and Order by are typed
+in, since the entity's attributes are only known when the flow runs. Exported flows do not list
+computed entities in their entity manifest, and import does not check them.
+
+---
+
 ## Quieter event logs ("Log event" switch)
 
 Every flow run records its trail on the **Events** page. On stable, high-volume flows that trail

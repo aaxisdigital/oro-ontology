@@ -66,8 +66,12 @@ final class FlowStepConfigRules
                 && self::filled($config, 'content') && self::boolOk($config, 'content_dwl'),
             'file_rename' => self::destinationOk($config) && self::fileOpOk($config)
                 && self::filled($config, 'new_name') && self::boolOk($config, 'new_name_dwl'),
-            // "Call Subflow": which subflow to invoke (existence/type/enabled are RUNTIME checks).
-            'sub_flow' => self::selected($config, 'subflow'),
+            // "Call Subflow": which subflow — or which INNER FLOW of this canvas — to invoke
+            // (existence/type/enabled are RUNTIME checks).
+            'sub_flow' => self::targetOk($config),
+            // "Inner Flow": a container — valid empty; `children` (editor-managed) is the ORDERED
+            // list of the step ids it holds.
+            'inner_flow' => self::childrenOk($config),
             'foreach' => self::foreachOk($config),
             'invoke_php' => self::invokePhpOk($config),
             // "Logger": the message text (DWL-capable via its toggle).
@@ -104,6 +108,53 @@ final class FlowStepConfigRules
     }
 
     /**
+     * What a Call Subflow / Foreach Loop invokes: a subflow (`subflow`, a flow id) or an inner flow
+     * of the same canvas (`inner`, the container's step id) — exactly one of the two.
+     */
+    private static function targetOk(array $config): bool
+    {
+        return self::selected($config, 'subflow') !== self::selected($config, 'inner');
+    }
+
+    /**
+     * An inner flow's lanes: `children` (the main row) absent or a list of non-empty step ids, and
+     * `branches` (its Choices' FALSE lanes) absent or a map Choice id → such a list — every id
+     * held once across all of them.
+     */
+    private static function childrenOk(array $config): bool
+    {
+        $children = $config['children'] ?? [];
+        $branches = $config['branches'] ?? [];
+        if (!self::idListOk($children) || !\is_array($branches) || ($branches !== [] && array_is_list($branches))) {
+            return false;
+        }
+        $all = $children;
+        foreach ($branches as $choice => $ids) {
+            if ((string) $choice === '' || !self::idListOk($ids)) {
+                return false;
+            }
+            $all = array_merge($all, $ids);
+        }
+
+        return \count($all) === \count(array_unique($all));
+    }
+
+    /** A list of non-empty string ids. */
+    private static function idListOk(mixed $ids): bool
+    {
+        if (!\is_array($ids) || !array_is_list($ids)) {
+            return false;
+        }
+        foreach ($ids as $id) {
+            if (!\is_string($id) || $id === '') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * A trigger holding ONLY its enabled flag counts as "not configured yet" (the editor seeds
      * {enabled: true} the moment a trigger is dropped, so the flow starts armed without the fresh
      * tile turning red for the fields the user has not filled in yet). Endpoint drops also seed the
@@ -135,7 +186,7 @@ final class FlowStepConfigRules
      */
     private static function entityReadOk(array $config): bool
     {
-        return self::filled($config, 'system') && self::filled($config, 'entity')
+        return self::entityTargetOk($config)
             && self::enumOk($config, 'mode', ['all', 'by_id', 'by_attribute'])
             && (($config['mode'] ?? 'all') !== 'by_id' || self::filled($config, 'record_id'))
             // "By attribute" carries the attribute to compare and the value to match.
@@ -150,8 +201,19 @@ final class FlowStepConfigRules
     /** The entity WRITE rules — shared by the generic writer's entity variant and entity_write. */
     private static function entityWriteOk(array $config): bool
     {
-        return self::filled($config, 'system') && self::filled($config, 'entity')
+        return self::entityTargetOk($config)
             && self::filled($config, 'content') && self::boolOk($config, 'content_dwl');
+    }
+
+    /**
+     * Which entity an Entity Read / Write addresses: system + entity NAMES, each one either picked
+     * from the known ones or — its `<key>_dwl` switch on — a DWL expression resolving the name at
+     * run time (parse-checked by the validator).
+     */
+    private static function entityTargetOk(array $config): bool
+    {
+        return self::filled($config, 'system') && self::boolOk($config, 'system_dwl')
+            && self::filled($config, 'entity') && self::boolOk($config, 'entity_dwl');
     }
 
     /** File Operations share a connector + DWL-capable path core. */
@@ -242,7 +304,7 @@ final class FlowStepConfigRules
      */
     private static function foreachOk(array $config): bool
     {
-        return self::selected($config, 'subflow')
+        return self::targetOk($config)
             && self::filled($config, 'array')
             && self::filled($config, 'item')
             && !\in_array(strtolower(trim((string) $config['item'])), self::RESERVED_LOOP_ITEMS, true);

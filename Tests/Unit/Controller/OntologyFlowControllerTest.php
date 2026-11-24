@@ -57,7 +57,7 @@ class OntologyFlowControllerTest extends TestCase
         $this->executor = $this->createMock(FlowDebugExecutor::class);
         $this->portability = $this->createMock(FlowPortability::class);
         $this->validator = $this->createMock(FlowStepValidator::class);
-        $this->validator->method('invalidStepNames')->willReturn([]);
+        $this->validator->method('problemReport')->willReturn(['errors' => [], 'fields' => []]);
         $this->archiver = $this->createMock(FlowHistoryArchiver::class);
         $this->events = $this->createMock(OntologyFlowEventEmitter::class);
         $this->invoker = $this->createMock(PhpMethodInvoker::class);
@@ -254,7 +254,10 @@ class OntologyFlowControllerTest extends TestCase
     public function testTheSerializedFlowCarriesItsRunningStateAndInvalidSteps(): void
     {
         $validator = $this->createMock(FlowStepValidator::class);
-        $validator->method('invalidStepNames')->with([['type' => 'cron']])->willReturn(['Broken']);
+        $validator->method('problemReport')->with([['type' => 'cron']])->willReturn([
+            'errors' => ['Broken' => 'Step "Broken" is not configured.', 'Bad code' => 'bad DWL'],
+            'fields' => ['Bad code' => ['code' => 'bad DWL']],
+        ]);
         $this->kit->set(FlowStepValidator::class, $validator);
         $flow = self::flow(1, 'A', OntologyFlow::TYPE_FLOW, [['type' => 'cron']])
             ->setLastExecuted(new \DateTimeImmutable('2026-03-04 05:06:07', new \DateTimeZone('UTC')))
@@ -265,9 +268,18 @@ class OntologyFlowControllerTest extends TestCase
         $record = self::decode($this->controller->listAction())['records'][0];
 
         self::assertEquals(
-            ['lastExecuted' => '2026-03-04T05:06:07+00:00', 'lastFinished' => null, 'running' => true, 'lastModified' => '2026-03-03T00:00:00+00:00', 'invalidSteps' => ['Broken'], 'design' => ['version' => 2]],
-            array_intersect_key($record, array_flip(['lastExecuted', 'lastFinished', 'running', 'lastModified', 'invalidSteps', 'design']))
+            ['lastExecuted' => '2026-03-04T05:06:07+00:00', 'lastFinished' => null, 'running' => true, 'lastModified' => '2026-03-03T00:00:00+00:00', 'invalidSteps' => ['Broken', 'Bad code'], 'design' => ['version' => 2], 'invalidFields' => ['Bad code' => ['code' => 'bad DWL']]],
+            array_intersect_key($record, array_flip(['lastExecuted', 'lastFinished', 'running', 'lastModified', 'invalidSteps', 'design', 'invalidFields']))
         );
+    }
+
+    public function testAFlowWithoutFieldProblemsSerializesThemAsAnEmptyObject(): void
+    {
+        $this->kit->orm->repository(OntologyFlow::class)->method('findBy')->willReturn([self::flow(1, 'A', OntologyFlow::TYPE_FLOW, [])]);
+
+        $json = (string) $this->controller->listAction()->getContent();
+
+        self::assertStringContainsString('"invalidFields":{}', $json);
     }
 
     // --- Invoke PHP type-aheads ---------------------------------------------------------------
@@ -593,7 +605,20 @@ class OntologyFlowControllerTest extends TestCase
         $response = $this->controller->debugAction(self::post(self::debugPayload()));
 
         self::assertSame(200, $response->getStatusCode());
-        self::assertSame(['success' => true, 'output' => $output, 'executedIds' => ['s1', 's2'], 'contextKey' => self::UUID], self::decode($response));
+        self::assertSame(['success' => true, 'output' => $output, 'truncated' => [], 'executedIds' => ['s1', 's2'], 'contextKey' => self::UUID], self::decode($response));
+        self::assertSame($output, $this->cache->getItem(self::CACHE_KEY)->get());
+    }
+
+    public function testRunNowShipsTheVariablesPaneAPreviewButStoresTheWholeContext(): void
+    {
+        $output = ['flowUuid' => self::UUID, 'rows' => range(1, 250)];
+        $this->executor->method('execute')->willReturn($output);
+        $this->executor->method('lastExecutedIds')->willReturn([]);
+
+        $body = self::decode($this->controller->debugAction(self::post(self::debugPayload())));
+
+        self::assertSame(range(1, 100), $body['output']['rows']);
+        self::assertSame(['/rows' => 250], $body['truncated']);
         self::assertSame($output, $this->cache->getItem(self::CACHE_KEY)->get());
     }
 
@@ -771,6 +796,25 @@ class OntologyFlowControllerTest extends TestCase
         $stored = $this->cache->getItem(self::CACHE_KEY)->get();
         self::assertSame(self::walkResult()['blob']['frames'], $stored['frames']);
         self::assertEqualsWithDelta(time(), $stored['lastTickAt'], 5, 'every tick refreshes the inactivity clock');
+    }
+
+    public function testAStepCarriesTheBreakpointsAndShipsAPreviewOfTheContext(): void
+    {
+        $result = self::walkResult();
+        $result['response']['context'] = ['rows' => range(1, 150)];
+        $this->executor->expects(self::once())->method('debugWalk')->with(
+            self::anything(), self::anything(), self::anything(), null, null, true, self::anything(), false, false,
+            // Malformed entries are dropped.
+            ['root' => ['s2'], '20' => ['a', 'b']]
+        )->willReturn($result);
+
+        $body = self::decode($this->controller->debugStepAction(self::post(self::debugPayload([
+            'runAll' => true,
+            'breakpoints' => ['root' => ['s2', '', 3], '20' => ['a', 'b'], '21' => 'nope', '22' => []],
+        ]))));
+
+        self::assertCount(100, $body['context']['rows']);
+        self::assertSame(['/rows' => 150], $body['truncated']);
     }
 
     public function testTheModeFlagsAreOnlyHonouredWhenExactlyTrue(): void

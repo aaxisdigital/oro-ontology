@@ -345,7 +345,9 @@ class OntologyEventComponent extends BaseComponent {
             case 'flow-start':
             case 'subflow-start': {
                 const user = payload.user?.name ? ` — ${payload.user.name}` : '';
-                return `${payload.trigger || ''}${user}`;
+                // An inner flow's run (drawn inside its flow) names the inner flow.
+                const inner = payload.inner ? ` — ${payload.inner}` : '';
+                return `${payload.trigger || ''}${inner}${user}`;
             }
             case 'data-upsert': {
                 const uniqueIds = Array.isArray(payload.uniqueIds) ? payload.uniqueIds.length : 0;

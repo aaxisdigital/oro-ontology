@@ -8,6 +8,7 @@ use Aaxis\Bundle\OntologyBundle\Dwl\DwlTransformer;
 use Aaxis\Bundle\OntologyBundle\Entity\OntologyFlow;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowImportException;
 use Aaxis\Bundle\OntologyBundle\Exception\FlowStepFailure;
+use Aaxis\Bundle\OntologyBundle\Manager\DebugContextPreview;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowDebugExecutor;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowPortability;
 use Aaxis\Bundle\OntologyBundle\Manager\FlowHistoryArchiver;
@@ -364,10 +365,14 @@ class OntologyFlowController extends AbstractOntologyController
             return $this->debugFailure($e);
         }
 
-        // The final context is stored too, so the debugger sidebar's evaluator works after a run.
+        // The final context is stored too, so the debugger sidebar's evaluator works after a run;
+        // the pane itself only gets a PREVIEW (big objects/arrays cut to their first entries).
+        $preview = DebugContextPreview::of($output);
+
         return new JsonResponse([
             'success' => true,
-            'output' => $output,
+            'output' => $preview['context'],
+            'truncated' => (object) $preview['truncated'],
             'executedIds' => $executor->lastExecutedIds(),
             'contextKey' => $this->storeDebugContext($output),
         ]);
@@ -405,7 +410,8 @@ class OntologyFlowController extends AbstractOntologyController
                 ($payload['runAll'] ?? false) === true,
                 $this->debugRunInfo(),
                 ($payload['stepInto'] ?? false) === true,
-                ($payload['stepOut'] ?? false) === true
+                ($payload['stepOut'] ?? false) === true,
+                self::debugBreakpoints($payload['breakpoints'] ?? null)
             );
         } catch (\RuntimeException $e) {
             return $this->debugFailure($e, $executor->subflowTrails(...));
@@ -413,11 +419,35 @@ class OntologyFlowController extends AbstractOntologyController
 
         // Every tick refreshes the inactivity clock.
         $result['blob']['lastTickAt'] = time();
+        // The Variables pane gets a PREVIEW of the context (big objects/arrays cut to their first
+        // entries — the full context stays in the session for the evaluator).
+        $preview = DebugContextPreview::of($result['response']['context'] ?? []);
+        $result['response']['context'] = $preview['context'];
+        $result['response']['truncated'] = (object) $preview['truncated'];
 
         return new JsonResponse([
             'success' => true,
             'contextKey' => $this->storeDebugContext($result['blob']),
         ] + $result['response']);
+    }
+
+    /**
+     * The editor's DEBUG BREAKPOINTS: per canvas ('root' = the debugged flow, else a subflow's id)
+     * the step ids to pause before. Anything malformed is dropped.
+     *
+     * @return array<string, array<int, string>>
+     */
+    private static function debugBreakpoints(mixed $raw): array
+    {
+        $breakpoints = [];
+        foreach (\is_array($raw) ? $raw : [] as $canvas => $ids) {
+            $ids = \is_array($ids) ? array_values(array_filter($ids, static fn ($id) => \is_string($id) && $id !== '')) : [];
+            if ($ids !== []) {
+                $breakpoints[(string) $canvas] = $ids;
+            }
+        }
+
+        return $breakpoints;
     }
 
     /**
@@ -850,6 +880,8 @@ class OntologyFlowController extends AbstractOntologyController
      */
     private function serialize(OntologyFlow $flow): array
     {
+        $problems = $this->container->get(FlowStepValidator::class)->problemReport($flow->getSteps() ?? []);
+
         return [
             'id' => $flow->getId(),
             'name' => $flow->getName(),
@@ -866,8 +898,10 @@ class OntologyFlowController extends AbstractOntologyController
             'lastModified' => $flow->getLastModified()?->format(\DateTimeInterface::ATOM),
             // Step NAMES whose config keeps the flow from running — the editor paints them red
             // and disables Run Now / Debug while any exist.
-            'invalidSteps' => $this->container->get(FlowStepValidator::class)
-                ->invalidStepNames($flow->getSteps() ?? []),
+            'invalidSteps' => array_keys($problems['errors']),
+            // Per step name: the config keys only the server can judge (DWL that does not parse,
+            // an invalid cron expression) → why — red fields in the step's settings popup.
+            'invalidFields' => (object) $problems['fields'],
         ];
     }
 

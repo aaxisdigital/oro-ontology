@@ -75,6 +75,23 @@ class OntologySystemComponent extends BaseComponent {
         bindGridToolbar(this.$el, 'aaxisOntologySys', () => this.load(), () => this.grid);
 
         this.load();
+        this.openCreateFromUrl();
+    }
+
+    /**
+     * `?add=1` (the Entities form's "Add new system…" opens this page in a new tab with it) opens
+     * the create form right away — once: the parameter is dropped from the URL, so a reload
+     * doesn't reopen it.
+     */
+    private openCreateFromUrl(): void {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('add') !== '1' || !this.opts.canCreate) {
+            return;
+        }
+        params.delete('add');
+        const query = params.toString();
+        window.history.replaceState(window.history.state, '', window.location.pathname + (query ? `?${query}` : '') + window.location.hash);
+        this.openForm(null);
     }
 
     private load(): void {

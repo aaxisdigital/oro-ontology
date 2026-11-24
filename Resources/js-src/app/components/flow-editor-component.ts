@@ -124,7 +124,36 @@ function jsonPrimitiveClass(value: any): string {
     return typeof value === 'number' ? 'aaxis-json-num' : 'aaxis-json-bool';
 }
 
-function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElement {
+/**
+ * How many entries the debugger's Variables pane shows per object/array; beyond it a "more" line
+ * points to the evaluator (the server ships the pane a preview cut the same way).
+ */
+const PANE_ITEM_LIMIT = 100;
+
+/**
+ * Pane-mode options of a tree node: its JSON Pointer, the server's map of pointers to the sizes
+ * values had before the preview cut them, and the per-node entry limit.
+ */
+interface TreeLimit {
+    pointer: string;
+    truncated: Record<string, number>;
+    limit: number;
+}
+
+/** A child's JSON Pointer (RFC 6901 escaping, like the server's DebugContextPreview). */
+function childPointer(pointer: string, key: string | number): string {
+    return `${pointer}/${String(key).replace(/~/g, '~0').replace(/\//g, '~1')}`;
+}
+
+/** The "… N more — use Evaluate" line closing a cut object/array in the Variables pane. */
+function moreItemsLine(count: number): HTMLElement {
+    const line = document.createElement('div');
+    line.className = 'aaxis-json-tree__line aaxis-json-tree__more';
+    line.textContent = __('aaxis.ontology.flow_editor.debug_more_items', {count});
+    return line;
+}
+
+function jsonTreeNode(value: any, key: string | null, isLast: boolean, limit?: TreeLimit): HTMLElement {
     const node = document.createElement('div');
     node.className = 'aaxis-json-tree__node';
     const line = document.createElement('div');
@@ -159,9 +188,14 @@ function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElem
         return node;
     }
 
-    const entries: [string | null, any][] = isArray
+    const all: [string | null, any][] = isArray
         ? value.map((item: any) => [null, item])
         : Object.keys(value).map(k => [k, value[k]]);
+    // Pane mode: at most `limit` entries; the TRUE size comes from the server when its preview
+    // already cut this value.
+    const entries = limit ? all.slice(0, limit.limit) : all;
+    const total = limit ? Math.max(all.length, limit.truncated[limit.pointer] ?? 0) : all.length;
+    const more = total - entries.length;
     const open = isArray ? '[' : '{';
     const closeCh = isArray ? ']' : '}';
 
@@ -182,14 +216,18 @@ function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElem
     line.appendChild(document.createTextNode(open));
     const preview = document.createElement('span');
     preview.className = 'aaxis-json-tree__preview';
-    preview.textContent = ` … ${entries.length} ${isArray ? 'item' : 'key'}${entries.length === 1 ? '' : 's'} … ${closeCh}${comma}`;
+    preview.textContent = ` … ${total} ${isArray ? 'item' : 'key'}${total === 1 ? '' : 's'} … ${closeCh}${comma}`;
     line.appendChild(preview);
 
     const children = document.createElement('div');
     children.className = 'aaxis-json-tree__children';
     entries.forEach(([childKey, childValue], i) => {
-        children.appendChild(jsonTreeNode(childValue, childKey, i === entries.length - 1));
+        const childLimit = limit ? {...limit, pointer: childPointer(limit.pointer, childKey ?? i)} : undefined;
+        children.appendChild(jsonTreeNode(childValue, childKey, i === entries.length - 1 && more === 0, childLimit));
     });
+    if (more > 0) {
+        children.appendChild(moreItemsLine(more));
+    }
     node.appendChild(children);
 
     const closeLine = document.createElement('div');
@@ -206,9 +244,11 @@ function jsonTreeNode(value: any, key: string | null, isLast: boolean): HTMLElem
 /**
  * The debugger's Variables view: each top-level context entry on its own line — objects/arrays
  * START COLLAPSED (count preview, expandable), primitives inline. Same tree pieces as
- * renderJsonTree, minus the wrapping root braces.
+ * renderJsonTree, minus the wrapping root braces. Every object/array shows at most
+ * PANE_ITEM_LIMIT entries and then how many more there are — the evaluator looks further;
+ * `truncated` (JSON Pointer → true size) comes with the server's cut-down preview.
  */
-function renderVariablesList(context: Record<string, any>): HTMLElement {
+function renderVariablesList(context: Record<string, any>, truncated: Record<string, number> = {}): HTMLElement {
     const root = document.createElement('div');
     root.className = 'aaxis-json-view aaxis-json-tree';
     const keys = Object.keys(context);
@@ -216,13 +256,17 @@ function renderVariablesList(context: Record<string, any>): HTMLElement {
         root.appendChild(jsonTreeNode({}, null, true));
         return root;
     }
-    keys.forEach(key => {
-        const node = jsonTreeNode(context[key], key, true);
+    keys.slice(0, PANE_ITEM_LIMIT).forEach(key => {
+        const node = jsonTreeNode(context[key], key, true, {pointer: childPointer('', key), truncated, limit: PANE_ITEM_LIMIT});
         if (node.classList.contains('aaxis-json-tree__node--collapsible')) {
             node.classList.add('is-collapsed');
         }
         root.appendChild(node);
     });
+    const more = Math.max(keys.length, truncated[''] ?? 0) - Math.min(keys.length, PANE_ITEM_LIMIT);
+    if (more > 0) {
+        root.appendChild(moreItemsLine(more));
+    }
     return root;
 }
 
@@ -252,6 +296,47 @@ interface SettingsSection {
     merge: (config: Record<string, any>) => Record<string, any>;
     /** Settles once the section's catalog data (systems, connectors, …) has loaded. */
     ready?: Promise<any>;
+    /** Config key → the control showing it: where a problem with that key gets its red border. */
+    fields?: Record<string, any>;
+    /** EVERY config key whose current value keeps the step from running, with why (error() = the first). */
+    problems?: () => Record<string, string>;
+}
+
+/** One rule of a settings section: the config key it judges, and its problem ('' = fine). */
+type FieldRule = [string, () => string];
+
+/**
+ * A section's ORDERED rules as its error() (the first problem, as before) plus problems() (every
+ * failing config key with its message — what the popup paints red).
+ */
+function ruled(rules: FieldRule[]): {error: () => string; problems: () => Record<string, string>} {
+    const problems = (): Record<string, string> => {
+        const found: Record<string, string> = {};
+        rules.forEach(([key, check]) => {
+            const problem = check();
+            if (problem !== '' && found[key] === undefined) {
+                found[key] = problem;
+            }
+        });
+        return found;
+    };
+    return {problems, error: () => Object.values(problems())[0] ?? ''};
+}
+
+/** A plain object from a JSON payload ({} for anything else — e.g. PHP's empty-array `[]`). */
+function plainObject(value: unknown): Record<string, any> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+/** The SUBFLOW id a stored step invokes (Call Subflow / Foreach Loop), null otherwise. */
+function subflowTargetOf(step: any): string | null {
+    const id = (step?.type === 'sub_flow' || step?.type === 'foreach') ? step.config?.subflow : null;
+    return id !== null && id !== undefined && String(id) !== '' ? String(id) : null;
+}
+
+/** Whether two config values are the same (what a server judgement of a key still applies to). */
+function sameConfigValue(a: unknown, b: unknown): boolean {
+    return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
 /** A canvas point (also a polyline corner of a routed wire). */
@@ -354,6 +439,8 @@ interface FlowRecord {
     steps: FlowStep[] | null;
     design: any;
     invalidSteps?: string[];
+    /** Per step name: config keys only the server can judge (DWL syntax, cron) → why. */
+    invalidFields?: Record<string, Record<string, string>> | any[];
     lastModified?: string | null;
 }
 
@@ -365,6 +452,10 @@ interface EditorTab {
     /** The dirty-tracking baseline captured on stash; null = fresh (baseline set on activation). */
     savedState: string | null;
     invalidNames: string[];
+    /** The server-judged field problems per step name, stashed with the tab (undefined = the flow's own). */
+    fieldProblems?: Record<string, Record<string, string>>;
+    /** The canvas's debug breakpoints, stashed with the tab (undefined = the stored ones). */
+    breakpoints?: string[];
 }
 
 /** Bump when the persisted design shape changes — older designs then load as "corrupted". */
@@ -372,9 +463,92 @@ const DESIGN_VERSION = 2;
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-/** How many output ports a step type exposes ("choice" branches, everything else is linear). */
+/**
+ * The INNER FLOW container type: a subflow drawn inside the flow. It holds an ordered row of
+ * elements (`config.children`, step ids) that are chained automatically left to right, takes no
+ * flow lines at all, and runs only when a Call Subflow / Foreach Loop points at it
+ * (`config.inner` = its id) — exactly how a subflow is referenced.
+ */
+const INNER_FLOW = 'inner_flow';
+
+/**
+ * How many output ports a step type exposes ("choice" branches, everything else is linear — and
+ * an inner flow has none: it is invoked, never wired).
+ */
 function portCount(type: string): number {
+    if (type === INNER_FLOW) {
+        return 0;
+    }
     return type === 'choice' ? 2 : 1;
+}
+
+/** The ordered element ids an inner flow's config holds (anything malformed reads as none). */
+function innerChildIds(config: Record<string, any> | null | undefined): string[] {
+    const children = config?.children;
+    return Array.isArray(children) ? children.filter((id: any) => typeof id === 'string' && id !== '') : [];
+}
+
+/**
+ * The FALSE lanes of an inner flow's Choices (`config.branches`): Choice step id → the ordered
+ * element ids it continues with when it does not match. Anything malformed reads as none.
+ */
+function innerBranchIds(config: Record<string, any> | null | undefined): Record<string, string[]> {
+    const branches = config?.branches;
+    if (!branches || typeof branches !== 'object' || Array.isArray(branches)) {
+        return {};
+    }
+    const lanes: Record<string, string[]> = {};
+    Object.entries(branches).forEach(([choice, ids]) => {
+        if (choice !== '' && Array.isArray(ids)) {
+            lanes[choice] = ids.filter((id: any) => typeof id === 'string' && id !== '');
+        }
+    });
+    return lanes;
+}
+
+/** Every element id an inner flow's config holds: the main row, then each false lane. */
+function innerMemberIds(config: Record<string, any> | null | undefined): string[] {
+    return [...innerChildIds(config), ...Object.values(innerBranchIds(config)).flat()];
+}
+
+/**
+ * A config with these lanes stored: `children` = the main row ('' lane), `branches` = the
+ * non-empty false lanes — left out entirely while there are none (so configs without false
+ * lanes keep their old shape).
+ */
+function innerLanesConfig(config: Record<string, any> | null | undefined, lanes: Map<string, string[]>): Record<string, any> {
+    const branches: Record<string, string[]> = {};
+    lanes.forEach((ids, key) => {
+        if (key !== '' && ids.length) {
+            branches[key] = ids;
+        }
+    });
+    const next: Record<string, any> = {...(config || {}), children: lanes.get('') || []};
+    delete next.branches;
+    return Object.keys(branches).length ? {...next, branches} : next;
+}
+
+/** Whether a Call Subflow / Foreach Loop config points at an inner flow (vs a subflow). */
+function innerTargetOf(config: Record<string, any> | null | undefined): string | null {
+    const target = config?.inner;
+    return typeof target === 'string' && target !== '' ? target : null;
+}
+
+/** The invoke-picker key a Call Subflow / Foreach Loop config stands for ('' = nothing picked). */
+function invokeKeyOf(config: Record<string, any> | null | undefined): string {
+    const inner = innerTargetOf(config);
+    if (inner !== null) {
+        return `inner:${inner}`;
+    }
+    return config?.subflow ? `flow:${String(config.subflow)}` : '';
+}
+
+/** What a picked invoke key stores: `inner` (an inner flow's step id) or `subflow` (a flow id). */
+function invokeConfig(key: string): {subflow: string} | {inner: string} {
+    if (key.startsWith('inner:')) {
+        return {inner: key.slice('inner:'.length)};
+    }
+    return {subflow: key.startsWith('flow:') ? key.slice('flow:'.length) : ''};
 }
 
 const OPPOSITE_SIDE: Record<AnchorSide, AnchorSide> = {north: 'south', south: 'north', east: 'west', west: 'east'};
@@ -427,10 +601,12 @@ function debugAutoCloseBar(autoClose: {deadline: number; duration: number}): any
 
 /**
  * The debug session's key for a tick's frame: 'root' for the debugged flow (depth 0), else the
- * subflow's id (the keys of `marksByFlow`).
+ * subflow's id (the keys of `marksByFlow`). An INNER FLOW frame paints on its caller's canvas —
+ * `canvasDepth` is that canvas's depth (0 = the debugged flow).
  */
-function debugFrameKey(frame: {flowId?: number | string | null; depth?: number} | null | undefined): string {
-    return frame && Number(frame.depth || 0) > 0 && frame.flowId ? String(frame.flowId) : 'root';
+function debugFrameKey(frame: {flowId?: number | string | null; depth?: number; canvasDepth?: number} | null | undefined): string {
+    const depth = Number(frame?.canvasDepth ?? frame?.depth ?? 0);
+    return frame && depth > 0 && frame.flowId ? String(frame.flowId) : 'root';
 }
 
 /** Which debugger button a request was started from (it carries the spinner meanwhile). */
@@ -520,6 +696,11 @@ interface PlacedStep extends FlowStep {
     el: HTMLElement;
     /** The stored config is incomplete/invalid — the tile renders red and the flow cannot run. */
     invalid?: boolean;
+    /**
+     * Problems only the SERVER can judge (DWL that does not parse, an invalid cron expression):
+     * config key → message, as of the stored config. A key is dropped once its value changes.
+     */
+    serverProblems?: Record<string, string>;
     /** Which side incoming links arrive at (default west). */
     inSide?: AnchorSide;
     /** Which side each output port leaves from (defaults: port 0 east; choice port 1 south). */
@@ -589,6 +770,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private startId!: string | null;
     private wires!: SVGSVGElement;
     private selection!: Set<PlacedStep>;
+    /** Step ids of the ACTIVE canvas carrying a debug breakpoint (see toggleBreakpoint). */
+    private breakpoints!: Set<string>;
     private menuEl!: HTMLElement | null;
     private redrawScheduled!: boolean;
     private savedState!: string;
@@ -612,8 +795,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
         step: PlacedStep;
         dx: number;
         dy: number;
-        // Other selected tiles moving along, as offsets relative to the dragged one.
+        // Other selected tiles moving along, as offsets relative to the dragged one (an inner
+        // flow's elements always travel with their box).
         group: {step: PlacedStep; offX: number; offY: number}[];
+        /** Where the dragged tile started — a drop the inner-flow rules refuse goes back there. */
+        origin: {x: number; y: number};
+        /** The tile actually moved (a plain click must not reorder an inner flow). */
+        moved: boolean;
+        /** The inner flow highlighted as the drop target under the pointer. */
+        dropBox: PlacedStep | null;
     } | null;
     /**
      * Drawing a wire. `editing` is set when the user grabbed the ARROW of an existing link to
@@ -636,6 +826,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         steps: {id: string; type: string; name: string; config: Record<string, any> | null}[];
         links: {from: string; fromPort: number; to: string}[];
         context: Record<string, any> | null;
+        /** Where the server's preview cut the context (JSON Pointer → true size). */
+        truncated: Record<string, number>;
         /** Server-side session handle: the context lives in the app cache between step calls. */
         contextKey: string | null;
         index: number;
@@ -693,6 +885,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.links = [];
         this.startId = null;
         this.selection = new Set();
+        this.breakpoints = new Set();
         this.menuEl = null;
         this.redrawScheduled = false;
         this.savedState = '';
@@ -782,7 +975,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
         this.buildWires();
         this.restore();
-        this.applyInvalidStepNames((this.flow && (this.flow as any).invalidSteps) || []);
+        this.applyInvalidStepNames((this.flow && (this.flow as any).invalidSteps) || [], this.flow?.invalidFields);
+        this.restoreBreakpoints();
         this.restoreToolboxState();
         // Sync the toggle's active state with however the restore left the toolbox.
         this.setToolboxVisible(!this.toolbox().hidden, false);
@@ -997,7 +1191,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         $(document).on('copy.aaxisFlowClipboard', (e: any) => {
             const event = (e.originalEvent || e) as ClipboardEvent;
-            const steps = this.orderedSelection();
+            const steps = this.copyableSelection();
             if (!steps.length || !event.clipboardData || !this.ownsClipboardEvent(event)
                 || (window.getSelection()?.toString() || '') !== '') {
                 return;
@@ -1078,8 +1272,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         let maxX = 0;
         let maxY = 0;
         for (const step of this.steps) {
-            maxX = Math.max(maxX, step.x + this.tileSize);
-            maxY = Math.max(maxY, step.y + this.tileSize);
+            const {w, h} = this.stepSize(step);
+            maxX = Math.max(maxX, step.x + w);
+            maxY = Math.max(maxY, step.y + h);
         }
         inner.style.width = maxX > 0 ? `${maxX + this.tileSize}px` : '';
         inner.style.height = maxY > 0 ? `${maxY + this.tileSize}px` : '';
@@ -1137,6 +1332,509 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         path.dataset.branch = branch;
         path.setAttribute('marker-end', BRANCH_MARKER[branch]);
+    }
+
+    // --- Inner flows (containers of auto-chained elements) --------------------------------
+
+    private isInner(step: {type: string} | null | undefined): boolean {
+        return step?.type === INNER_FLOW;
+    }
+
+    /** Types that may live inside an inner flow: anything but a trigger or another inner flow. */
+    private canJoinInner(type: string): boolean {
+        return type !== INNER_FLOW && this.stepMeta[type]?.category !== 'trigger';
+    }
+
+    /**
+     * Every element of an inner flow — its main row and every Choice's FALSE lane (ids that
+     * resolve to nothing or to a type an inner flow cannot hold are skipped).
+     */
+    private innerMembers(container: PlacedStep): PlacedStep[] {
+        return innerMemberIds(container.config)
+            .map(id => this.stepById(id))
+            .filter((s): s is PlacedStep => s !== null && this.canJoinInner(s.type));
+    }
+
+    /** The inner flow holding `step` (in any of its lanes), or null when it lies on the canvas itself. */
+    private innerContainerOf(step: PlacedStep): PlacedStep | null {
+        return this.steps.find(s => this.isInner(s) && innerMemberIds(s.config).includes(step.id)) || null;
+    }
+
+    /** An inner flow's lanes as stored: '' = the main row, a Choice's id = that Choice's false lane. */
+    private innerLanes(container: PlacedStep): Map<string, string[]> {
+        const lanes = new Map<string, string[]>([['', innerChildIds(container.config)]]);
+        Object.entries(innerBranchIds(container.config)).forEach(([choice, ids]) => lanes.set(choice, ids));
+        return lanes;
+    }
+
+    /** Stores lanes into the config: `children` = the main row, `branches` only while a false lane holds something. */
+    private writeInnerLanes(container: PlacedStep, lanes: Map<string, string[]>): void {
+        container.config = innerLanesConfig(container.config, lanes);
+    }
+
+    /** Padding around (and gap between) the elements of an inner flow — half a tile, on the grid. */
+    private innerPad(): number {
+        return Math.max(this.spacing, this.snap(this.tileSize / 2));
+    }
+
+    /** Offset of the first row from the box's top edge (the header strip above it). */
+    private innerTop(): number {
+        return this.snap(this.tileSize / 2);
+    }
+
+    /**
+     * An inner flow's box for a grid of `cols` × `rows` element cells: rows stacked one tile + pad
+     * apart below the header, two tiles tall and wide at least (the original single row).
+     */
+    private innerBoxSize(cols: number, rows: number): {w: number; h: number} {
+        const pad = this.innerPad();
+        const pitch = this.tileSize + pad;
+        const width = cols > 0 ? pad + cols * pitch : 0;
+        const height = 2 * this.tileSize + (Math.max(1, rows) - 1) * pitch;
+        return {w: Math.max(2 * this.tileSize, width), h: height};
+    }
+
+    /**
+     * Where everything of an inner flow sits, in cells: the main row on row 0 from column 0, and
+     * each Choice's FALSE lane starting right BELOW it (an empty one keeps one slot — a drop
+     * target), on the first row down where the lane fits and the red line can drop straight to
+     * it. Choices are handled right to left (depth first), so a lane to the left can always pass
+     * below the ones to its right; a nesting so deep that no free drop exists crosses instead.
+     */
+    private innerGrid(container: PlacedStep): {cells: Map<string, {row: number; col: number}>; lanes: Array<{key: string; row: number; col: number; ids: string[]}>; rows: number; cols: number} {
+        const stored = this.innerLanes(container);
+        const cells = new Map<string, {row: number; col: number}>();
+        const lanes: Array<{key: string; row: number; col: number; ids: string[]}> = [];
+        const used = new Set<string>();
+        const seen = new Set<string>();
+        let rows = 1;
+        let cols = 0;
+        const usable = (id: string): boolean => {
+            const step = this.stepById(id);
+            return step !== null && this.canJoinInner(step.type) && !seen.has(id);
+        };
+        const laneIds = (key: string): string[] => (stored.get(key) || []).filter(usable);
+        const fits = (row: number, col: number, span: number, from: number, crossing: boolean): boolean => {
+            for (let c = col; c < col + span; c++) {
+                if (used.has(`${row}:${c}`)) {
+                    return false;
+                }
+            }
+            for (let r = from + 1; !crossing && r < row; r++) {
+                if (used.has(`${r}:${col}`)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const place = (key: string, row: number, col: number): void => {
+            const ids = laneIds(key);
+            ids.forEach(id => seen.add(id));
+            lanes.push({key, row, col, ids});
+            const span = Math.max(1, ids.length);
+            for (let c = col; c < col + span; c++) {
+                used.add(`${row}:${c}`);
+            }
+            rows = Math.max(rows, row + 1);
+            cols = Math.max(cols, key === '' && ids.length === 0 ? 0 : col + span);
+            ids.forEach((id, i) => cells.set(id, {row, col: col + i}));
+            [...ids].reverse().forEach(id => {
+                if (this.stepById(id)?.type !== 'choice') {
+                    return;
+                }
+                const at = cells.get(id) as {row: number; col: number};
+                const span2 = Math.max(1, laneIds(id).length);
+                let target = at.row + 1;
+                const crossing = !Array.from({length: 64}, (_v, k) => at.row + 1 + k).some(r => fits(r, at.col, span2, at.row, false));
+                while (!fits(target, at.col, span2, at.row, crossing)) {
+                    target++;
+                }
+                for (let r = at.row + 1; r < target; r++) {
+                    used.add(`${r}:${at.col}`); // the red line's way down
+                }
+                place(id, target, at.col);
+            });
+        };
+        place('', 0, 0);
+        return {cells, lanes, rows, cols};
+    }
+
+    /** A tile's footprint on the canvas (square tiles; inner flows are boxes). */
+    private stepSize(step: PlacedStep): {w: number; h: number} {
+        if (!this.isInner(step)) {
+            return {w: this.tileSize, h: this.tileSize};
+        }
+        const grid = this.innerGrid(step);
+        return this.innerBoxSize(grid.cols, grid.rows);
+    }
+
+    /** The inner flow whose box contains the canvas point (px, py), skipping `except`. */
+    private innerAt(px: number, py: number, except?: PlacedStep): PlacedStep | null {
+        return this.steps.find(s => {
+            if (!this.isInner(s) || s === except) {
+                return false;
+            }
+            const {w, h} = this.stepSize(s);
+            return px >= s.x && px <= s.x + w && py >= s.y && py <= s.y + h;
+        }) || null;
+    }
+
+    /**
+     * Where an element released at canvas (px, py) lands in an inner flow: the lane on that row
+     * whose span (one slot past its end included) holds the point — else the row's nearest lane,
+     * else the main row — and, in it, before/after the elements beside it (`moving` not counted).
+     */
+    private innerDropTarget(container: PlacedStep, px: number, py: number, moving?: PlacedStep): {lane: string; index: number} {
+        const grid = this.innerGrid(container);
+        const pad = this.innerPad();
+        const pitch = this.tileSize + pad;
+        const row = Math.min(grid.rows - 1, Math.max(0, Math.floor((py - container.y - this.innerTop() + pad / 2) / pitch)));
+        const col = Math.floor((px - container.x - pad / 2) / pitch);
+        const inRow = grid.lanes.filter(l => l.row === row);
+        const distance = (l: {col: number; ids: string[]}): number => (col < l.col ? l.col - col : Math.max(0, col - (l.col + l.ids.length)));
+        const lane = inRow.find(l => distance(l) === 0)
+            || [...inRow].sort((a, b) => distance(a) - distance(b))[0]
+            || grid.lanes[0];
+        const index = lane.ids
+            .filter(id => id !== moving?.id)
+            .filter(id => {
+                const step = this.stepById(id);
+                return step !== null && step.x + this.tileSize / 2 < px;
+            }).length;
+        return {lane: lane.key, index};
+    }
+
+    /** Whether a lane lies in `choice`'s own false path (its lane, or one nested below it). */
+    private laneWithin(container: PlacedStep, lane: string, choice: string): boolean {
+        const lanes = this.innerLanes(container);
+        const holder = (id: string): string | null => {
+            for (const [key, ids] of lanes) {
+                if (ids.includes(id)) {
+                    return key;
+                }
+            }
+            return null;
+        };
+        for (let key: string | null = lane, guard = 0; key !== null && key !== '' && guard < 256; guard++) {
+            if (key === choice) {
+                return true;
+            }
+            key = holder(key);
+        }
+        return false;
+    }
+
+    /**
+     * Lays an inner flow out ({@see innerGrid}): the box sized to its grid, every element placed
+     * in its cell, the automatic arrows redrawn.
+     */
+    private layoutInner(container: PlacedStep): void {
+        const grid = this.innerGrid(container);
+        const {w, h} = this.innerBoxSize(grid.cols, grid.rows);
+        container.el.style.width = `${w}px`;
+        container.el.style.height = `${h}px`;
+        const pitch = this.tileSize + this.innerPad();
+        grid.cells.forEach((cell, id) => {
+            const child = this.stepById(id) as PlacedStep;
+            child.x = container.x + this.innerPad() + cell.col * pitch;
+            child.y = container.y + this.innerTop() + cell.row * pitch;
+            child.el.style.left = `${child.x}px`;
+            child.el.style.top = `${child.y}px`;
+            child.el.classList.add('is-inner-child');
+        });
+        container.el.classList.toggle('is-empty', grid.cells.size === 0);
+        this.drawInnerWires(container, grid);
+    }
+
+    /**
+     * The automatic connections of an inner flow, drawn INSIDE its box (an svg over it): an entry
+     * arrow into the main row's first element, element → next element along each lane (green
+     * after a Choice: its match), and from every Choice a red line down into its FALSE lane — or
+     * into the dashed slot waiting for one.
+     */
+    private drawInnerWires(container: PlacedStep, grid: ReturnType<typeof this.innerGrid>): void {
+        const svg = container.el.querySelector('[data-role="inner-wires"]');
+        if (!svg) {
+            return;
+        }
+        while (svg.firstChild) {
+            svg.removeChild(svg.firstChild);
+        }
+        const pad = this.innerPad();
+        const tile = this.tileSize;
+        const pitch = tile + pad;
+        const x = (col: number): number => pad + col * pitch;
+        const y = (row: number): number => this.innerTop() + row * pitch;
+        const line = (d: string, branch: '' | 'matched' | 'not-matched', role = 'inner-wire'): void => {
+            const path = document.createElementNS(SVG_NS, 'path');
+            path.dataset.role = role;
+            if (branch !== '') {
+                path.dataset.branch = branch;
+            }
+            path.setAttribute('d', d);
+            if (role === 'inner-wire') {
+                path.setAttribute('marker-end', BRANCH_MARKER[branch]);
+            }
+            svg.appendChild(path);
+        };
+        grid.lanes.forEach(lane => {
+            const rowY = y(lane.row) + tile / 2;
+            if (lane.key === '' && lane.ids.length > 0) {
+                line(`M ${Math.min(6, pad / 2)} ${rowY} L ${pad - 2} ${rowY}`, '');
+            }
+            if (lane.key !== '') {
+                // The Choice's red line, straight down into its lane (or its empty slot).
+                const from = grid.cells.get(lane.key) as {row: number; col: number};
+                const lineX = x(from.col) + tile / 2;
+                line(`M ${lineX} ${y(from.row) + tile} L ${lineX} ${y(lane.row) - 2}`, 'not-matched');
+                if (lane.ids.length === 0) {
+                    const slot = `M ${x(lane.col) + 4} ${y(lane.row)} h ${tile - 8} a 4 4 0 0 1 4 4 v ${tile - 8} a 4 4 0 0 1 -4 4 h ${-(tile - 8)} a 4 4 0 0 1 -4 -4 v ${-(tile - 8)} a 4 4 0 0 1 4 -4 z`;
+                    line(slot, 'not-matched', 'inner-slot');
+                }
+            }
+            lane.ids.forEach((id, i) => {
+                if (i + 1 < lane.ids.length) {
+                    const x1 = x(lane.col + i) + tile;
+                    line(`M ${x1} ${rowY} L ${x1 + pad - 2} ${rowY}`, this.stepById(id)?.type === 'choice' ? 'matched' : '');
+                }
+            });
+        });
+    }
+
+    /**
+     * Puts `step` into an inner flow — into `target.lane` (the main row, or a Choice's false lane)
+     * at `target.index` — moving it out of any other one first; a Choice moving WITHIN the same
+     * inner flow keeps its false lane. Inside, it is wired AUTOMATICALLY — its own flow lines
+     * (and a "Start here" marker) are dropped.
+     */
+    private attachToInner(container: PlacedStep, step: PlacedStep, target: {lane: string; index: number}): void {
+        const previous = this.innerContainerOf(step);
+        if (previous && previous !== container) {
+            this.detachFromInner(step);
+        }
+        this.links = this.links.filter(l => l.from !== step.id && l.to !== step.id);
+        if (this.startId === step.id) {
+            this.startId = null;
+        }
+        const lanes = this.innerLanes(container);
+        lanes.forEach((ids, key) => lanes.set(key, ids.filter(id => id !== step.id)));
+        const ids = lanes.get(target.lane) || [];
+        ids.splice(Math.max(0, Math.min(target.index, ids.length)), 0, step.id);
+        lanes.set(target.lane, ids);
+        this.writeInnerLanes(container, lanes);
+        this.layoutInner(container);
+        this.redrawLinks();
+        this.syncDirty();
+    }
+
+    /**
+     * Takes `step` out of its inner flow (it stays where it is, on the canvas, unconnected). A
+     * Choice leaving takes nothing along: its false lane steps into the Choice's place.
+     */
+    private detachFromInner(step: PlacedStep): void {
+        const container = this.innerContainerOf(step);
+        step.el.classList.remove('is-inner-child');
+        if (!container) {
+            return;
+        }
+        const lanes = this.innerLanes(container);
+        let holder = '';
+        let at = 0;
+        lanes.forEach((ids, key) => {
+            if (ids.includes(step.id)) {
+                holder = key;
+                at = ids.indexOf(step.id);
+            }
+        });
+        const own = lanes.get(step.id) || [];
+        lanes.delete(step.id);
+        const ids = (lanes.get(holder) || []).filter(id => id !== step.id);
+        ids.splice(at, 0, ...own);
+        lanes.set(holder, ids);
+        this.writeInnerLanes(container, lanes);
+        this.layoutInner(container);
+    }
+
+    /**
+     * Brings a restored/pasted canvas in line with the inner-flow rules (the editor never stores
+     * anything else, so this only matters for hand-edited designs): each element in at most one
+     * lane of one inner flow and of a type that may be there, false lanes only under Choices that
+     * are there, no flow lines touching inner flows or their elements, no "Start here" on them —
+     * then lays every inner flow out.
+     */
+    private normalizeInnerFlows(): void {
+        const claimed = new Set<string>();
+        const containers = this.steps.filter(s => this.isInner(s));
+        containers.forEach(box => {
+            const stored = this.innerLanes(box);
+            const kept = new Map<string, string[]>();
+            const walk = (key: string): void => {
+                const ids = (stored.get(key) || []).filter(id => {
+                    const child = this.stepById(id);
+                    const ok = child !== null && this.canJoinInner(child.type) && !claimed.has(id);
+                    if (ok) {
+                        claimed.add(id);
+                    }
+                    return ok;
+                });
+                kept.set(key, ids);
+                ids.forEach(id => {
+                    if (this.stepById(id)?.type === 'choice' && stored.has(id)) {
+                        walk(id);
+                    }
+                });
+            };
+            walk('');
+            const before = JSON.stringify({c: box.config?.children ?? null, b: box.config?.branches ?? null});
+            const next = innerLanesConfig(box.config, kept);
+            if (JSON.stringify({c: next.children ?? null, b: next.branches ?? null}) !== before && (box.config?.children !== undefined || kept.get('')?.length)) {
+                box.config = next;
+            }
+        });
+        const inside = new Set([...claimed, ...containers.map(c => c.id)]);
+        this.links = this.links.filter(l => !inside.has(l.from) && !inside.has(l.to));
+        if (this.startId && inside.has(this.startId)) {
+            this.startId = null;
+        }
+        containers.forEach(box => this.layoutInner(box));
+    }
+
+    /** Whether a Call Subflow / Foreach Loop points at an inner flow that is not on this canvas. */
+    private innerRefBroken(step: PlacedStep): boolean {
+        const target = (step.type === 'sub_flow' || step.type === 'foreach') ? innerTargetOf(step.config) : null;
+        return target !== null && !this.isInner(this.stepById(target));
+    }
+
+    /** Paints every step pointing at a vanished inner flow red (it cannot run until re-pointed). */
+    private markBrokenInnerRefs(): void {
+        this.steps.filter(s => this.innerRefBroken(s)).forEach(s => this.markStepInvalid(s, true));
+    }
+
+    /** The steps of this canvas invoking the given inner flow, name-sorted. */
+    private innerCallers(container: PlacedStep): PlacedStep[] {
+        return this.steps
+            .filter(s => (s.type === 'sub_flow' || s.type === 'foreach') && innerTargetOf(s.config) === container.id)
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    /** Selects a step and scrolls it into view (the inner-flow navigation). */
+    private revealStep(step: PlacedStep): void {
+        this.select([step]);
+        const viewport = this.canvasViewport();
+        const {w, h} = this.stepSize(step);
+        if (typeof (viewport as any).scrollTo === 'function') {
+            viewport.scrollTo({
+                left: Math.max(0, step.x + w / 2 - viewport.clientWidth / 2),
+                top: Math.max(0, step.y + h / 2 - viewport.clientHeight / 2)
+            });
+        }
+    }
+
+    // --- Debug breakpoints ---------------------------------------------------------------
+
+    /** localStorage key of the debug breakpoints: {"<flow id>": [step ids]} — a workspace preference. */
+    private static readonly BREAKPOINT_STORE_KEY = 'aaxis.ontology.flowEditor.breakpoints';
+
+    /**
+     * Which steps can carry a breakpoint: anything the debugger stops BEFORE — not a trigger (it
+     * always runs first) nor an inner flow's box (its elements are what runs).
+     */
+    private canBreak(step: PlacedStep): boolean {
+        return this.stepMeta[step.type]?.category !== 'trigger' && !this.isInner(step);
+    }
+
+    /** The stored breakpoints of every saved flow. */
+    private storedBreakpoints(): Record<string, string[]> {
+        try {
+            const stored = JSON.parse(window.localStorage.getItem(OntologyFlowEditorComponent.BREAKPOINT_STORE_KEY) || '{}');
+            return plainObject(stored);
+        } catch (e) {
+            return {};
+        }
+    }
+
+    private writeBreakpoints(flowId: number | string, ids: string[]): void {
+        const all = this.storedBreakpoints();
+        if (ids.length) {
+            all[String(flowId)] = ids;
+        } else {
+            delete all[String(flowId)];
+        }
+        try {
+            window.localStorage.setItem(OntologyFlowEditorComponent.BREAKPOINT_STORE_KEY, JSON.stringify(all));
+        } catch (e) {
+            // Storage unavailable (privacy mode): the breakpoints live as long as the page.
+        }
+    }
+
+    /** Stores the active canvas's breakpoints (a never-saved flow keeps them in memory only). */
+    private persistBreakpoints(): void {
+        const id = (this.flow as any)?.id;
+        if (id) {
+            this.writeBreakpoints(id, [...this.breakpoints]);
+        }
+    }
+
+    /** Loads the active canvas's breakpoints: the tab's own, else the flow's stored ones. */
+    private restoreBreakpoints(saved?: string[]): void {
+        const id = (this.flow as any)?.id;
+        const ids = saved ?? (id ? this.storedBreakpoints()[String(id)] : null) ?? [];
+        this.breakpoints = new Set((Array.isArray(ids) ? ids : []).filter(stepId => {
+            const step = this.stepById(String(stepId));
+            return step !== null && this.canBreak(step);
+        }));
+        this.paintBreakpoints();
+    }
+
+    private paintBreakpoints(): void {
+        this.steps.forEach(s => s.el.classList.toggle('has-breakpoint', this.breakpoints.has(s.id)));
+    }
+
+    /**
+     * "Debug Breakpoint" (tile menu): the Debug mode pauses BEFORE this step — starting a debug
+     * session, and Continue, run up to the next breakpoint instead of the end. Run Now and the
+     * real triggers ignore breakpoints. They are the user's workspace state (localStorage per
+     * flow, like the toolbox spot), never part of the flow: toggling one leaves the flow clean.
+     */
+    private toggleBreakpoint(step: PlacedStep): void {
+        if (this.breakpoints.has(step.id)) {
+            this.breakpoints.delete(step.id);
+        } else if (this.canBreak(step)) {
+            this.breakpoints.add(step.id);
+        }
+        this.paintBreakpoints();
+        this.persistBreakpoints();
+    }
+
+    /**
+     * The breakpoints a debug request carries, per canvas: 'root' = the debugged flow (and its
+     * inner flows), plus every subflow it may reach (its Call Subflow / Foreach Loop targets,
+     * transitively through the catalog) that has stored breakpoints.
+     */
+    private debugBreakpointMap(homeIndex: number): Record<string, string[]> {
+        const home = this.tabs?.[homeIndex];
+        const homeIds = homeIndex === this.activeTab || !home ? [...this.breakpoints] : (home.breakpoints ?? this.storedBreakpoints()[String((home.flow as any)?.id)] ?? []);
+        const map: Record<string, string[]> = homeIds.length ? {root: homeIds} : {};
+        const stored = this.storedBreakpoints();
+        const homeSteps = homeIndex === this.activeTab || !home
+            ? this.steps
+            : ((home.design?.steps || home.flow?.design?.steps || []) as any[]);
+        const records = new Map((this.catalogFlowRecords || []).map(f => [String(f.id), f]));
+        const queue = homeSteps.map(subflowTargetOf).filter((id): id is string => id !== null);
+        const seen = new Set<string>([String((home?.flow as any)?.id ?? '')]);
+        while (queue.length) {
+            const id = queue.shift() as string;
+            if (seen.has(id)) {
+                continue;
+            }
+            seen.add(id);
+            if (Array.isArray(stored[id]) && stored[id].length) {
+                map[id] = stored[id];
+            }
+            ((records.get(id)?.design?.steps || records.get(id)?.steps || []) as any[])
+                .map(subflowTargetOf).filter((next): next is string => next !== null).forEach(next => queue.push(next));
+        }
+        return map;
     }
 
     // --- Link geometry / rendering ------------------------------------------------
@@ -1350,10 +2048,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const rows = Math.max(2, Math.floor(canvas.clientHeight / cell) + 1);
         const blocked = new Uint8Array(cols * rows);
         for (const step of this.steps) {
+            // An inner flow's box is one obstacle (its elements lie inside it).
+            const {w, h} = this.stepSize(step);
             const c0 = Math.max(0, Math.floor(step.x / cell) - 1);
-            const c1 = Math.min(cols - 1, Math.ceil((step.x + this.tileSize) / cell) + 1);
+            const c1 = Math.min(cols - 1, Math.ceil((step.x + w) / cell) + 1);
             const r0 = Math.max(0, Math.floor(step.y / cell) - 1);
-            const r1 = Math.min(rows - 1, Math.ceil((step.y + this.tileSize) / cell) + 1);
+            const r1 = Math.min(rows - 1, Math.ceil((step.y + h) / cell) + 1);
             for (let r = r0; r <= r1; r++) {
                 for (let c = c0; c <= c1; c++) {
                     blocked[r * cols + c] = 1;
@@ -1583,16 +2283,24 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const usable = Math.max(this.canvasViewport().clientWidth, margin + 2 * size);
         let x = margin;
         let y = margin;
-        for (const step of ordered) {
-            if (x > margin && x + size + margin > usable) { // row break before passing the width
+        let rowHeight = 0;
+        // An inner flow's elements travel inside their box (laid out by it).
+        for (const step of ordered.filter(s => !this.innerContainerOf(s))) {
+            const box = this.stepSize(step);
+            if (x > margin && x + box.w + margin > usable) { // row break before passing the width
                 x = margin;
-                y += size + gap;
+                y += rowHeight + gap;
+                rowHeight = 0;
             }
             step.x = this.snap(x);
             step.y = this.snap(y);
             step.el.style.left = `${step.x}px`;
             step.el.style.top = `${step.y}px`;
-            x += size + gap;
+            if (this.isInner(step)) {
+                this.layoutInner(step);
+            }
+            x += box.w + gap;
+            rowHeight = Math.max(rowHeight, box.h);
         }
         this.canvasViewport().scrollTo({left: 0, top: 0});
         this.redrawLinks();
@@ -1948,6 +2656,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         tab.design = this.currentDesign();
         tab.savedState = this.savedState;
         tab.invalidNames = this.steps.filter(s => s.invalid === true).map(s => s.name);
+        tab.fieldProblems = this.serverFieldProblems();
+        tab.breakpoints = [...this.breakpoints];
     }
 
     /** Clears the canvas completely (steps, links, marks, session) for the next tab's content. */
@@ -1961,6 +2671,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.steps = [];
         this.links = [];
         this.startId = null;
+        this.breakpoints = new Set();
         this.redrawLinks();
     }
 
@@ -1982,7 +2693,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else {
             this.restore();
         }
-        this.applyInvalidStepNames(tab.invalidNames);
+        this.applyInvalidStepNames(tab.invalidNames, tab.fieldProblems ?? tab.flow?.invalidFields);
+        this.restoreBreakpoints(tab.breakpoints);
         // A fresh baseline for a never-stashed tab; a stashed one keeps its dirty state.
         if (tab.savedState !== null) {
             this.savedState = tab.savedState;
@@ -2197,6 +2909,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         ));
         this.links = links.map((l: any) => ({from: l.from, fromPort: l.fromPort, to: l.to}));
         this.startId = start;
+        this.normalizeInnerFlows();
         this.redrawLinks();
         // Old designs may carry a `toolbox` key — ignored: the toolbox is a per-user workspace
         // preference restored from localStorage ({@see restoreToolboxState}), not flow state.
@@ -2242,6 +2955,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     private buildTile(type: string, name: string): HTMLElement {
+        if (type === INNER_FLOW) {
+            return this.buildInnerTile(name);
+        }
         const meta = this.stepMeta[type];
         const el = document.createElement('div');
         el.className = 'aaxis-flow-editor__step';
@@ -2281,6 +2997,40 @@ class OntologyFlowEditorComponent extends BaseComponent {
         return el;
     }
 
+    /**
+     * An inner flow's box: a header (icon + name) over the row its elements are laid out in, the
+     * automatic arrows in an svg layer, and a hint while it is empty. No ports — an inner flow
+     * takes no flow lines; Call Subflow / Foreach Loop invoke it. Sized by {@see layoutInner}.
+     */
+    private buildInnerTile(name: string): HTMLElement {
+        const meta = this.stepMeta[INNER_FLOW];
+        const el = document.createElement('div');
+        el.className = 'aaxis-flow-editor__step aaxis-flow-editor__step--inner';
+        el.dataset.role = 'step';
+        el.dataset.stepType = INNER_FLOW;
+        el.title = `${name} (${meta.label})`;
+        const size = this.innerBoxSize(0, 1);
+        el.style.width = `${size.w}px`;
+        el.style.height = `${size.h}px`;
+        const header = document.createElement('div');
+        header.className = 'aaxis-flow-editor__inner-header';
+        const icon = document.createElement('span');
+        icon.className = `fa ${meta.icon} aaxis-flow-editor__step-icon`;
+        icon.setAttribute('aria-hidden', 'true');
+        const label = document.createElement('span');
+        label.className = 'aaxis-flow-editor__step-name';
+        label.textContent = name;
+        header.append(icon, label);
+        const wires = document.createElementNS(SVG_NS, 'svg');
+        wires.setAttribute('class', 'aaxis-flow-editor__inner-wires');
+        wires.dataset.role = 'inner-wires';
+        const hint = document.createElement('span');
+        hint.className = 'aaxis-flow-editor__inner-hint';
+        hint.textContent = __('aaxis.ontology.flow_editor.inner_flow_drop_hint');
+        el.append(header, wires, hint);
+        return el;
+    }
+
     /** "s" + 6 random alphanumerics, unique among the placed steps. */
     private newStepId(): string {
         const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -2310,7 +3060,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const el = this.buildTile(type, stepName);
         el.style.left = `${pos.x}px`;
         el.style.top = `${pos.y}px`;
-        this.canvas().appendChild(el);
+        if (type === INNER_FLOW) {
+            // Boxes go right above the wires layer, BELOW every tile — their elements (whenever
+            // they were created) must paint on top of them.
+            this.wires.after(el);
+        } else {
+            this.canvas().appendChild(el);
+        }
         const step: PlacedStep = {id: id || this.newStepId(), type, name: stepName, x: pos.x, y: pos.y, config: config || null, el};
         if (anchors?.inSide) {
             step.inSide = anchors.inSide;
@@ -2320,6 +3076,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }
         this.steps.push(step);
         this.positionPorts(step);
+        if (type === INNER_FLOW) {
+            this.layoutInner(step);
+        }
         this.updateReachability();
         this.syncDirty();
 
@@ -2372,7 +3131,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const sections: SettingsSection[] = typed ?? [];
         // Every non-trigger step gets the "Log event" switch on the actions row (left of the
         // buttons); triggers record their run's boundaries and have none.
-        const logEvent = this.stepMeta[step.type].category === 'trigger' ? null : this.logEventSwitch(step.config || {});
+        // An inner flow opens its runs like a subflow trigger does — no switch either.
+        const logEvent = this.stepMeta[step.type].category === 'trigger' || this.isInner(step)
+            ? null
+            : this.logEventSwitch(step.config || {});
         if (logEvent) {
             sections.push(logEvent.section);
         }
@@ -2402,6 +3164,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $(document.body).append($backdrop, $panel);
         this.positionSettings($panel[0], step.el);
 
+        // A step that cannot run (red tile) shows WHERE: its wrong fields get a red border, kept
+        // up to date while the user edits (a fixed field clears, a field emptied turns red).
+        const showProblems = (): void => this.paintFieldProblems($panel, step, sections);
+        const watchProblems = (): void => {
+            if (step.invalid !== true) {
+                return;
+            }
+            showProblems();
+            $panel.on('input change focusout pointerdown pointerup', () => showProblems());
+        };
+
         // While section catalogs load, a spinner overlay blocks every interaction in the panel
         // (buttons included); focus and submit unlock once all loads settle.
         const readies = sections.map(s => s.ready).filter(Boolean) as Promise<any>[];
@@ -2415,9 +3188,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 $loading.remove();
                 this.positionSettings($panel[0], step.el);
                 $input.trigger('focus').trigger('select');
+                watchProblems(); // the selects hold their values only now
             });
         } else {
             $input.trigger('focus').trigger('select');
+            watchProblems();
         }
 
         const close = (): void => {
@@ -2463,6 +3238,49 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
+     * Paints the popup's wrong fields with a red border (the problem in their tooltip): what the
+     * sections find wrong in the controls right now, plus what only the server can judge (DWL
+     * syntax, a cron expression) for keys whose value is still the one it judged.
+     */
+    private paintFieldProblems($panel: any, step: PlacedStep, sections: SettingsSection[]): void {
+        const config = sections.reduce((acc, section) => section.merge(acc), {} as Record<string, any>);
+        const fields: Record<string, any> = {};
+        const problems: Record<string, string> = {};
+        sections.forEach(section => {
+            Object.assign(fields, section.fields || {});
+            Object.entries(section.problems ? section.problems() : {}).forEach(([key, message]) => {
+                problems[key] ??= message;
+            });
+        });
+        Object.entries(step.serverProblems || {}).forEach(([key, message]) => {
+            if (sameConfigValue(config[key], step.config?.[key])) {
+                problems[key] ??= message;
+            }
+        });
+
+        // Unmark everything first (restoring the tooltips the fields had), then mark the wrong ones.
+        $panel.find('[data-field-problem]').each((_i: number, el: HTMLElement) => {
+            const before = el.dataset.titleBefore || '';
+            if (before === '') {
+                el.removeAttribute('title');
+            } else {
+                el.setAttribute('title', before);
+            }
+            el.classList.remove('aaxis-flow-editor__field--invalid');
+            delete el.dataset.fieldProblem;
+            delete el.dataset.titleBefore;
+        });
+        Object.entries(problems).forEach(([key, message]) => {
+            (fields[key]?.toArray?.() || []).forEach((el: HTMLElement) => {
+                el.dataset.titleBefore = el.getAttribute('title') || '';
+                el.dataset.fieldProblem = key;
+                el.classList.add('aaxis-flow-editor__field--invalid');
+                el.setAttribute('title', message);
+            });
+        });
+    }
+
+    /**
      * A settings popup's Confirm: validates the name — the only problems that block — and stores
      * the sections' merged config. Returns the error to show, '' once applied.
      */
@@ -2477,8 +3295,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Section problems (missing/incomplete fields) do NOT block the confirm anymore: the
         // config is stored as-is, the TILE turns red and the flow cannot run until fixed (the
         // server re-checks the same rules on every run attempt).
-        const incomplete = sections.some(section => section.error() !== '');
         const config = sections.reduce((acc, section) => section.merge(acc), {} as Record<string, any>);
+        // What the server judged wrong (DWL syntax, a cron expression) still is for every key the
+        // popup left unchanged — so a confirm does not turn such a tile green.
+        const kept = Object.entries(step.serverProblems || {})
+            .filter(([key]) => sameConfigValue(config[key], step.config?.[key]));
+        step.serverProblems = kept.length ? Object.fromEntries(kept) : undefined;
+        const incomplete = sections.some(section => section.error() !== '') || kept.length > 0;
         step.config = Object.keys(config).length ? config : null;
         this.renameStep(step, name);
         this.markStepInvalid(step, incomplete);
@@ -2501,9 +3324,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             case 'sql_query':
                 return [this.sqlQuerySection($top, $body, panel, initial, $input)];
             case 'sub_flow':
-                return [this.subFlowSection($top, initial, $input)];
+                return [this.subFlowSection($top, initial, $input, step)];
             case 'foreach':
-                return [this.foreachSection($top, initial, $input)];
+                return [this.foreachSection($top, initial, $input, step)];
+            case INNER_FLOW:
+                return [this.innerFlowSection($top, $input, step)];
             case 'dwl_transform':
                 return [this.dwlSection($top, $body, panel, initial, $input)];
             case 'choice':
@@ -2658,8 +3483,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * array variable, seeing the element under the flow-variable name and its 0-based position
      * under `index` (both loop-scoped), over the SHARED context.
      */
-    private foreachSection($top: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        let idByName: Record<string, number> = {};
+    private foreachSection($top: any, initial: Record<string, any>, $nameInput: any, step: PlacedStep): SettingsSection {
+        let keyByName: Record<string, string> = {};
         const combo = this.stringCombo('subflow_placeholder', () => undefined);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.1),
@@ -2679,48 +3504,42 @@ class OntologyFlowEditorComponent extends BaseComponent {
             html: __('aaxis.ontology.flow_editor.foreach_hint')
         }));
 
-        const selectedId = initial.subflow ? String(initial.subflow) : '';
-        const ready = this.flowCatalog()
-            .then((data: {records?: Array<{id: number; name: string | null; type: string}>}) => {
-                idByName = {};
-                const names: string[] = [];
-                (data.records || [])
-                    .filter(f => f.type === 'subflow' && f.id !== this.flow?.id)
-                    .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-                    .forEach(f => {
-                        const name = f.name || String(f.id);
-                        idByName[name] = f.id;
-                        names.push(name);
-                    });
-                combo.setOptions(names);
-                combo.setEnabled(true);
-                const current = names.find(n => String(idByName[n]) === selectedId);
-                if (current) {
-                    combo.setValue(current);
-                }
+        // Subflows AND this canvas's inner flows (see invokeTargets), picked by their label.
+        const selectedKey = invokeKeyOf(initial);
+        const ready = this.invokeTargets(step).then(targets => {
+            keyByName = {};
+            targets.forEach(t => {
+                keyByName[t.name] = t.key;
             });
+            const names = targets.map(t => t.name);
+            combo.setOptions(names);
+            combo.setEnabled(true);
+            const current = names.find(n => keyByName[n] === selectedKey);
+            if (current) {
+                combo.setValue(current);
+            }
+        }).catch(() => undefined);
 
         const RESERVED = new Set(['index', 'flowuuid', 'flow-uuid', 'choiceresults']);
+        const $target = combo.$combo.find('input');
         return {
-            error: () => {
-                if (combo.value() === '' || idByName[combo.value()] === undefined) {
-                    return __('aaxis.ontology.flow_editor.subflow_required');
-                }
-                if (String($array.val() || '').trim() === '') {
-                    return __('aaxis.ontology.flow_editor.foreach_array_required');
-                }
-                const item = String($item.val() || '').trim();
-                if (item === '') {
-                    return __('aaxis.ontology.flow_editor.foreach_item_required');
-                }
-                if (RESERVED.has(item.toLowerCase())) {
-                    return __('aaxis.ontology.flow_editor.foreach_item_reserved', {name: item});
-                }
-                return '';
-            },
+            ...ruled([
+                ['subflow', () => (combo.value() === '' || keyByName[combo.value()] === undefined
+                    ? __('aaxis.ontology.flow_editor.subflow_required')
+                    : '')],
+                ['array', () => (String($array.val() || '').trim() === '' ? __('aaxis.ontology.flow_editor.foreach_array_required') : '')],
+                ['item', () => {
+                    const item = String($item.val() || '').trim();
+                    if (item === '') {
+                        return __('aaxis.ontology.flow_editor.foreach_item_required');
+                    }
+                    return RESERVED.has(item.toLowerCase()) ? __('aaxis.ontology.flow_editor.foreach_item_reserved', {name: item}) : '';
+                }]
+            ]),
+            fields: {subflow: $target, inner: $target, array: $array, item: $item},
             merge: config => ({
                 ...config,
-                subflow: String(idByName[combo.value()] ?? ''),
+                ...invokeConfig(keyByName[combo.value()] ?? ''),
                 array: String($array.val() || '').trim(),
                 item: String($item.val() || '').trim()
             }),
@@ -2733,7 +3552,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * pointerdown selection so the input's blur cannot swallow the click, typing reopens the
      * choice, blur restores the picked value).
      */
-    private stringCombo(placeholderKey: string, onPick: (value: string) => void): {$combo: any; setOptions: (o: string[]) => void; value: () => string; setValue: (v: string) => void; setEnabled: (on: boolean) => void} {
+    private stringCombo(placeholderKey: string, onPick: (value: string) => void, opts: {pickShowsAll?: boolean} = {}): {$combo: any; setOptions: (o: string[]) => void; value: () => string; setValue: (v: string) => void; setEnabled: (on: boolean) => void} {
         let selected = '';
         let options: string[] = [];
         const $combo = $('<div/>', {'class': 'aaxis-flow-editor__combo'});
@@ -2745,7 +3564,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $combo.append($filter, $list);
 
         const renderList = (): void => {
-            const query = String($filter.val() || '').trim().toLowerCase();
+            const typed = String($filter.val() || '');
+            // `pickShowsAll`: the text showing the current pick is no filter (the connector
+            // picker's behavior) — focusing a filled field lists every option.
+            const query = opts.pickShowsAll && typed === selected ? '' : typed.trim().toLowerCase();
             $list.empty();
             const matches = options.filter(o => query === '' || o.toLowerCase().includes(query));
             if (!matches.length) {
@@ -2807,7 +3629,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * parameters with a template of its REQUIRED parameters (one placeholder per declared type);
      * reopening a saved step keeps the stored expression untouched.
      */
-    private invokePhpSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+    private invokePhpSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): SettingsSection {
         const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
@@ -2901,17 +3723,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
 
         return {
-            error: () => {
-                if (String($destination.val() || '').trim() === '') {
-                    return __('aaxis.ontology.flow_editor.destination_required');
-                }
-                if (classCombo.value() === '') {
-                    return __('aaxis.ontology.flow_editor.invoke_php_class_required');
-                }
-                if (methodCombo.value() === '') {
-                    return __('aaxis.ontology.flow_editor.invoke_php_method_required');
-                }
-                return '';
+            ...ruled([
+                ['destination', () => (String($destination.val() || '').trim() === '' ? __('aaxis.ontology.flow_editor.destination_required') : '')],
+                ['class', () => (classCombo.value() === '' ? __('aaxis.ontology.flow_editor.invoke_php_class_required') : '')],
+                ['method', () => (methodCombo.value() === '' ? __('aaxis.ontology.flow_editor.invoke_php_method_required') : '')]
+            ]),
+            fields: {
+                destination: $destination,
+                class: classCombo.$combo.find('input'),
+                method: methodCombo.$combo.find('input'),
+                params: params.$textarea
             },
             merge: config => ({
                 ...config,
@@ -2929,7 +3750,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * resolved value is queued as a log-message FLOW EVENT (aaxis_ontology_flow_events) and the
      * flow simply continues.
      */
-    private eventSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private eventSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): SettingsSection {
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput)
         ));
@@ -2948,9 +3769,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         panel.classList.add('is-wide');
 
         return {
-            error: () => value.value().trim() === ''
-                ? __('aaxis.ontology.flow_editor.event_value_required')
-                : '',
+            ...ruled([['value', () => (value.value().trim() === '' ? __('aaxis.ontology.flow_editor.event_value_required') : '')]]),
+            fields: {value: value.$textarea},
             merge: config => ({...config, value: value.value(), value_dwl: value.isDwl()})
         };
     }
@@ -2961,7 +3781,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * as a Teams Adaptive Card message (stringified when not a string). Only well-formed
      * https:// URLs are accepted (any domain).
      */
-    private msTeamsSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private msTeamsSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): SettingsSection {
         // The context variable whose value becomes the message (stringified when not a string).
         const $message = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 128, placeholder: 'payload'});
         $message.val(String(initial.message || ''));
@@ -2994,16 +3814,17 @@ class OntologyFlowEditorComponent extends BaseComponent {
         };
 
         return {
-            error: () => {
-                if (String($message.val() || '').trim() === '') {
-                    return __('aaxis.ontology.flow_editor.msteams_message_required');
-                }
-                const webhook = String($webhook.val() || '').trim();
-                if (webhook === '') {
-                    return __('aaxis.ontology.flow_editor.msteams_webhook_required');
-                }
-                return httpsOk(webhook) ? '' : __('aaxis.ontology.flow_editor.msteams_webhook_invalid');
-            },
+            ...ruled([
+                ['message', () => (String($message.val() || '').trim() === '' ? __('aaxis.ontology.flow_editor.msteams_message_required') : '')],
+                ['webhook', () => {
+                    const webhook = String($webhook.val() || '').trim();
+                    if (webhook === '') {
+                        return __('aaxis.ontology.flow_editor.msteams_webhook_required');
+                    }
+                    return httpsOk(webhook) ? '' : __('aaxis.ontology.flow_editor.msteams_webhook_invalid');
+                }]
+            ]),
+            fields: {message: $message, webhook: $webhook},
             merge: config => ({
                 ...config,
                 message: String($message.val() || '').trim(),
@@ -3020,7 +3841,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * whether the call needs an authenticated API user (default), and the Response expression —
      * evaluated against the FINAL context — binds `{statusCode, body}` onto the HTTP response.
      */
-    private endpointSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private endpointSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): SettingsSection {
         const enabled = this.enabledSwitch(initial);
         // Default is REQUIRE AUTH: public only when explicitly switched on.
         const pub = this.plainSwitch(initial.public === true, 'endpoint_public_label');
@@ -3079,7 +3900,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         };
 
         return {
-            error: pathError,
+            ...ruled([['path', pathError]]),
+            fields: {path: $path, response: response.$textarea},
             merge: config => enabled.merge({
                 ...config,
                 method: String($method.val()),
@@ -3090,7 +3912,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         };
     }
 
-    private scheduleSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private scheduleSection($top: any, $body: any, initial: Record<string, any>, $nameInput: any): SettingsSection {
         const enabled = this.enabledSwitch(initial);
         const initialMode = initial.mode === 'interval' || (initial.mode === undefined && !initial.expression)
             ? 'interval' : 'cron';
@@ -3153,14 +3975,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
         $mode.on('change', syncMode);
         syncMode();
 
+        const interval = (): boolean => String($mode.val()) === 'interval';
         return {
-            error: () => {
-                if (String($mode.val()) === 'interval') {
+            ...ruled([
+                ['value', () => {
                     const value = Number($value.val());
-                    return Number.isInteger(value) && value >= 1 ? '' : __('aaxis.ontology.flow_editor.schedule_value_invalid');
-                }
-                return isValidCron(String($cron.val() || '')) ? '' : __('aaxis.ontology.flow_editor.cron_expression_invalid');
-            },
+                    return !interval() || (Number.isInteger(value) && value >= 1) ? '' : __('aaxis.ontology.flow_editor.schedule_value_invalid');
+                }],
+                ['expression', () => (interval() || isValidCron(String($cron.val() || ''))
+                    ? ''
+                    : __('aaxis.ontology.flow_editor.cron_expression_invalid'))]
+            ]),
+            fields: {value: $value, expression: $cron},
             merge: config => enabled.merge(String($mode.val()) === 'interval'
                 ? {...config, mode: 'interval', value: Number($value.val()), unit: String($unit.val())}
                 : {...config, mode: 'cron', expression: String($cron.val() || '').trim()})
@@ -3337,13 +4163,128 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     /**
+     * Entity Read / Write's System | Entity row. Each NAME is picked from the known ones (a
+     * type-to-filter dropdown — the entities follow the chosen system) or, its DWL switch on, a
+     * single-line expression yielding the name at run time, like the HTTP Request path (config
+     * `system_dwl` / `entity_dwl`, stored only while on). `attributes()` = the picked entity's
+     * readable attributes — null while either name is an expression (unknown until it runs).
+     */
+    private entityTargetSection($row: any, initial: Record<string, any>, onChange: () => void): SettingsSection & {ready: Promise<any>; rules: FieldRule[]; fields: Record<string, any>; attributes: () => {name: string}[] | null} {
+        let entities: {name: string; systemName?: string; attributes?: {name: string}[]; readerAttributes?: string[]}[] = [];
+        let loaded = false;
+        const fillEntities = (systemChanged: boolean): void => {
+            const names = system.isDwl()
+                ? Array.from(new Set(entities.map(e => e.name))).sort((a, b) => a.localeCompare(b))
+                : entities.filter(e => e.systemName === system.value()).map(e => e.name);
+            entity.setOptions(names);
+            // Another system: a picked entity it does not have is no longer a valid pick.
+            if (systemChanged && loaded && !entity.isDwl() && entity.value() !== '' && !names.includes(entity.value())) {
+                entity.setValue('');
+            }
+        };
+        const system = this.entityNamePicker('config_system_label', String(initial.system || ''), initial.system_dwl === true, () => {
+            fillEntities(true);
+            onChange();
+        });
+        const entity = this.entityNamePicker('config_entity_label', String(initial.entity || ''), initial.entity_dwl === true, onChange);
+        $row.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('config_system_label', system.$el),
+            this.settingsCol('config_entity_label', entity.$el)
+        ));
+
+        const ready = this.entityCatalog()
+            .then((data: {systems?: {name: string}[]; entities?: any[]}) => {
+                entities = data.entities || [];
+                system.setOptions((data.systems || []).map(s => s.name));
+                system.setEnabled(true);
+                entity.setEnabled(true);
+                loaded = true;
+                fillEntities(false);
+                onChange();
+            })
+            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
+
+        const required = (picker: {value: () => string}) => (): string => (picker.value() === ''
+            ? __('aaxis.ontology.flow_editor.config_system_entity_required')
+            : '');
+        const rules: FieldRule[] = [['system', required(system)], ['entity', required(entity)]];
+        return {
+            ...ruled(rules),
+            rules,
+            fields: {system: system.$fields, entity: entity.$fields},
+            merge: config => {
+                const merged: Record<string, any> = {...config, system: system.value(), entity: entity.value()};
+                delete merged.system_dwl;
+                delete merged.entity_dwl;
+                return {
+                    ...merged,
+                    ...(system.isDwl() ? {system_dwl: true} : {}),
+                    ...(entity.isDwl() ? {entity_dwl: true} : {})
+                };
+            },
+            ready,
+            attributes: () => {
+                if (system.isDwl() || entity.isDwl()) {
+                    return null;
+                }
+                const match = entities.find(e => e.systemName === system.value() && e.name === entity.value());
+                if (!match) {
+                    return [];
+                }
+                return match.readerAttributes?.length ? match.readerAttributes.map(name => ({name})) : (match.attributes || []);
+            }
+        };
+    }
+
+    /**
+     * One entity-name control: a type-to-filter dropdown of the known names, swapped — by the DWL
+     * switch inside its left end (the HTTP Request path's switch) — for a single-line DWL input.
+     * Both live in the same box, so the switch stays where it is whichever one shows.
+     */
+    private entityNamePicker(labelKey: string, initial: string, dwl: boolean, onChange: () => void): {$el: any; $fields: any; value: () => string; isDwl: () => boolean; setOptions: (o: string[]) => void; setValue: (v: string) => void; setEnabled: (on: boolean) => void} {
+        const expression = createDwlInput({
+            value: dwl ? initial : '',
+            dwl,
+            label: __(`aaxis.ontology.flow_editor.${labelKey}`),
+            placeholder: __('aaxis.ontology.flow_editor.entity_name_dwl_placeholder'),
+            maxlength: 1024
+        });
+        const combo = this.stringCombo('entity_name_placeholder', () => onChange(), {pickShowsAll: true});
+        const $pick = combo.$combo.find('input').addClass('aaxis-dwl-input__input');
+        combo.$combo.addClass('aaxis-flow-editor__entity-name');
+        expression.$el.prepend(combo.$combo);
+        if (!dwl) {
+            combo.setValue(initial);
+        }
+        const sync = (): void => {
+            expression.$input.toggle(expression.isDwl());
+            combo.$combo.toggle(!expression.isDwl());
+        };
+        expression.$toggle.on('change', () => {
+            sync();
+            onChange();
+        });
+        sync();
+
+        return {
+            $el: expression.$el,
+            $fields: expression.$input.add($pick),
+            value: () => (expression.isDwl() ? expression.value().trim() : combo.value()),
+            isDwl: expression.isDwl,
+            setOptions: combo.setOptions,
+            setValue: combo.setValue,
+            setEnabled: combo.setEnabled
+        };
+    }
+
+    /**
      * System + Entity pair (entity options follow the chosen system), fed by ONE
      * aaxis_ontology_entity_list fetch. Both values are required. `inline` renders the two
      * selects side by side on one row instead of stacked. `onChange` fires whenever the selected
      * entity may have changed (initial load included); `attributes()` exposes the currently
      * selected entity's attributes (e.g. for the reader's Order By options).
      */
-    private systemEntitySection($body: any, initial: Record<string, any>, inline = false, onChange?: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>; attributes: () => {name: string}[]} {
+    private systemEntitySection($body: any, initial: Record<string, any>, inline = false, onChange?: () => void): SettingsSection & {ready: Promise<any>; rules: FieldRule[]; fields: Record<string, any>; attributes: () => {name: string}[]} {
         const $system = $('<select/>', {'class': 'form-control', disabled: true});
         const $entity = $('<select/>', {'class': 'form-control', disabled: true});
         const loadingOption = (): any => $('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.loading')});
@@ -3391,9 +4332,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $entity.on('change', onChange);
         }
 
+        // Both are required; either one missing reports the same message (and paints its select).
+        const required = ($select: any) => (): string => (String($select.val() || '') === ''
+            ? __('aaxis.ontology.flow_editor.config_system_entity_required')
+            : '');
+        const rules: FieldRule[] = [['system', required($system)], ['entity', required($entity)]];
         return {
-            error: () => (String($system.val() || '') !== '' && String($entity.val() || '') !== '')
-                ? '' : __('aaxis.ontology.flow_editor.config_system_entity_required'),
+            ...ruled(rules),
+            rules,
+            fields: {system: $system, entity: $entity},
             merge: config => ({...config, system: String($system.val()), entity: String($entity.val())}),
             ready,
             attributes: () => {
@@ -3419,7 +4366,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * sees every key of the debug context (payload, prior destinations…) as a variable; its
      * result lands under the destination. Syntax is validated server-side on save.
      */
-    private dwlSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private dwlSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): SettingsSection {
         const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput),
@@ -3438,12 +4385,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
         panel.classList.add('is-wide');
 
         return {
-            error: () => {
-                if (code.value().trim() === '') {
-                    return __('aaxis.ontology.flow_editor.dwl_code_required');
-                }
-                return this.destinationError($destination);
-            },
+            ...ruled([
+                ['code', () => (code.value().trim() === '' ? __('aaxis.ontology.flow_editor.dwl_code_required') : '')],
+                ['destination', () => this.destinationError($destination)]
+            ]),
+            fields: {code: code.$textarea, destination: $destination},
             merge: config => ({
                 ...config,
                 code: code.value(),
@@ -3457,7 +4403,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * evaluates truthy against the context the flow continues on the GREEN output; otherwise on
      * the RED one (optional — leaving it unconnected simply ends the flow there).
      */
-    private choiceSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private choiceSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): SettingsSection {
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput)
         ));
@@ -3477,9 +4423,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         panel.classList.add('is-wide');
 
         return {
-            error: () => expression.value().trim() === ''
-                ? __('aaxis.ontology.flow_editor.choice_expression_required')
-                : '',
+            ...ruled([['expression', () => (expression.value().trim() === '' ? __('aaxis.ontology.flow_editor.choice_expression_required') : '')]]),
+            fields: {expression: expression.$textarea},
             merge: config => ({...config, expression: expression.value()})
         };
     }
@@ -3488,7 +4433,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * Logger — name plus the (always-DWL) message: the resolved text is written to the PHP
      * application log as one "[Aaxis Flow - <flow name>] <message>" line.
      */
-    private loggerSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>} {
+    private loggerSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): SettingsSection {
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput)
         ));
@@ -3507,9 +4452,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
         panel.classList.add('is-wide');
 
         return {
-            error: () => message.value().trim() === ''
-                ? __('aaxis.ontology.flow_editor.logger_message_required')
-                : '',
+            ...ruled([['message', () => (message.value().trim() === '' ? __('aaxis.ontology.flow_editor.logger_message_required') : '')]]),
+            fields: {message: message.$textarea},
             merge: config => ({...config, message: message.value(), message_dwl: message.isDwl()})
         };
     }
@@ -3520,7 +4464,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * then System | Entity; readers add the Load row (All / By id / By attribute + the "All"
      * extras), writers the Content field (context key, or a DWL expression via its toggle).
      */
-    private entityIoSection(kind: 'reader' | 'writer', $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+    private entityIoSection(kind: 'reader' | 'writer', $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): SettingsSection {
         const $destination = this.destinationInput(initial);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.2),
@@ -3528,20 +4472,27 @@ class OntologyFlowEditorComponent extends BaseComponent {
         ));
 
         // The reader's Load row holds up to four selects (mode, order by, direction, limit) —
-        // at the default width their values are cut, so the reader takes the medium panel.
-        if (kind === 'reader') {
-            panel.classList.add('is-medium');
-        }
+        // at the default width their values are cut, so the reader takes the medium panel; the
+        // writer too, so both show their System | Entity names (and DWL switches) as wide.
+        panel.classList.add('is-medium');
 
         let onEntityChange: () => void = () => undefined;
-        const entityPair = this.systemEntitySection($body, initial, true, () => onEntityChange());
+        // In the FIXED top rows: the middle of the panel scrolls and would clip the name dropdowns.
+        const entityPair = this.entityTargetSection($top, initial, () => onEntityChange());
 
         // Reader: the Load row (mode + its per-mode fields). Same controls as the generic reader.
+        // Attribute / Order by are selects over the picked entity's attributes — and free text
+        // while the system or entity name is a DWL expression (its attributes are unknown then).
         const $mode = $('<select/>', {'class': 'form-control'});
         const $recordId = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255, value: String(initial.record_id || '')});
         const $searchAttr = $('<select/>', {'class': 'form-control'});
+        const $searchAttrText = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255, value: String(initial.attribute || ''), 'data-role': 'attribute-text'});
         const $searchValue = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255, value: String(initial.attr_value || '')});
         const $orderBy = $('<select/>', {'class': 'form-control'});
+        const $orderByText = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 255, value: String(initial.order_by || ''), 'data-role': 'order-by-text'});
+        const dynamicNames = (): boolean => entityPair.attributes() === null;
+        const attributeValue = (): string => String((dynamicNames() ? $searchAttrText.val() : $searchAttr.val()) || '').trim();
+        const orderByValue = (): string => String((dynamicNames() ? $orderByText.val() : $orderBy.val()) || '').trim();
         const $orderDir = $('<select/>', {'class': 'form-control'});
         const $limit = $('<select/>', {'class': 'form-control'});
         let $recordIdCol: any = null;
@@ -3565,7 +4516,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $searchAttrCol.toggle(mode === 'by_attribute');
             $searchValueCol.toggle(mode === 'by_attribute');
             $orderByCol.toggle(mode === 'all');
-            $orderDirCol.toggle(mode === 'all' && String($orderBy.val() || '') !== '');
+            $orderDirCol.toggle(mode === 'all' && orderByValue() !== '');
             $limitCol.toggle(mode === 'all');
             reposition();
         };
@@ -3584,9 +4535,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             ['1', '10', '100', '1000'].forEach(value => $limit.append($('<option/>', {value, text: value, selected: value === currentLimit})));
 
             $recordIdCol = this.settingsCol('reader_record_id_label', $recordId, 1.4);
-            $searchAttrCol = this.settingsCol('reader_attribute_label', $searchAttr, 1.3);
+            $searchAttrCol = this.settingsCol('reader_attribute_label', $searchAttr, 1.3).append($searchAttrText);
             $searchValueCol = this.settingsCol('reader_attr_value_label', $searchValue, 1.4);
-            $orderByCol = this.settingsCol('reader_order_by_label', $orderBy, 1.3);
+            $orderByCol = this.settingsCol('reader_order_by_label', $orderBy, 1.3).append($orderByText);
             $orderDirCol = this.settingsCol('reader_order_dir_label', $orderDir, 0.8);
             $limitCol = this.settingsCol('reader_limit_label', $limit, 0.9);
             $body.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
@@ -3598,8 +4549,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
             // the first fill.
             let pendingOrderBy = String(initial.order_by || '');
             let pendingSearchAttr = String(initial.attribute || '');
+            // Selects for a picked entity, free text for a computed one.
+            const showAttributeInputs = (): void => {
+                const dynamic = dynamicNames();
+                $searchAttr.toggle(!dynamic);
+                $orderBy.toggle(!dynamic);
+                $searchAttrText.toggle(dynamic);
+                $orderByText.toggle(dynamic);
+            };
             onEntityChange = (): void => {
+                showAttributeInputs();
                 const attributes = entityPair.attributes();
+                if (attributes === null) {
+                    syncModeRow();
+                    return;
+                }
                 const currentOrder = String($orderBy.val() || '') || pendingOrderBy;
                 pendingOrderBy = '';
                 $orderBy.empty().append($('<option/>', {value: '', text: __('aaxis.ontology.flow_editor.reader_order_by_none')}));
@@ -3616,32 +4580,39 @@ class OntologyFlowEditorComponent extends BaseComponent {
             };
             $mode.on('change', syncModeRow);
             $orderBy.on('change', syncModeRow);
+            $orderByText.on('input', syncModeRow);
+            showAttributeInputs();
             syncModeRow();
         } else {
             $body.append(content.$el);
         }
 
+        const readerMode = (mode: string): boolean => kind === 'reader' && String($mode.val()) === mode;
         return {
-            error: () => {
-                const pairError = entityPair.error();
-                if (pairError !== '') {
-                    return pairError;
-                }
-                if (kind === 'reader' && String($mode.val()) === 'by_id' && String($recordId.val() || '').trim() === '') {
-                    return __('aaxis.ontology.flow_editor.reader_record_id_required');
-                }
-                if (kind === 'reader' && String($mode.val()) === 'by_attribute') {
-                    if (String($searchAttr.val() || '') === '') {
-                        return __('aaxis.ontology.flow_editor.reader_attribute_required');
-                    }
-                    if (String($searchValue.val() || '').trim() === '') {
-                        return __('aaxis.ontology.flow_editor.reader_attr_value_required');
-                    }
-                }
-                if (kind === 'writer' && content.value().trim() === '') {
-                    return __('aaxis.ontology.flow_editor.writer_content_required');
-                }
-                return this.destinationError($destination);
+            ...ruled([
+                ...entityPair.rules,
+                ['record_id', () => (readerMode('by_id') && String($recordId.val() || '').trim() === ''
+                    ? __('aaxis.ontology.flow_editor.reader_record_id_required')
+                    : '')],
+                ['attribute', () => (readerMode('by_attribute') && attributeValue() === ''
+                    ? __('aaxis.ontology.flow_editor.reader_attribute_required')
+                    : '')],
+                ['attr_value', () => (readerMode('by_attribute') && String($searchValue.val() || '').trim() === ''
+                    ? __('aaxis.ontology.flow_editor.reader_attr_value_required')
+                    : '')],
+                ['content', () => (kind === 'writer' && content.value().trim() === ''
+                    ? __('aaxis.ontology.flow_editor.writer_content_required')
+                    : '')],
+                ['destination', () => this.destinationError($destination)]
+            ]),
+            fields: {
+                ...entityPair.fields,
+                destination: $destination,
+                record_id: $recordId,
+                attribute: $searchAttr.add($searchAttrText),
+                order_by: $orderBy.add($orderByText),
+                attr_value: $searchValue,
+                content: content.$textarea
             },
             merge: config => {
                 const withPair = entityPair.merge({...config, destination: String($destination.val() || '').trim()});
@@ -3650,10 +4621,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     if (withPair.mode === 'by_id') {
                         withPair.record_id = String($recordId.val() || '').trim();
                     } else if (withPair.mode === 'by_attribute') {
-                        withPair.attribute = String($searchAttr.val() || '');
+                        withPair.attribute = attributeValue();
                         withPair.attr_value = String($searchValue.val() || '').trim();
                     } else {
-                        const orderBy = String($orderBy.val() || '');
+                        const orderBy = orderByValue();
                         if (orderBy !== '') {
                             withPair.order_by = orderBy;
                             withPair.order_dir = String($orderDir.val());
@@ -3681,7 +4652,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * and the flow moves on without its response, so the Destination is emptied and disabled while
      * the switch is on (and left out of the config).
      */
-    private httpRequestSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+    private httpRequestSection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any, reposition: () => void): SettingsSection {
         // rest_api connectors only — this step IS an HTTP call.
         const connectors = this.connectorPicker(['rest_api'], String(initial.connector || ''));
         const $connector = connectors.$select;
@@ -3762,14 +4733,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
         syncBodyContent();
 
         return {
-            error: () => {
-                if (String($connector.val() || '') === '') {
-                    return __('aaxis.ontology.flow_editor.reader_connector_required');
-                }
-                if (path.value().trim() === '') {
-                    return __('aaxis.ontology.flow_editor.reader_path_required');
-                }
-                return async.isOn() ? '' : this.destinationError($destination);
+            ...ruled([
+                ['connector', () => (String($connector.val() || '') === '' ? __('aaxis.ontology.flow_editor.reader_connector_required') : '')],
+                ['path', () => (path.value().trim() === '' ? __('aaxis.ontology.flow_editor.reader_path_required') : '')],
+                ['destination', () => (async.isOn() ? '' : this.destinationError($destination))]
+            ]),
+            fields: {
+                connector: this.connectorFilter(connectors.$el),
+                path: path.$input,
+                destination: $destination,
+                body_content: bodyContent.$textarea
             },
             merge: config => {
                 const merged: Record<string, any> = {
@@ -3802,7 +4775,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * are bound from row 3's Bindings (a context key or DWL expression: an object = one run, an
      * ARRAY = the query runs once per element).
      */
-    private sqlQuerySection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+    private sqlQuerySection($top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): SettingsSection {
         // Database connectors only — this step IS a SQL call.
         const connectors = this.connectorPicker(['database'], String(initial.connector || ''));
         const $connector = connectors.$select;
@@ -3834,14 +4807,16 @@ class OntologyFlowEditorComponent extends BaseComponent {
         panel.classList.add('is-wide');
 
         return {
-            error: () => {
-                if (String($connector.val() || '') === '') {
-                    return __('aaxis.ontology.flow_editor.reader_connector_required');
-                }
-                if (sql.value().trim() === '') {
-                    return __('aaxis.ontology.flow_editor.sql_required');
-                }
-                return this.destinationError($destination);
+            ...ruled([
+                ['connector', () => (String($connector.val() || '') === '' ? __('aaxis.ontology.flow_editor.reader_connector_required') : '')],
+                ['sql', () => (sql.value().trim() === '' ? __('aaxis.ontology.flow_editor.sql_required') : '')],
+                ['destination', () => this.destinationError($destination)]
+            ]),
+            fields: {
+                connector: this.connectorFilter(connectors.$el),
+                sql: sql.$textarea,
+                binding: binding.$textarea,
+                destination: $destination
             },
             merge: config => {
                 const merged: Record<string, any> = {
@@ -3864,11 +4839,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
     /**
      * Call Subflow (type `sub_flow`): just the Name and WHICH subflow to invoke — a searchable
      * combobox (name-ordered; typing filters until an item is picked; the current flow itself is
-     * never offered). The config stores the subflow's id, so renames don't break the call.
+     * never offered). The config stores the subflow's id, so renames don't break the call. This
+     * canvas's INNER FLOWS are offered too (listed first): picking one stores `inner` (its step id)
+     * instead of `subflow`.
      */
-    private subFlowSection($top: any, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
-        let selectedId: string = initial.subflow ? String(initial.subflow) : '';
-        let options: Array<{id: number; name: string}> = [];
+    private subFlowSection($top: any, initial: Record<string, any>, $nameInput: any, step: PlacedStep): SettingsSection {
+        let selectedKey: string = invokeKeyOf(initial);
+        let options: Array<{key: string; name: string}> = [];
 
         const $combo = $('<div/>', {'class': 'aaxis-flow-editor__combo'});
         const $filter = $('<input/>', {
@@ -3892,13 +4869,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
             matches.forEach(o => {
                 const $option = $('<button/>', {
                     type: 'button',
-                    'class': 'aaxis-flow-editor__combo-option' + (String(o.id) === selectedId ? ' is-selected' : ''),
+                    'class': 'aaxis-flow-editor__combo-option' + (o.key === selectedKey ? ' is-selected' : ''),
                     text: o.name
                 });
                 // pointerdown, not click: the input's blur would hide the list first.
                 $option.on('pointerdown', (e: any) => {
                     e.preventDefault();
-                    selectedId = String(o.id);
+                    selectedKey = o.key;
                     $filter.val(o.name);
                     $list.prop('hidden', true);
                 });
@@ -3910,9 +4887,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             // Typing again REOPENS the choice: nothing counts as selected until an item is picked.
             if ($filter.is(':focus')) {
                 const typed = String($filter.val() || '');
-                const current = options.find(o => String(o.id) === selectedId);
+                const current = options.find(o => o.key === selectedKey);
                 if (current?.name !== typed) {
-                    selectedId = '';
+                    selectedKey = '';
                 }
                 renderList();
                 $list.prop('hidden', false);
@@ -3922,31 +4899,76 @@ class OntologyFlowEditorComponent extends BaseComponent {
             window.setTimeout(() => {
                 $list.prop('hidden', true);
                 // Restore the picked name (or clear a half-typed non-selection).
-                const current = options.find(o => String(o.id) === selectedId);
+                const current = options.find(o => o.key === selectedKey);
                 $filter.val(current ? current.name : '');
             }, 120);
         });
 
-        const ready = this.flowCatalog()
-            .then((data: {records?: Array<{id: number; name: string | null; type: string}>}) => {
-                options = (data.records || [])
-                    .filter(f => f.type === 'subflow' && f.id !== this.flow?.id)
-                    .map(f => ({id: f.id, name: f.name || String(f.id)}))
-                    .sort((a, b) => a.name.localeCompare(b.name));
-                const current = options.find(o => String(o.id) === selectedId);
-                if (current) {
-                    $filter.val(current.name);
-                } else {
-                    selectedId = '';
-                }
-                $filter.prop('disabled', false);
-            })
-            .catch(() => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')));
+        const ready = this.invokeTargets(step).then(targets => {
+            options = targets;
+            const current = options.find(o => o.key === selectedKey);
+            if (current) {
+                $filter.val(current.name);
+            } else {
+                selectedKey = '';
+            }
+            $filter.prop('disabled', false);
+        }).catch(() => undefined);
 
         return {
-            error: () => (selectedId === '' ? __('aaxis.ontology.flow_editor.subflow_required') : ''),
-            merge: config => ({...config, subflow: selectedId}),
+            ...ruled([['subflow', () => (selectedKey === '' ? __('aaxis.ontology.flow_editor.subflow_required') : '')]]),
+            fields: {subflow: $filter, inner: $filter},
+            merge: config => ({...config, ...invokeConfig(selectedKey)}),
             ready
+        };
+    }
+
+    /**
+     * What a Call Subflow / Foreach Loop can invoke, as picker options: this canvas's INNER FLOWS
+     * first (by name — except the one holding the step itself, which would call itself), then
+     * every catalog subflow but the flow being edited. Keys: `inner:<step id>` / `flow:<flow id>`
+     * ({@see invokeConfig}). A failed catalog load still offers the inner flows — and rejects
+     * (the picker stays disabled) when there are none.
+     */
+    private invokeTargets(step: PlacedStep): Promise<Array<{key: string; name: string}>> {
+        const own = this.innerContainerOf(step);
+        const inner = this.steps
+            .filter(s => this.isInner(s) && s !== own)
+            .map(s => ({key: `inner:${s.id}`, name: __('aaxis.ontology.flow_editor.inner_flow_option', {name: s.name})}))
+            .sort((a, b) => a.name.localeCompare(b.name));
+        return this.flowCatalog()
+            .then((data: {records?: Array<{id: number; name: string | null; type: string}>}) => (data.records || [])
+                .filter(f => f.type === 'subflow' && f.id !== this.flow?.id)
+                .map(f => ({key: `flow:${f.id}`, name: f.name || String(f.id)}))
+                .sort((a, b) => a.name.localeCompare(b.name)))
+            .catch((error: unknown) => {
+                messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error'));
+                if (!inner.length) {
+                    throw error;
+                }
+                return [] as Array<{key: string; name: string}>;
+            })
+            .then(subflows => [...inner, ...subflows]);
+    }
+
+    /**
+     * Inner Flow: its Name, plus how it works. The elements (`children`) are managed on the canvas
+     * — the popup only carries them through.
+     */
+    private innerFlowSection($top: any, $nameInput: any, step: PlacedStep): SettingsSection {
+        $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
+            this.settingsCol('step_name_label', $nameInput)
+        ));
+        $top.append($('<p/>', {
+            'class': 'aaxis-flow-editor__settings-hint',
+            text: __('aaxis.ontology.flow_editor.inner_flow_hint')
+        }));
+        return {
+            error: () => '',
+            merge: config => {
+                const branches = innerBranchIds(step.config);
+                return {...config, children: innerChildIds(step.config), ...(Object.keys(branches).length ? {branches} : {})};
+            }
         };
     }
 
@@ -3957,7 +4979,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * the New name. Row 1: Name | Connector | Destination; row 2 (read only): Content type |
      * Reader options; then the Path field; last (write/rename only): the extra field.
      */
-    private fileOpSection(type: string, $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): {error: () => string; merge: (c: Record<string, any>) => Record<string, any>; ready: Promise<any>} {
+    private fileOpSection(type: string, $top: any, $body: any, panel: HTMLElement, initial: Record<string, any>, $nameInput: any): SettingsSection {
         // File-based connectors only — these steps talk to a storage.
         const connectors = this.connectorPicker(['file_system', 'sftp', 'bucket'], String(initial.connector || ''));
         const $connector = connectors.$select;
@@ -4001,20 +5023,20 @@ class OntologyFlowEditorComponent extends BaseComponent {
         panel.classList.add('is-wide');
 
         return {
-            error: () => {
-                if (String($connector.val() || '') === '') {
-                    return __('aaxis.ontology.flow_editor.reader_connector_required');
-                }
-                if (path.value().trim() === '') {
-                    return __('aaxis.ontology.flow_editor.reader_path_required');
-                }
-                if (content?.value().trim() === '') {
-                    return __('aaxis.ontology.flow_editor.writer_content_required');
-                }
-                if (newName?.value().trim() === '') {
-                    return __('aaxis.ontology.flow_editor.file_new_name_required');
-                }
-                return this.destinationError($destination);
+            ...ruled([
+                ['connector', () => (String($connector.val() || '') === '' ? __('aaxis.ontology.flow_editor.reader_connector_required') : '')],
+                ['path', () => (path.value().trim() === '' ? __('aaxis.ontology.flow_editor.reader_path_required') : '')],
+                ['content', () => (content?.value().trim() === '' ? __('aaxis.ontology.flow_editor.writer_content_required') : '')],
+                ['new_name', () => (newName?.value().trim() === '' ? __('aaxis.ontology.flow_editor.file_new_name_required') : '')],
+                ['destination', () => this.destinationError($destination)]
+            ]),
+            fields: {
+                connector: this.connectorFilter(connectors.$el),
+                path: path.$textarea,
+                destination: $destination,
+                ...(content ? {content: content.$textarea} : {}),
+                ...(newName ? {new_name: newName.$textarea} : {}),
+                ...(reader ? reader.fields : {})
             },
             merge: config => {
                 const merged: Record<string, any> = {
@@ -4045,7 +5067,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * None, and neither key is stored then. A type the list does not offer (an imported flow's
      * `text/csv`, say) is kept as an extra option rather than silently dropped.
      */
-    private fileReaderRow($top: any, initial: Record<string, any>): {merge: (c: Record<string, any>) => Record<string, any>} {
+    private fileReaderRow($top: any, initial: Record<string, any>): {merge: (c: Record<string, any>) => Record<string, any>; fields: Record<string, any>} {
         const initialType = String(initial.content_type || '');
         const $type = $('<select/>', {
             'class': 'form-control no-uniform', 'data-role': 'file-content-type',
@@ -4078,6 +5100,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         ));
 
         return {
+            fields: {content_type: $type, reader_options: options.$input},
             merge: config => {
                 const rest = {...config};
                 delete rest.content_type;
@@ -4090,6 +5113,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 return {...rest, content_type: contentType, ...(readerOptions === '' ? {} : {reader_options: readerOptions})};
             }
         };
+    }
+
+    /** The visible part of a connector picker (its filter input) — where a connector problem shows. */
+    private connectorFilter($picker: any): any {
+        return $picker.find('[data-role="connector-filter"]');
     }
 
     /**
@@ -4161,6 +5189,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     private removeStep(step: PlacedStep): void {
+        if (!this.steps.includes(step)) {
+            return; // already gone (an inner flow removed with the selection took its elements)
+        }
+        if (this.isInner(step)) {
+            // An inner flow goes with everything inside it.
+            this.innerMembers(step).forEach(child => this.removeStep(child));
+        } else {
+            this.detachFromInner(step);
+        }
         step.el.remove();
         this.steps = this.steps.filter(s => s !== step);
         this.links = this.links.filter(l => l.from !== step.id && l.to !== step.id);
@@ -4168,6 +5205,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.startId = null;
         }
         this.selection.delete(step);
+        if (this.breakpoints.delete(step.id)) {
+            this.persistBreakpoints();
+        }
+        if (this.isInner(step)) {
+            this.markBrokenInnerRefs(); // its callers now point nowhere
+        }
         this.redrawLinks();
         this.syncDirty();
     }
@@ -4195,6 +5238,22 @@ class OntologyFlowEditorComponent extends BaseComponent {
                         reachable.add(link.to);
                         queue.push(link.to);
                     }
+                }
+            }
+        }
+        // An inner flow runs when a reachable Call Subflow / Foreach Loop invokes it — and its
+        // elements may invoke further inner flows.
+        for (let grew = trigger !== null; grew;) {
+            grew = false;
+            for (const step of this.steps) {
+                const target = reachable.has(step.id) && (step.type === 'sub_flow' || step.type === 'foreach')
+                    ? innerTargetOf(step.config)
+                    : null;
+                const box = target ? this.stepById(target) : null;
+                if (box && this.isInner(box) && !reachable.has(box.id)) {
+                    reachable.add(box.id);
+                    this.innerMembers(box).forEach(child => reachable.add(child.id));
+                    grew = true;
                 }
             }
         }
@@ -4265,9 +5324,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         } else if (this.ghostDrag?.pointerId === e.pointerId) {
             this.dropGhost(e);
         } else if (this.stepDrag?.pointerId === e.pointerId) {
-            this.stepDrag.step.el.classList.remove('is-moving');
-            this.stepDrag.group.forEach(g => g.step.el.classList.remove('is-moving'));
-            this.stepDrag = null;
+            this.endStepDrag(e);
         } else if (this.linkDrag?.pointerId === e.pointerId) {
             this.dropLink(e);
         } else if (this.marqueeDrag?.pointerId === e.pointerId) {
@@ -4385,6 +5442,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const x = e.clientX - bounds.left - this.tileSize / 2;
         const y = e.clientY - bounds.top - this.tileSize / 2;
 
+        // Released inside an inner flow's box: the element joins it, placed in the row before /
+        // after the elements it was dropped next to (and wired automatically).
+        const box = this.innerAt(e.clientX - bounds.left, e.clientY - bounds.top);
+        if (box !== null) {
+            this.dropIntoInner(type, box, e.clientX - bounds.left, e.clientY - bounds.top);
+            return;
+        }
+
         // Only one trigger per flow: dropping a second one asks to replace the existing trigger.
         if (this.stepMeta[type].category === 'trigger') {
             const existingTrigger = this.findTrigger();
@@ -4430,6 +5495,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.addStepFromDrop(type, x, y, e.clientX - bounds.left, e.clientY - bounds.top);
     }
 
+    /** A toolbox drop inside an inner flow's box (triggers and inner flows cannot go there). */
+    private dropIntoInner(type: string, box: PlacedStep, px: number, py: number): void {
+        if (!this.canJoinInner(type)) {
+            messenger.notificationFlashMessage('warning', __('aaxis.ontology.flow_editor.inner_flow_not_allowed'));
+            return;
+        }
+        const target = this.innerDropTarget(box, px, py);
+        const added = this.addStep(type, box.x, box.y);
+        this.attachToInner(box, added, target);
+        if (REQUIRES_CONFIG.has(type)) {
+            this.markStepInvalid(added, true);
+        }
+        this.syncDirty();
+    }
+
     /**
      * A toolbox drop: places the tile — CHAINED when released onto an existing element that still
      * has a free flow-out port (the drop makes it that element's NEXT step: positioned one
@@ -4440,7 +5520,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         // Triggers accept no incoming line — they never chain.
         const target = this.stepMeta[type].category === 'trigger'
             ? null
-            : this.steps.find(s => px >= s.x && px <= s.x + this.tileSize && py >= s.y && py <= s.y + this.tileSize) || null;
+            : this.steps.find(s => !this.isInner(s) && px >= s.x && px <= s.x + this.tileSize && py >= s.y && py <= s.y + this.tileSize) || null;
         const freePort = target === null ? -1 : this.firstFreePort(target);
         const added = target !== null && freePort >= 0
             ? this.addChainedStep(type, target, freePort)
@@ -4526,6 +5606,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (this.stepMeta[target.type].category === 'trigger') {
             return __('aaxis.ontology.flow_editor.link_target_trigger');
         }
+        // Inner flows are invoked (Call Subflow / Foreach Loop), never wired; their elements are
+        // chained automatically.
+        if (this.isInner(target)) {
+            return __('aaxis.ontology.flow_editor.link_target_inner_flow');
+        }
+        if (this.innerContainerOf(target)) {
+            return __('aaxis.ontology.flow_editor.link_target_inner_child');
+        }
         // The "Start here" arrow counts as the element's one incoming line.
         if (this.links.some(l => l.to === target.id) || this.startId === target.id) {
             return __('aaxis.ontology.flow_editor.link_target_used');
@@ -4534,6 +5622,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
     }
 
     private startLinkDrag(e: PointerEvent, from: PlacedStep, fromPort: number): void {
+        if (this.innerContainerOf(from)) {
+            return; // an inner flow's elements are chained automatically (their ports are hidden)
+        }
         const path = document.createElementNS(SVG_NS, 'path');
         path.dataset.role = 'wire-temp';
         this.brandTempWire(path, from, fromPort);
@@ -4695,7 +5786,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
 
     /** The placed step whose tile contains the given viewport point, if any. */
     private stepAt(clientX: number, clientY: number): PlacedStep | null {
-        for (const step of this.steps) {
+        // Plain tiles first: an inner flow's box contains its elements' tiles.
+        const ordered = [...this.steps.filter(s => !this.isInner(s)), ...this.steps.filter(s => this.isInner(s))];
+        for (const step of ordered) {
             const rect = step.el.getBoundingClientRect();
             if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
                 return step;
@@ -4759,10 +5852,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         el.style.height = `${height}px`;
 
         // Live selection: every tile intersecting the rubber band.
-        this.select(this.steps.filter(s =>
-            s.x < left + width && s.x + this.tileSize > left
-            && s.y < top + height && s.y + this.tileSize > top
-        ));
+        this.select(this.steps.filter(s => {
+            const size = this.stepSize(s);
+            return s.x < left + width && s.x + size.w > left && s.y < top + height && s.y + size.h > top;
+        }));
     }
 
     private endMarquee(): void {
@@ -4794,8 +5887,8 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * last must not be a Choice (its two outputs make the chaining ambiguous).
      */
     private canConnectSelection(ordered: PlacedStep[]): boolean {
-        if (ordered.length < 2) {
-            return false;
+        if (ordered.length < 2 || ordered.some(s => this.isInner(s) || this.innerContainerOf(s))) {
+            return false; // inner flows take no lines; their elements are chained automatically
         }
         for (let i = 0; i < ordered.length; i++) {
             const step = ordered[i];
@@ -4889,7 +5982,18 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (step.type === 'subflow') {
                 this.addCalledBySubmenu(addSubmenu);
             }
-            this.addAnchorSubmenus(step, addSubmenu);
+            if (this.isInner(step)) {
+                this.addInnerCalledBySubmenu(step, addSubmenu);
+            }
+            if (this.canBreak(step)) {
+                const on = this.breakpoints.has(step.id);
+                addItem(__('aaxis.ontology.flow_editor.menu_breakpoint'), on ? 'fa-check-circle' : 'fa-circle-o',
+                    () => this.toggleBreakpoint(step), {active: on});
+            }
+            // Inner flows and their elements have no flow lines to anchor.
+            if (!this.isInner(step) && !this.innerContainerOf(step)) {
+                this.addAnchorSubmenus(step, addSubmenu);
+            }
         });
     }
 
@@ -4902,7 +6006,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
         } else if (this.startId === step.id) {
             addItem(__('aaxis.ontology.flow_editor.menu_remove_start'), 'fa-play', () => this.setStart(null));
-        } else if (!this.findTrigger() && !this.links.some(l => l.to === step.id)) {
+        } else if (!this.findTrigger() && !this.links.some(l => l.to === step.id)
+            && !this.isInner(step) && !this.innerContainerOf(step)
+        ) {
             // Sub-flow entry point: only offered while no trigger exists and nothing arrives here.
             addItem(__('aaxis.ontology.flow_editor.menu_start_here'), 'fa-play', () => this.setStart(step.id));
         }
@@ -4914,6 +6020,13 @@ class OntologyFlowEditorComponent extends BaseComponent {
      */
     private addNavigateSubflowItem(step: PlacedStep, addItem: MenuAddItem): void {
         if (step.type !== 'sub_flow' && step.type !== 'foreach') {
+            return;
+        }
+        const inner = innerTargetOf(step.config);
+        const box = inner ? this.stepById(inner) : null;
+        if (box && this.isInner(box)) {
+            // An inner flow lives on this very canvas: select it and bring it into view.
+            addItem(__('aaxis.ontology.flow_editor.menu_navigate_inner_flow'), 'fa-crosshairs', () => this.revealStep(box));
             return;
         }
         const targetId = Number(step.config?.subflow || 0);
@@ -4939,6 +6052,22 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }))
             : [{
                 label: __('aaxis.ontology.flow_editor.menu_called_by_none'),
+                icon: 'fa-ban',
+                action: () => undefined,
+                disabled: true
+            }]);
+    }
+
+    /**
+     * "Called by" on an inner flow: the Call Subflow / Foreach Loop steps of this canvas pointing
+     * at it — picking one selects it and brings it into view.
+     */
+    private addInnerCalledBySubmenu(box: PlacedStep, addSubmenu: MenuAddSubmenu): void {
+        const callers = this.innerCallers(box);
+        addSubmenu(__('aaxis.ontology.flow_editor.menu_called_by'), 'fa-sitemap', callers.length
+            ? callers.map(s => ({label: s.name, icon: 'fa-crosshairs', action: () => this.revealStep(s)}))
+            : [{
+                label: __('aaxis.ontology.flow_editor.menu_inner_called_by_none'),
                 icon: 'fa-ban',
                 action: () => undefined,
                 disabled: true
@@ -5021,8 +6150,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
     // --- Copy / paste (system clipboard, see widgets/flow-clipboard) ---------------------------
 
     /** "Copy": the selection (and the links between its elements) as JSON on the clipboard. */
+    /** The selection as a copy holds it: a selected inner flow brings everything inside it. */
+    private copyableSelection(): PlacedStep[] {
+        const steps = new Set(this.orderedSelection());
+        Array.from(steps).filter(s => this.isInner(s)).forEach(box => this.innerMembers(box).forEach(c => steps.add(c)));
+        return Array.from(steps).sort((a, b) => a.x - b.x || a.y - b.y);
+    }
+
     private copySelection(): void {
-        const steps = this.orderedSelection();
+        const steps = this.copyableSelection();
         if (!steps.length) {
             return;
         }
@@ -5131,12 +6267,48 @@ class OntologyFlowEditorComponent extends BaseComponent {
         doc.links
             .filter(l => ids[l.from] && ids[l.to])
             .forEach(l => this.links.push({from: ids[l.from], fromPort: l.fromPort, to: ids[l.to]}));
+        this.remapPastedInner(pasted, ids);
         if (this.findTrigger()) {
             this.startId = null;
         }
+        this.normalizeInnerFlows();
         this.redrawLinks();
-        this.select(pasted);
+        this.select(pasted.filter(s => this.steps.includes(s)));
         this.syncDirty();
+    }
+
+    /**
+     * Re-points what a paste carries by id: a pasted inner flow holds its pasted elements (copied
+     * elements of an inner flow that was not copied land as plain steps), and a pasted Call
+     * Subflow / Foreach Loop follows its pasted inner flow — or keeps pointing at the original
+     * when that is on this canvas; otherwise its target is cleared and it turns red.
+     *
+     * @param ids source id → pasted id
+     */
+    private remapPastedInner(pasted: PlacedStep[], ids: Record<string, string>): void {
+        const pastedIds = new Set(Object.values(ids));
+        pasted.filter(s => this.isInner(s)).forEach(box => {
+            const lanes = new Map<string, string[]>();
+            this.innerLanes(box).forEach((laneIds, key) => {
+                if (key === '' || ids[key]) {
+                    lanes.set(key === '' ? '' : ids[key], laneIds.map(id => ids[id]).filter(Boolean));
+                }
+            });
+            this.writeInnerLanes(box, lanes);
+        });
+        pasted.forEach(step => {
+            const target = (step.type === 'sub_flow' || step.type === 'foreach') ? innerTargetOf(step.config) : null;
+            if (target === null) {
+                return;
+            }
+            if (ids[target]) {
+                step.config = {...step.config, inner: ids[target]};
+            } else if (!this.isInner(this.stepById(target)) || pastedIds.has(target)) {
+                const {inner, ...rest} = step.config || {};
+                step.config = rest;
+                this.markStepInvalid(step, true);
+            }
+        });
     }
 
     /** A one-message popup with a single OK button (e.g. an unusable clipboard on Paste). */
@@ -5162,10 +6334,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * advancing along the SAME direction until free (walls slide east so the walk always ends).
      */
     private alignSelection(): void {
-        if (this.selection.size < 2) {
+        // Elements inside an inner flow are placed by their box, not aligned on their own.
+        const selected = Array.from(this.selection).filter(s => !this.innerContainerOf(s));
+        if (selected.length < 2) {
             return;
         }
-        const byId = new Map(Array.from(this.selection).map(s => [s.id, s]));
+        const byId = new Map(selected.map(s => [s.id, s]));
         const inner = this.links.filter(l => byId.has(l.from) && byId.has(l.to));
         const linked = new Set<string>();
         inner.forEach(l => {
@@ -5180,7 +6354,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         const hasIncoming = new Set(inner.map(l => l.to));
         const byPosition = (a: PlacedStep, b: PlacedStep): number => a.x - b.x || a.y - b.y;
-        const anchor = Array.from(this.selection).sort(byPosition)[0];
+        const anchor = [...selected].sort(byPosition)[0];
         const anchorPos = this.place(anchor.x, anchor.y);
 
         const stepGap = 2 * this.tileSize; // one tile + one tile-wide gap
@@ -5217,18 +6391,19 @@ class OntologyFlowEditorComponent extends BaseComponent {
         };
 
         // Chain heads: linked steps with no incoming selected link, leftmost chain first.
-        Array.from(this.selection).filter(s => linked.has(s.id) && !hasIncoming.has(s.id))
+        selected.filter(s => linked.has(s.id) && !hasIncoming.has(s.id))
             .sort(byPosition).forEach(s => walkFrom(s));
         // A pure cycle has no head — enter it at its leftmost tile so nothing is dropped.
-        Array.from(this.selection).filter(s => linked.has(s.id) && !visited.has(s.id))
+        selected.filter(s => linked.has(s.id) && !visited.has(s.id))
             .sort(byPosition).forEach(s => {
                 if (!visited.has(s.id)) {
                     walkFrom(s);
                 }
             });
         // Then everything without a selected connection — each takes the next free east slot.
-        Array.from(this.selection).filter(s => !linked.has(s.id)).sort(byPosition)
+        selected.filter(s => !linked.has(s.id)).sort(byPosition)
             .forEach(s => claim(s, anchorPos.x, anchorPos.y, 1, 0));
+        selected.filter(s => this.isInner(s)).forEach(box => this.layoutInner(box));
 
         this.redrawLinks();
         this.syncDirty();
@@ -5256,18 +6431,117 @@ class OntologyFlowEditorComponent extends BaseComponent {
         if (!step) {
             return;
         }
-        // Dragging a tile that belongs to a multi-selection moves the whole selection with it,
-        // preserving the relative offsets (offsets stay grid-multiples, so members stay snapped).
-        const group = this.selection.has(step) && this.selection.size > 1
-            ? Array.from(this.selection).filter(s => s !== step)
-                .map(s => ({step: s, offX: s.x - step.x, offY: s.y - step.y}))
-            : [];
         const rect = el.getBoundingClientRect();
-        this.stepDrag = {pointerId: e.pointerId, step, dx: e.clientX - rect.left, dy: e.clientY - rect.top, group};
+        this.stepDrag = {
+            pointerId: e.pointerId, step, dx: e.clientX - rect.left, dy: e.clientY - rect.top,
+            group: this.dragGroup(step), origin: {x: step.x, y: step.y}, moved: false, dropBox: null
+        };
         el.classList.add('is-moving');
-        group.forEach(g => g.step.el.classList.add('is-moving'));
+        this.stepDrag.group.forEach(g => g.step.el.classList.add('is-moving'));
         this.trackPointer();
         e.preventDefault();
+    }
+
+    /**
+     * What moves along with a dragged tile. An element INSIDE an inner flow always moves alone (the
+     * drop decides where it goes — see {@see endStepDrag}). Otherwise a tile of a multi-selection
+     * moves the whole selection with it, preserving the relative offsets (offsets stay
+     * grid-multiples, so members stay snapped), and every moving inner flow carries its elements;
+     * an element whose box stays behind does not move with a group.
+     */
+    private dragGroup(step: PlacedStep): {step: PlacedStep; offX: number; offY: number}[] {
+        if (this.innerContainerOf(step)) {
+            this.select([step]);
+            return [];
+        }
+        const moving = new Set<PlacedStep>(this.selection.has(step) ? this.selection : []);
+        moving.add(step);
+        Array.from(moving).filter(s => this.isInner(s)).forEach(box => this.innerMembers(box).forEach(c => moving.add(c)));
+        moving.delete(step);
+        return Array.from(moving)
+            .filter(s => {
+                const box = this.innerContainerOf(s);
+                return box === null || box === step || moving.has(box);
+            })
+            .map(s => ({step: s, offX: s.x - step.x, offY: s.y - step.y}));
+    }
+
+    /**
+     * Ends a tile drag. A single element released INSIDE an inner flow's box joins that inner
+     * flow at the spot it was dropped (before/after the elements next to it) — which also
+     * re-orders an element moved within its own box; an element dragged OUT of a box stays on the
+     * canvas where it was released, with no connection. Triggers and inner flows cannot go into a
+     * box: released over one, they return to where they started.
+     */
+    private endStepDrag(e: PointerEvent): void {
+        const drag = this.stepDrag;
+        if (!drag) {
+            return;
+        }
+        this.stepDrag = null;
+        drag.step.el.classList.remove('is-moving');
+        drag.group.forEach(g => g.step.el.classList.remove('is-moving'));
+        drag.dropBox?.el.classList.remove('is-drop-target');
+        if (!drag.moved) {
+            return;
+        }
+        const {step, group} = drag;
+        const bounds = this.canvas().getBoundingClientRect();
+        const px = e.clientX - bounds.left;
+        const py = e.clientY - bounds.top;
+        const box = this.innerAt(px, py, step);
+        const home = this.innerContainerOf(step);
+        const single = group.every(g => this.innerContainerOf(g.step) === step);
+
+        if (box !== null && single && !this.isInner(step) && this.canJoinInner(step.type)) {
+            const target = this.innerDropTarget(box, px, py, step);
+            if (box === home && this.laneWithin(box, target.lane, step.id)) {
+                // A Choice dropped into its own false path: refused, back to where it was.
+                messenger.notificationFlashMessage('warning', __('aaxis.ontology.flow_editor.inner_flow_branch_cycle'));
+                this.layoutInner(box);
+                this.redrawLinks();
+                return;
+            }
+            this.attachToInner(box, step, target);
+            return;
+        }
+        if (box !== null && single) {
+            // A trigger or an inner flow over a box: refused, back to where it started.
+            messenger.notificationFlashMessage('warning', __('aaxis.ontology.flow_editor.inner_flow_not_allowed'));
+            this.moveDragged(drag, drag.origin.x, drag.origin.y);
+            this.redrawLinks();
+            return;
+        }
+        if (home !== null) {
+            // Dragged out of its inner flow: a plain, unconnected element of this canvas now.
+            this.detachFromInner(step);
+            this.redrawLinks();
+        }
+    }
+
+    /** Places a dragged tile (and the group moving with it) with the tile at (x, y). */
+    private moveDragged(drag: NonNullable<typeof this.stepDrag>, x: number, y: number): void {
+        const apply = (s: PlacedStep, sx: number, sy: number): void => {
+            s.x = sx;
+            s.y = sy;
+            s.el.style.left = `${sx}px`;
+            s.el.style.top = `${sy}px`;
+        };
+        apply(drag.step, x, y);
+        drag.group.forEach(g => apply(g.step, x + g.offX, y + g.offY));
+    }
+
+    /** Highlights the inner flow a single dragged element would join if released now. */
+    private trackDropBox(drag: NonNullable<typeof this.stepDrag>, e: PointerEvent): void {
+        const bounds = this.canvas().getBoundingClientRect();
+        const joinable = !this.isInner(drag.step) && this.canJoinInner(drag.step.type)
+            && drag.group.length === 0;
+        const box = joinable ? this.innerAt(e.clientX - bounds.left, e.clientY - bounds.top, drag.step) : null;
+        if (box !== drag.dropBox) {
+            drag.dropBox?.el.classList.remove('is-drop-target');
+            box?.el.classList.add('is-drop-target');
+            drag.dropBox = box;
+        }
     }
 
     private moveStep(e: PointerEvent): void {
@@ -5299,14 +6573,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             };
         }
 
-        const apply = (s: PlacedStep, x: number, y: number): void => {
-            s.x = x;
-            s.y = y;
-            s.el.style.left = `${x}px`;
-            s.el.style.top = `${y}px`;
-        };
-        apply(step, pos.x, pos.y);
-        group.forEach(g => apply(g.step, pos.x + g.offX, pos.y + g.offY));
+        if (pos.x !== step.x || pos.y !== step.y) {
+            this.stepDrag.moved = true;
+        }
+        this.moveDragged(this.stepDrag, pos.x, pos.y);
+        this.trackDropBox(this.stepDrag, e);
         // Re-routing runs A* per link — coalesce to one redraw per animation frame while dragging.
         this.scheduleRedraw();
     }
@@ -5586,10 +6857,29 @@ class OntologyFlowEditorComponent extends BaseComponent {
         this.syncDebugButtons();
     }
 
-    /** Applies the server-computed list of invalid step NAMES (page load and every save). */
-    private applyInvalidStepNames(names: string[]): void {
+    /**
+     * Applies the server-computed list of invalid step NAMES (page load and every save) and, per
+     * step name, the field problems only the server can judge (painted in the settings popup).
+     */
+    private applyInvalidStepNames(names: string[], fields?: Record<string, Record<string, string>> | any[] | null): void {
         const set = new Set((names || []).map(String));
-        this.steps.forEach(s => this.markStepInvalid(s, set.has(s.name)));
+        const byName = fields && !Array.isArray(fields) ? fields : {};
+        // The server cannot see inner-flow references (they are canvas step ids): a Call Subflow /
+        // Foreach Loop pointing at a vanished inner flow is red from here.
+        this.steps.forEach(s => {
+            const problems = byName[s.name];
+            s.serverProblems = problems && typeof problems === 'object' && Object.keys(problems).length ? {...problems} : undefined;
+            this.markStepInvalid(s, set.has(s.name) || this.innerRefBroken(s));
+        });
+    }
+
+    /** The server-judged field problems of the canvas, by step name (what a tab stashes). */
+    private serverFieldProblems(): Record<string, Record<string, string>> {
+        const byName: Record<string, Record<string, string>> = {};
+        this.steps.filter(s => s.serverProblems).forEach(s => {
+            byName[s.name] = {...s.serverProblems};
+        });
+        return byName;
     }
 
     /**
@@ -5607,6 +6897,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             steps: this.steps.map(s => ({id: s.id, type: s.type, name: s.name, config: s.config || null})),
             links: this.links.map(l => ({from: l.from, fromPort: l.fromPort, to: l.to})),
             context: null,
+            truncated: {},
             contextKey: null,
             index: -1,
             total: 0,
@@ -5629,7 +6920,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             this.runFullSession();
         } else {
             this.buildDebugger();
-            this.debugAdvance(false, false);
+            // With breakpoints on the way, Debug runs straight to the first one (like Continue);
+            // without, it pauses after the trigger as always.
+            this.debugAdvance(Object.keys(this.debugBreakpointMap(this.activeTab)).length > 0, false);
         }
     }
 
@@ -5701,7 +6994,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             ui.$vars.append($('<div/>', {'class': 'aaxis-flow-editor__debugger-empty', text: __('aaxis.ontology.flow_editor.debug_not_started')}));
         } else {
             // One line per variable; objects/arrays start collapsed (count preview) and expand.
-            ui.$vars.append(renderVariablesList(session.context));
+            ui.$vars.append(renderVariablesList(session.context, session.truncated));
         }
 
         ui.$evalRun.prop('disabled', !this.canEvaluateDebug());
@@ -5803,7 +7096,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             contextKey: session.contextKey,
             runAll,
             stepInto,
-            stepOut
+            stepOut,
+            // Read per request: a breakpoint added mid-session counts for the next Continue.
+            breakpoints: this.debugBreakpointMap(session.homeIndex)
         }).then(res => {
             if (this.debugSession !== session) {
                 return; // the session was cancelled while the request ran
@@ -5821,6 +7116,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 throw new Error(res.data?.message || __('aaxis.ontology.flow_editor.debug_error'));
             }
             session.context = res.data.context ?? {};
+            session.truncated = plainObject(res.data.truncated);
             session.contextKey = res.data.contextKey || null;
             session.index = Number(res.data.index);
             session.total = Number(res.data.total);
@@ -5834,7 +7130,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
             const iteration = res.data.iteration !== null && res.data.iteration !== undefined
                 ? ` [${__('aaxis.ontology.flow_editor.debug_iteration')} ${Number(res.data.iteration) + 1}]`
                 : '';
-            session.statusLabel = `${frameName}${res.data.step.name} (${session.index + 1}/${session.total})${iteration}`;
+            const paused = res.data.breakpoint
+                ? ` — ${__('aaxis.ontology.flow_editor.debug_paused_at', {name: res.data.breakpoint.name})}`
+                : '';
+            session.statusLabel = `${frameName}${res.data.step.name} (${session.index + 1}/${session.total})${iteration}${paused}`;
             this.applyDebugTick(session, res.data);
             this.maybeStartDebugAutoClose();
         }).catch((err: Error) => {
@@ -5890,8 +7189,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
         const frameKey = debugFrameKey(frame);
         const ids: string[] = (data.executedIds || [String(data.step.id || '')]).map(String);
 
+        // A Continue that ended inside a subflow (a breakpoint there): what it ran on the debugged
+        // flow's own canvas is remembered for when the walk comes home.
+        if (frameKey !== 'root' && Array.isArray(data.rootExecutedIds) && data.rootExecutedIds.length) {
+            session.marksByFlow.root = Array.from(new Set([...(session.marksByFlow.root || []), ...data.rootExecutedIds.map(String)]));
+        }
         const paint = (): void => {
-            if (data.transition === 'reentered') {
+            if (data.transition === 'reentered' && frame.innerId) {
+                // A fresh iteration of an INNER flow: only its box starts white again (the rest of
+                // the canvas is its caller's).
+                const box = this.stepById(String(frame.innerId));
+                const wiped = new Set(box ? [box.id, ...this.innerMembers(box).map(c => c.id)] : []);
+                this.steps.filter(s => wiped.has(s.id))
+                    .forEach(s => s.el.classList.remove('is-debug-executed', 'is-debug-next', 'is-debug-failed'));
+                session.marksByFlow[frameKey] = (session.marksByFlow[frameKey] || []).filter(id => !wiped.has(id));
+            } else if (data.transition === 'reentered') {
                 // A fresh iteration: the subflow canvas starts white again.
                 this.clearDebugMarks();
                 session.marksByFlow[frameKey] = [];
@@ -5924,7 +7236,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }
             paint();
             if (data.subflowTrails?.length) {
-                if (data.transition === null) {
+                if (data.transition === null && !data.breakpoint) {
                     // A stepped-OVER invoker: show where the subflow(s) went, then come home.
                     this.visitSubflowTrails(data.subflowTrails, session);
                 } else {
@@ -6050,6 +7362,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 throw new Error(res.data?.message || __('aaxis.ontology.flow_editor.debug_error'));
             }
             session.context = res.data.output ?? {};
+            session.truncated = plainObject(res.data.truncated);
             session.contextKey = res.data.contextKey || null;
             session.done = true;
             this.markExecutedDebugSteps(res.data.executedIds || []);
@@ -6203,8 +7516,15 @@ class OntologyFlowEditorComponent extends BaseComponent {
                     throw new Error(res.data?.message || __('aaxis.ontology.flow_editor.save_error'));
                 }
                 tab.flow = res.data.flow as FlowRecord;
+                // A flow saved for the first time takes its in-memory breakpoints to storage.
+                if (tab.breakpoints?.length && tab.flow?.id) {
+                    this.writeBreakpoints(tab.flow.id, tab.breakpoints);
+                }
                 tab.savedState = JSON.stringify({design: tab.design});
                 tab.invalidNames = res.data.flow?.invalidSteps || [];
+                tab.fieldProblems = res.data.flow?.invalidFields && !Array.isArray(res.data.flow.invalidFields)
+                    ? res.data.flow.invalidFields
+                    : {};
                 saved++;
             }).catch((err: Error) => {
                 messenger.notificationFlashMessage('error', `${this.tabTitle(tab, false)}: ${err.message || __('aaxis.ontology.flow_editor.save_error')}`);
@@ -6219,7 +7539,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 if (active.savedState !== null) {
                     this.savedState = active.savedState;
                 }
-                this.applyInvalidStepNames(active.invalidNames);
+                this.applyInvalidStepNames(active.invalidNames, active.fieldProblems);
             }
             this.savingAll = false;
             $spinner.remove();
@@ -6261,10 +7581,11 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (this.tabs[this.activeTab]) {
                 this.tabs[this.activeTab].flow = this.flow; // the tab now points at the saved flow
             }
-            this.applyInvalidStepNames(res.data.flow?.invalidSteps || []);
+            this.applyInvalidStepNames(res.data.flow?.invalidSteps || [], res.data.flow?.invalidFields);
             if (created && this.flow?.id) {
                 // Refreshing after the first save must reopen THIS flow (and the other tabs).
                 this.syncTabsUrl();
+                this.persistBreakpoints(); // they were kept in memory while the flow had no id
             }
             messenger.notificationFlashMessage('success', __('aaxis.ontology.flow_editor.saved'));
             // Stay in the editor: the state is clean now (Save disabled, the cancel button

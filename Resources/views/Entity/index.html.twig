@@ -9,7 +9,8 @@
              data-page-component-options="{{ {
                  canCreate: is_granted('aaxis_ontology_entity_create'),
                  canUpdate: is_granted('aaxis_ontology_entity_update'),
-                 canDelete: is_granted('aaxis_ontology_entity_delete')
+                 canDelete: is_granted('aaxis_ontology_entity_delete'),
+                 systemCreateUrl: is_granted('aaxis_ontology_system_create') ? path('aaxis_ontology_systems', {add: 1}) : null
              }|json_encode }}">
 
             <div class="container-fluid page-title">
