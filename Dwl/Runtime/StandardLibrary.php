@@ -35,7 +35,7 @@ final class StandardLibrary
         // String functions
         $env->define('length', Value::func(fn(array $args) => self::sizeOf($args[0])));
         $env->define('substring', Value::func(fn(array $args) => Value::string(
-            substr($args[0]->data ?? '', (int) ($args[1]->data ?? 0), isset($args[2]) ? (int) $args[2]->data : null)
+            mb_substr((string) ($args[0]->data ?? ''), (int) ($args[1]->data ?? 0), isset($args[2]) ? (int) $args[2]->data : null)
         )));
         $env->define('replace', Value::func(function (array $args) {
             $str = $args[0]->data ?? '';
@@ -53,6 +53,8 @@ final class StandardLibrary
         $env->define('first', Value::func(fn(array $args) => self::first($args[0])));
         $env->define('last', Value::func(fn(array $args) => self::last($args[0])));
         $env->define('indexOf', Value::func(fn(array $args) => self::indexOf($args[0], $args[1])));
+        // dw::Core since DataWeave 2.4 (arrays and strings) — also infix: `name lastIndexOf "_"`.
+        $env->define('lastIndexOf', Value::func(fn(array $args) => self::lastIndexOf($args[0], $args[1])));
         $env->define('distinctBy', Value::func(fn(array $args) => self::distinctByFn($args[0], $args[1] ?? null)));
         $env->define('zip', Value::func(fn(array $args) => self::zip($args[0], $args[1])));
         $env->define('unzip', Value::func(fn(array $args) => self::unzip($args[0])));
@@ -232,15 +234,7 @@ final class StandardLibrary
                 return Value::null();
             }),
             'indexOf' => Value::func(fn(array $args) => self::indexOf($args[0], $args[1])),
-            'lastIndexOf' => Value::func(function (array $args) {
-                $found = -1;
-                foreach ($args[0]->data as $i => $item) {
-                    if ($item->type === $args[1]->type && $item->data === $args[1]->data) {
-                        $found = $i;
-                    }
-                }
-                return Value::number($found);
-            }),
+            'lastIndexOf' => Value::func(fn(array $args) => self::lastIndexOf($args[0], $args[1])),
         ];
     }
 
@@ -357,7 +351,7 @@ final class StandardLibrary
         return Value::number(match ($val->type) {
             ValueType::Array => count($val->data),
             ValueType::Object => count($val->data),
-            ValueType::String => strlen($val->data),
+            ValueType::String => mb_strlen($val->data),
             default => 0,
         });
     }
@@ -529,7 +523,28 @@ final class StandardLibrary
             }
         }
         if ($arr->type === ValueType::String && $item->type === ValueType::String) {
-            $pos = strpos($arr->data, $item->data);
+            // CHARACTER positions (DataWeave), not bytes.
+            $pos = $item->data === '' ? 0 : mb_strpos($arr->data, $item->data);
+            return $pos !== false ? Value::number($pos) : Value::number(-1);
+        }
+        return Value::number(-1);
+    }
+
+    /**
+     * The LAST position of a value in an array, or of a substring in a string (in characters);
+     * -1 when absent (or for anything else, like indexOf).
+     */
+    private static function lastIndexOf(Value $arr, Value $item): Value
+    {
+        if ($arr->type === ValueType::Array) {
+            for ($i = \count($arr->data) - 1; $i >= 0; $i--) {
+                if ($arr->data[$i]->type === $item->type && $arr->data[$i]->data === $item->data) {
+                    return Value::number($i);
+                }
+            }
+        }
+        if ($arr->type === ValueType::String && $item->type === ValueType::String) {
+            $pos = $item->data === '' ? mb_strlen($arr->data) : mb_strrpos($arr->data, $item->data);
             return $pos !== false ? Value::number($pos) : Value::number(-1);
         }
         return Value::number(-1);

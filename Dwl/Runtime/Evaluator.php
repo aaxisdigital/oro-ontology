@@ -949,6 +949,9 @@ class Evaluator
     private function evalIndexAccess(IndexAccess $node): Value
     {
         $obj = $this->eval($node->object);
+        if ($node->index instanceof InfixFunctionCall && $node->index->name === 'to') {
+            return $this->rangeSelect($obj, $node->index);
+        }
         $index = $this->eval($node->index);
 
         return match ($obj->type) {
@@ -970,14 +973,50 @@ class Evaluator
         return $array->data[$i] ?? Value::null();
     }
 
-    /** A negative index counts from the end; out of range is the empty string. */
+    /** A negative index counts from the end; out of range is the empty string. Characters, not bytes. */
     private function characterAt(Value $string, Value $index): Value
     {
         $i = (int) $this->toNumber($index);
+        $length = mb_strlen($string->data);
         if ($i < 0) {
-            $i = strlen($string->data) + $i;
+            $i = $length + $i;
         }
-        return Value::string($string->data[$i] ?? '');
+        return Value::string($i >= 0 && $i < $length ? mb_substr($string->data, $i, 1) : '');
+    }
+
+    /**
+     * The RANGE selector `value[a to b]` (DataWeave): the elements of an array / the CHARACTERS of
+     * a string from index a to index b, both included. A negative index counts from the end (-1 =
+     * the last), resolved BEFORE the range is taken — so `[1 to -1]` is "all but the first";
+     * a > b yields them in reverse order; an index outside the value yields null. Anything but an
+     * array or a string cannot be sliced.
+     */
+    private function rangeSelect(Value $obj, InfixFunctionCall $range): Value
+    {
+        if ($obj->type === ValueType::Null) {
+            return Value::null();
+        }
+        if ($obj->type !== ValueType::Array && $obj->type !== ValueType::String) {
+            throw new RuntimeException(sprintf(
+                'The range selector [a to b] slices an array or a string, not %s %s.',
+                $obj->type === ValueType::Object ? 'an' : 'a',
+                strtolower($obj->type->value)
+            ));
+        }
+        $items = $obj->type === ValueType::String ? mb_str_split($obj->data) : array_values($obj->data);
+        $count = \count($items);
+        $start = (int) $this->toNumber($this->eval($range->left));
+        $end = (int) $this->toNumber($this->eval($range->right));
+        $start += $start < 0 ? $count : 0;
+        $end += $end < 0 ? $count : 0;
+        if ($start < 0 || $end < 0 || $start >= $count || $end >= $count) {
+            return Value::null();
+        }
+        $slice = $start <= $end
+            ? \array_slice($items, $start, $end - $start + 1)
+            : array_reverse(\array_slice($items, $end, $start - $end + 1));
+
+        return $obj->type === ValueType::String ? Value::string(implode('', $slice)) : Value::array($slice);
     }
 
     private function evalMultiValueSelector(MultiValueSelector $node): Value

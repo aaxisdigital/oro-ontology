@@ -270,6 +270,18 @@ class DwlTransformerTest extends TestCase
             'indexOf string' => ["indexOf('abc', 'c')", 2],
             'indexOf string missing' => ["indexOf('abc', 'z')", -1],
             'indexOf scalar' => ['indexOf(1, 1)', -1],
+            'indexOf counts characters, not bytes' => ["indexOf('ação_x', '_')", 4],
+            // dw::Core lastIndexOf (DataWeave 2.4): arrays and strings, prefix or infix.
+            'lastIndexOf string' => ["lastIndexOf('a_b_c', '_')", 3],
+            'lastIndexOf infix' => ["'a_b_c' lastIndexOf '_'", 3],
+            'lastIndexOf string missing' => ["'abc' lastIndexOf '_'", -1],
+            'lastIndexOf counts characters' => ["'ção_ção' lastIndexOf 'ç'", 4],
+            'lastIndexOf array' => ['[1, 2, 1, 3] lastIndexOf 1', 2],
+            'lastIndexOf array missing' => ['lastIndexOf([1, 2], 3)', -1],
+            'lastIndexOf scalar' => ['lastIndexOf(1, 1)', -1],
+            'lastIndexOf from the Arrays module' => ['dw::core::Arrays::lastIndexOf([1, 2, 1], 1)', 2],
+            'sizeOf counts characters' => ["sizeOf('ação')", 4],
+            'substring counts characters' => ["substring('ação!', 1, 3)", 'ção'],
             'distinctBy function without criteria' => ['distinctBy([1,1,2])', [1, 2]],
             'distinctBy function with criteria' => ['distinctBy([{a:1},{a:1}], (x) -> x.a)', [['a' => 1]]],
             'distinctBy function on scalar' => ['distinctBy(1)', 1],
@@ -401,6 +413,11 @@ class DwlTransformerTest extends TestCase
             'mapObject over a non-object' => ['[1] mapObject $', RuntimeException::class, 'mapObject expects Object but got Array'],
             'splitBy on a non-string' => ["1 splitBy ','", RuntimeException::class, 'splitBy expects String but got Number'],
             'unknown infix builtin' => ['1 until 2', RuntimeException::class, 'Unknown infix function: until'],
+            'range selector on an object' => [
+                '{a: 1}[0 to 1]',
+                RuntimeException::class,
+                'The range selector [a to b] slices an array or a string, not an object.',
+            ],
             'unresolved module member' => ['dw::core::Strings::nope', RuntimeException::class, 'Cannot resolve dw::core::Strings::nope'],
             'unknown module' => ['dw::nope::x', RuntimeException::class, 'Cannot resolve dw::nope::x'],
             'runtime fail' => ["dw::Runtime::fail('boom')", RuntimeException::class, 'boom'],
@@ -413,6 +430,49 @@ class DwlTransformerTest extends TestCase
                 "Cannot parse 'abc' as date with format \"yyyy\" at line 1",
             ],
         ];
+    }
+
+    /**
+     * The RANGE selector `value[a to b]` on strings (characters) and arrays: inclusive bounds,
+     * negative indices from the end, reversed when a > b, null outside the value.
+     *
+     * @dataProvider rangeSelectors
+     */
+    public function testRangeSelectors(string $script, mixed $expected): void
+    {
+        self::assertSame($expected, $this->dwl->transform($script, []));
+    }
+
+    public static function rangeSelectors(): array
+    {
+        return [
+            'string slice' => ["'DataWeave'[0 to 3]", 'Data'],
+            'string slice to the end' => ["'DataWeave'[4 to -1]", 'Weave'],
+            'string all but the ends' => ["'[x]'[1 to -2]", 'x'],
+            'string reversed' => ["'abc'[2 to 0]", 'cba'],
+            'string of characters, not bytes' => ["'ação'[1 to 2]", 'çã'],
+            'string out of range' => ["'abc'[1 to 5]", null],
+            'string single character' => ["'ação'[1]", 'ç'],
+            'string single character from the end' => ["'abc'[-1]", 'c'],
+            'array slice' => ['[0, 1, 2, 3, 4][1 to 3]', [1, 2, 3]],
+            'array tail' => ['[0, 1, 2, 3][1 to -1]', [1, 2, 3]],
+            'array reversed' => ['[0, 1, 2, 3][3 to 1]', [3, 2, 1]],
+            'array out of range' => ['[0, 1][0 to 4]', null],
+            'null stays null' => ['null[0 to 1]', null],
+            'computed bounds' => ["var s = 'OUT_ORO_PRODUCTS_CLASSIFICATION_OF_PRODUCT_20261124.csv'\n---\ns[sizeOf('OUT_ORO_PRODUCTS_') to (s lastIndexOf '_') - 1]", 'CLASSIFICATION_OF_PRODUCT'],
+            'a plain range still builds a list' => ['(1 to 3) map $ * 2', [2, 4, 6]],
+        ];
+    }
+
+    /** The bug report's exact expression (flow 45), with `item` a file NAME and a prefix-sized mapping. */
+    public function testTheReportedExpressionSlicesTheFileName(): void
+    {
+        $result = $this->dwl->transform("item[sizeOf(file_mapping) to (item lastIndexOf  '_') - 1]", [
+            'item' => 'OUT_ORO_PRODUCTS_CLASSIFICATION_OF_PRODUCT_20261124.csv',
+            'file_mapping' => 'OUT_ORO_PRODUCTS_',
+        ]);
+
+        self::assertSame('CLASSIFICATION_OF_PRODUCT', $result);
     }
 
     public function testBindingsBecomeVariables(): void
