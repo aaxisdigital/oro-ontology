@@ -40,6 +40,13 @@ class OntologyFlowComponent extends BaseComponent {
 
         const actions: GridAction[] = [
             {
+                // The Events page filtered to this flow's runs (the Events page's own "View flow"
+                // glyph, pointing the other way).
+                key: 'events',
+                label: __('aaxis.ontology.flow_view.view_events'),
+                icon: 'fa-external-link'
+            },
+            {
                 key: 'export',
                 label: __('aaxis.ontology.flow_view.export'),
                 icon: 'fa-upload',
@@ -117,7 +124,9 @@ class OntologyFlowComponent extends BaseComponent {
 
     private onAction(action: string, row: FlowRecord, event?: MouseEvent): void {
         // The grid dispatches disabled actions too, so re-check the built-in guard here.
-        if (action === 'export' && row.type !== 'native') {
+        if (action === 'events') {
+            navigateTo(routing.generate('aaxis_ontology_events') + (row.name ? '?flow=' + encodeURIComponent(row.name) : ''), event);
+        } else if (action === 'export' && row.type !== 'native') {
             this.exportFlow(row);
         } else if (action === 'delete' && row.type !== 'native') {
             this.confirmDelete(row);

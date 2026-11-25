@@ -25,7 +25,8 @@ use Symfony\Component\Routing\Attribute\Route;
  */
 class OntologyEventController extends AbstractController
 {
-    #[Route(path: '/events', name: 'aaxis_ontology_events')]
+    // Exposed: the Flows list's "View events" generates it from TypeScript.
+    #[Route(path: '/events', name: 'aaxis_ontology_events', options: ['expose' => true])]
     #[Template('@AaxisOntology/Event/index.html.twig')]
     #[Acl(id: 'aaxis_ontology_event_view', type: 'entity', class: OntologyFlowEvent::class, permission: 'VIEW')]
     public function indexAction(): array

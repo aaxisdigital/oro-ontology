@@ -322,7 +322,10 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
   it into the Add Data modal.
 - **Cross-page deep links** follow one pattern: source grid action → `routing.generate(<page route>)`
   + a `?<key>=<name>` query → target page calls `grid.setFilter()` once after its first load.
-  Systems → Entities uses `?system=` (filters `systemName`); Entities → Data View uses `?entity=`.
+  Systems → Entities uses `?system=` (filters `systemName`); Entities → Data View uses `?entity=`;
+  Flows → Events uses `?flow=<flow name>` (filters `flowName`, equals — the Flows grid's "View
+  events" action, `fa-external-link` like the Events page's own "View flow"; 2026-11-25, which
+  also EXPOSED the `aaxis_ontology_events` page route). Events also takes `?uuid=` (one run).
   **URL state** (2026-11-24): every list grid (Systems, Entities, Flows, Events, Data View) is built
   with DataGrid `urlState: true`, so its sort + filters live in the URL (`sort=`, `f.<column>=`) and
   survive a refresh. The deep-link parameter is therefore ONE-SHOT: `takeQueryParam()`

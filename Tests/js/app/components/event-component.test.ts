@@ -215,7 +215,19 @@ describe('OntologyEventComponent', () => {
             expect(grid.setFilter).toHaveBeenCalledTimes(1);
         });
 
-        it.each(['/', '/?uuid=', '/?uuid=%20%20'])('does not filter for %s', async url => {
+        it('pre-filters the grid to a flow\'s runs with ?flow=, once', async () => {
+            window.history.replaceState({}, '', '/?flow=nightly%20sync');
+            const {grid} = mount();
+            await flush();
+
+            expect(grid.setFilter).toHaveBeenCalledWith('flowName', {operator: 'equals', value: 'nightly sync'});
+            expect(window.location.search).toBe('');
+            $el.find('[data-role="refresh"]').trigger('click');
+            await flush();
+            expect(grid.setFilter).toHaveBeenCalledTimes(1);
+        });
+
+        it.each(['/', '/?uuid=', '/?uuid=%20%20', '/?flow='])('does not filter for %s', async url => {
             window.history.replaceState({}, '', url);
             const {grid} = mount();
             await flush();

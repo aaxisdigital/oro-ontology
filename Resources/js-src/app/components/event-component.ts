@@ -167,7 +167,11 @@ class OntologyEventComponent extends BaseComponent {
             .finally(() => this.setBusy(false));
     }
 
-    /** A `?uuid=` in the URL pre-filters the grid to that run. First load only. */
+    /**
+     * Deep links, first load only: `?uuid=` pre-filters the grid to that run, `?flow=` to the
+     * runs of that flow (the Flows list's "View events" — flow names are unique). Both are
+     * one-shot: dropped from the URL, so the grid's own URL state takes over.
+     */
     private applyUuidFromUrl(): void {
         if (this.uuidFilterApplied) {
             return;
@@ -176,6 +180,10 @@ class OntologyEventComponent extends BaseComponent {
         const uuid = takeQueryParam('uuid');
         if (uuid !== null) {
             this.grid.setFilter('flowUuid', {operator: 'equals', value: uuid});
+        }
+        const flow = takeQueryParam('flow');
+        if (flow !== null) {
+            this.grid.setFilter('flowName', {operator: 'equals', value: flow});
         }
     }
 

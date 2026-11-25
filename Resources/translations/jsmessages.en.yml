@@ -224,6 +224,7 @@ aaxis:
             summary_copy: 'Copy to clipboard'
             summary_copy_failed: 'The browser did not allow copying to the clipboard.'
         flow_view:
+            view_events: 'View events'
             name: 'Name'
             type: 'Type'
             type_native: 'Native'

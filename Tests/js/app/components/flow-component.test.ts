@@ -77,7 +77,8 @@ describe('OntologyFlowComponent', () => {
         it('disables Export and Delete for the built-in (native) flows only', () => {
             const {grid} = mount();
 
-            expect(grid.options.actions.map((a: any) => a.key)).toEqual(['export', 'delete']);
+            expect(grid.options.actions.map((a: any) => a.key)).toEqual(['events', 'export', 'delete']);
+            expect(grid.action('events').disabled).toBeUndefined();
             for (const key of ['export', 'delete']) {
                 expect(grid.action(key).disabled({type: 'native'})).toBe(true);
                 expect(grid.action(key).disabled({type: 'flow'})).toBe(false);
@@ -203,6 +204,15 @@ describe('OntologyFlowComponent', () => {
 
             expect(FakeDialog.instances).toHaveLength(0);
             expect(fetchSpy).not.toHaveBeenCalled();
+        });
+
+        it('opens the Events page filtered to the flow, forwarding the click event', () => {
+            const {grid} = mount();
+            const event = new MouseEvent('click', {metaKey: true});
+
+            grid.options.onAction('events', flow({name: 'nightly sync & co', type: 'native'}), event);
+
+            expect(navigateTo).toHaveBeenCalledWith('/aaxis_ontology_events?flow=nightly%20sync%20%26%20co', event);
         });
 
         it('ignores an unknown action', () => {
