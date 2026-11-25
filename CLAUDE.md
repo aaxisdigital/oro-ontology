@@ -897,7 +897,8 @@ by `prefetchCatalogs()` at the end of `initialize()`). The reader/writer panel u
 is ~1.5s of kernel boot (measured; the queries themselves are trivial) — so opening step properties
 took seconds, every time. Consequences to keep in mind: a **failed** fetch is deliberately NOT cached
 (the field resets so the next open retries), and the catalogs are a **page-load snapshot** — an
-entity/subflow created in another tab won't appear until the editor page is reloaded. CONNECTORS
+entity created in another tab won't appear until the editor page is reloaded. SUBFLOWS have a
+refresh button beside the Call Subflow / Foreach Loop picker (see sub_flow below). CONNECTORS
 have an escape hatch: every connector picker (HTTP Request, SQL Query, File Operations) is built by
 `connectorPicker(types, initialId)`. It is a TYPE-TO-FILTER COMBOBOX (`connector-filter` input +
 `connector-list`, `.aaxis-flow-editor__combo` like the subflow picker; options pick on POINTERDOWN,
@@ -1127,7 +1128,16 @@ settings are just `Name | Subflow` — the Subflow picker is a SEARCHABLE combob
 flow except the one being edited, alphabetized, fed by `flowCatalog()` — a cached
 `aaxis_ontology_flow_list` fetch mirroring `connectorCatalog()`'s contract; options select on
 POINTERDOWN because blur hides the list before click would land; typing clears the selection
-until an option is picked, blur restores the picked name). Config stores `{subflow: <flow id>}`;
+until an option is picked, blur restores the picked name). Beside it (Call Subflow AND Foreach
+Loop — both built through `invokeTargetPicker($combo, load)`) a REFRESH button
+(`data-role="subflow-refresh"`, fa-refresh spinning while busy, jsmessage `subflow_refresh`;
+2026-11-25) nulls `catalogFlows` and re-fetches the catalog, then re-runs the section's `load`
+(`invokeTargets()` — inner flows come from the canvas each time), so a subflow saved in another
+tab is pickable without reloading the page; the fresh catalog also feeds the name glyphs (a
+redraw is scheduled), "Navigate to subflow", "Called by" and later panels. The pick is kept by
+KEY (a renamed subflow stays picked under its new name; a deleted one is cleared), a failed
+refresh keeps the options shown (catalog_load_error flash), and the button also retries a FIRST
+load that failed (the stored target is reselected). Config stores `{subflow: <flow id>}`;
 validator arm only checks the key is a non-empty scalar (existence/type/enabled are RUNTIME
 checks — the target can change after save). Executor: `callSubflow()` loads the target and FAILS
 the run when it is missing ("no longer exists"), not TYPE_SUBFLOW, DISABLED (the flow-level
@@ -1654,7 +1664,7 @@ one child per flow whose sub_flow/foreach steps reference this subflow (scanned 
 records' `steps` by config KEY `subflow`, name-sorted), each navigating like Navigate-to-subflow;
 a disabled "No flow calls this subflow." child when none (or when the subflow was never saved —
 no id, no callers). The catalog copy is load-time — callers created in another window appear
-after a reload.
+after a reload, or after a subflow picker's refresh button re-read the catalog.
 **Run index** (v1_14, 2026-11-18 — the Events page used to GROUP BY the WHOLE event table on every
 load and Refresh, and the debug sweep did the same every minute; both grew with the entire,
 never-pruned history). `aaxis_ontology_flow_runs` (`Migrations/Schema/FlowRunsTable`, shared by

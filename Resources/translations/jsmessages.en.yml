@@ -530,6 +530,7 @@ aaxis:
             subflow_placeholder: 'Type to filter subflows…'
             subflow_required: 'Please choose the subflow to invoke.'
             subflow_none: 'No matching subflow.'
+            subflow_refresh: 'Reload subflows'
             name_unset: 'unnamed — add a trigger'
             trigger_required: 'Add a trigger element first — it names the flow and carries its Enabled switch.'
             tab_close: 'Close this tab'

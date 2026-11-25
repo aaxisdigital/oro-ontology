@@ -3614,9 +3614,30 @@ class OntologyFlowEditorComponent extends BaseComponent {
     private foreachSection($top: any, initial: Record<string, any>, $nameInput: any, step: PlacedStep): SettingsSection {
         let keyByName: Record<string, string> = {};
         const combo = this.stringCombo('subflow_placeholder', () => undefined);
+        // Subflows AND this canvas's inner flows (see invokeTargets), picked by their label. The
+        // pick is kept by KEY across a refresh, so a renamed subflow stays picked.
+        // Until a load succeeds, the stored target is the one to pick (a failed first load can be
+        // retried with the refresh button).
+        let selectedKey = invokeKeyOf(initial);
+        let loaded = false;
+        const load = (): Promise<void> => this.invokeTargets(step).then(targets => {
+            if (loaded) {
+                selectedKey = keyByName[combo.value()] ?? '';
+            }
+            loaded = true;
+            keyByName = {};
+            targets.forEach(t => {
+                keyByName[t.name] = t.key;
+            });
+            const names = targets.map(t => t.name);
+            combo.setOptions(names);
+            combo.setEnabled(true);
+            combo.setValue(names.find(n => keyByName[n] === selectedKey) ?? '');
+        });
+        const picker = this.invokeTargetPicker(combo.$combo, load);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.1),
-            this.settingsCol('subflow_label', combo.$combo, 1.4)
+            this.settingsCol('subflow_label', picker.$el, 1.4)
         ));
 
         const $array = $('<input/>', {type: 'text', 'class': 'form-control', maxlength: 128, placeholder: 'payload'});
@@ -3631,22 +3652,6 @@ class OntologyFlowEditorComponent extends BaseComponent {
             'class': 'aaxis-flow-editor__settings-hint',
             html: __('aaxis.ontology.flow_editor.foreach_hint')
         }));
-
-        // Subflows AND this canvas's inner flows (see invokeTargets), picked by their label.
-        const selectedKey = invokeKeyOf(initial);
-        const ready = this.invokeTargets(step).then(targets => {
-            keyByName = {};
-            targets.forEach(t => {
-                keyByName[t.name] = t.key;
-            });
-            const names = targets.map(t => t.name);
-            combo.setOptions(names);
-            combo.setEnabled(true);
-            const current = names.find(n => keyByName[n] === selectedKey);
-            if (current) {
-                combo.setValue(current);
-            }
-        }).catch(() => undefined);
 
         const RESERVED = new Set(['index', 'flowuuid', 'flow-uuid', 'choiceresults']);
         const $target = combo.$combo.find('input');
@@ -3671,7 +3676,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 array: String($array.val() || '').trim(),
                 item: String($item.val() || '').trim()
             }),
-            ready
+            ready: picker.ready
         };
     }
 
@@ -4982,9 +4987,21 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
         const $list = $('<div/>', {'class': 'aaxis-flow-editor__combo-list', hidden: true});
         $combo.append($filter, $list);
+        // The current pick survives a refresh while it still exists (keys, not names: a renamed
+        // subflow stays picked under its new name).
+        const load = (): Promise<void> => this.invokeTargets(step).then(targets => {
+            options = targets;
+            const current = options.find(o => o.key === selectedKey);
+            if (!current) {
+                selectedKey = '';
+            }
+            $filter.val(current ? current.name : '');
+            $filter.prop('disabled', false);
+        });
+        const picker = this.invokeTargetPicker($combo, load);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.1),
-            this.settingsCol('subflow_label', $combo, 1.4)
+            this.settingsCol('subflow_label', picker.$el, 1.4)
         ));
 
         const renderList = (): void => {
@@ -5032,22 +5049,55 @@ class OntologyFlowEditorComponent extends BaseComponent {
             }, 120);
         });
 
-        const ready = this.invokeTargets(step).then(targets => {
-            options = targets;
-            const current = options.find(o => o.key === selectedKey);
-            if (current) {
-                $filter.val(current.name);
-            } else {
-                selectedKey = '';
-            }
-            $filter.prop('disabled', false);
-        }).catch(() => undefined);
-
         return {
             ...ruled([['subflow', () => (selectedKey === '' ? __('aaxis.ontology.flow_editor.subflow_required') : '')]]),
             fields: {subflow: $filter, inner: $filter},
             merge: config => ({...config, ...invokeConfig(selectedKey)}),
-            ready
+            ready: picker.ready
+        };
+    }
+
+    /**
+     * A Call Subflow / Foreach Loop target combobox with its REFRESH button beside it. The flow
+     * catalog is a page-load snapshot ({@see flowCatalog}), so a subflow created (or renamed,
+     * enabled…) in another tab only shows up after the button DROPS the cache and re-reads it —
+     * which also refreshes the name glyphs, "Navigate to subflow", "Called by" and every panel
+     * opened afterwards. `load` (re)fills the combo from {@see invokeTargets}, keeping the current
+     * pick while it still exists; inner flows are read from the canvas each time. A failed
+     * refresh keeps the options already shown (and flashes the catalog error); the button also
+     * retries a first load that failed. `ready` settles once the first fill is done, success or not.
+     */
+    private invokeTargetPicker($combo: any, load: () => Promise<void>): {$el: any; ready: Promise<void>} {
+        const label = __('aaxis.ontology.flow_editor.subflow_refresh');
+        const $refresh = $('<button/>', {
+            type: 'button',
+            'class': 'aaxis-flow-editor__picker-refresh',
+            'data-role': 'subflow-refresh',
+            title: label,
+            'aria-label': label,
+            disabled: true
+        }).append($('<i/>', {'class': 'fa fa-refresh', 'aria-hidden': 'true'}));
+        const settle = (): void => {
+            $refresh.prop('disabled', false).find('i').removeClass('fa-spin');
+        };
+
+        $refresh.on('click', () => {
+            $refresh.prop('disabled', true).find('i').addClass('fa-spin');
+            this.catalogFlows = null;
+            this.flowCatalog()
+                .then(() => {
+                    // Subflow names in the tiles' glyphs follow the fresh catalog.
+                    this.scheduleRedraw();
+                    return load();
+                }, () => messenger.notificationFlashMessage('error', __('aaxis.ontology.flow_editor.catalog_load_error')))
+                .catch(() => undefined)
+                .finally(settle);
+        });
+
+        $combo.addClass('aaxis-flow-editor__invoke-combo');
+        return {
+            $el: $('<div/>', {'class': 'aaxis-flow-editor__invoke-picker'}).append($combo, $refresh),
+            ready: load().catch(() => undefined).finally(settle)
         };
     }
 

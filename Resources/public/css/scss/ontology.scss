@@ -3479,7 +3479,22 @@
         }
     }
 
-    &__connector-refresh {
+    // A Call Subflow / Foreach Loop target combobox + the button that re-reads the (page-load
+    // cached) flow catalog — the connector picker's look.
+    &__invoke-picker {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        min-width: 0;
+    }
+
+    &__invoke-combo {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    &__connector-refresh,
+    &__picker-refresh {
         flex: 0 0 34px;
         width: 34px;
         height: 34px;

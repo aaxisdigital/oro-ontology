@@ -724,6 +724,85 @@ describe('OntologyFlowEditorComponent — subflow pickers', () => {
         expect(tile('loop').classList.contains('is-config-invalid')).toBe(true);
     });
 
+    function $subflowRefresh(): any {
+        return $('[data-role="subflow-refresh"]');
+    }
+
+    function flowFetches(spy: any): number {
+        return spy.mock.calls.filter((c: any[]) => String(c[0]).startsWith('/aaxis_ontology_flow_list')).length;
+    }
+
+    it.each(['sub_flow', 'foreach'])('re-reads the flow catalog on refresh, keeping the pick under its new name (%s)', async type => {
+        const spy = mockFetch({aaxis_ontology_flow_list: {body: FLOWS}});
+        const editor = await open(st('s', type, 'call', 300, 0, {subflow: '20', array: 'a', item: 'i'}));
+        expect(flowFetches(spy)).toBe(1);
+        expect($subflowRefresh().prop('disabled')).toBe(false);
+        expect($subflowRefresh().attr('title')).toBe(KEY('subflow_refresh'));
+
+        routes.aaxis_ontology_flow_list = {body: {records: [
+            ...FLOWS.records.filter(f => f.id !== 20),
+            {id: 20, name: 'Zeta v2', type: 'subflow'},
+            {id: 23, name: 'beta', type: 'subflow'}
+        ]}};
+        $subflowRefresh().trigger('click');
+        expect($subflowRefresh().prop('disabled')).toBe(true);
+        expect($subflowRefresh().find('i').hasClass('fa-spin')).toBe(true);
+        await flush();
+
+        expect(flowFetches(spy)).toBe(2);
+        expect($subflowRefresh().prop('disabled')).toBe(false);
+        expect($subflowRefresh().find('i').hasClass('fa-spin')).toBe(false);
+        expect($filter().val()).toBe('Zeta v2');
+        $filter().trigger('focus').val('').trigger('input');
+        expect(optionTexts()).toEqual(['21', 'alpha', 'beta', 'Zeta v2']);
+        pick('beta');
+        confirmSettings();
+
+        expect(configOf(editor, 'call').subflow).toBe('23');
+    });
+
+    it('keeps a foreach pick made before refreshing and drops one that no longer exists', async () => {
+        mockFetch({aaxis_ontology_flow_list: {body: FLOWS}});
+        const editor = await open(st('f', 'foreach', 'loop', 300, 0, {subflow: '20', array: 'a', item: 'i'}));
+        $filter().trigger('focus').val('').trigger('input');
+        pick('alpha');
+
+        $subflowRefresh().trigger('click');
+        await flush();
+        expect($filter().val()).toBe('alpha');
+
+        routes.aaxis_ontology_flow_list = {body: {records: FLOWS.records.filter(f => f.id !== 22)}};
+        $subflowRefresh().trigger('click');
+        await flush();
+        expect($filter().val()).toBe('');
+        confirmSettings();
+
+        expect(configOf(editor, 'loop').subflow).toBe('');
+    });
+
+    it('keeps the options shown when a refresh fails, and retries a failed first load', async () => {
+        mockFetch({aaxis_ontology_flow_list: new Error('down')});
+        await open(st('s', 'sub_flow', 'call', 300, 0, {subflow: 20}));
+        expect($filter().prop('disabled')).toBe(true);
+        expect($subflowRefresh().prop('disabled')).toBe(false);
+
+        routes.aaxis_ontology_flow_list = {body: FLOWS};
+        $subflowRefresh().trigger('click');
+        await flush();
+        expect($filter().prop('disabled')).toBe(false);
+        expect($filter().val()).toBe('Zeta');
+
+        vi.mocked(messenger.notificationFlashMessage).mockClear();
+        routes.aaxis_ontology_flow_list = new Error('down again');
+        $subflowRefresh().trigger('click');
+        await flush();
+        expect(messenger.notificationFlashMessage).toHaveBeenCalledWith('error', KEY('catalog_load_error'));
+        expect($filter().val()).toBe('Zeta');
+        $filter().trigger('focus').val('').trigger('input');
+        expect(optionTexts()).toEqual(['21', 'alpha', 'Zeta']);
+        expect($subflowRefresh().prop('disabled')).toBe(false);
+    });
+
     it('treats typing in the foreach picker as reopening the choice', async () => {
         mockFetch({aaxis_ontology_flow_list: {body: FLOWS}});
         const editor = await open(st('f', 'foreach', 'loop', 300, 0, {subflow: '20', array: 'a', item: 'i'}));
