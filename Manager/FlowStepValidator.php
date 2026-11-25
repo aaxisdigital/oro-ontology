@@ -52,6 +52,9 @@ class FlowStepValidator
         // SQL Query: the SQL text and the bindings are DWL-capable too.
         ['sql_query', 'sql', 'sql_dwl'],
         ['sql_query', 'binding', 'binding_dwl'],
+        // Call Subflow / Foreach Loop: the subflow may be NAMED by an expression at run time.
+        ['sub_flow', 'subflow', 'subflow_dwl'],
+        ['foreach', 'subflow', 'subflow_dwl'],
     ];
 
     public function __construct(

@@ -216,6 +216,24 @@ describe('OntologyFlowEditorComponent — debug breakpoints', () => {
         expect(sentTo(spy, 'aaxis_ontology_flow_debug_step')[1].breakpoints).toEqual({20: ['a'], 21: ['b']});
     });
 
+    it('sends every stored subflow breakpoint when a reachable step names its subflow by expression', async () => {
+        window.localStorage.setItem(STORE, JSON.stringify({7: ['l1'], 20: ['a'], 30: ['c']}));
+        const spy = mockFetch({
+            aaxis_ontology_flow_list: {body: {records: [
+                {id: 20, name: 'Child', type: 'subflow', steps: []},
+                {id: 30, name: 'Other', type: 'subflow', steps: []}
+            ]}},
+            aaxis_ontology_flow_debug_step: queue(tick())
+        });
+        createEditor({flow: flow(7, [st('c1', 'sub_flow', 'call', 600, 0, {subflow: "'Ch' ++ 'ild'", subflow_dwl: true})])});
+        await flush();
+
+        $('[data-role="debug-step"]').trigger('click');
+        await flush();
+
+        expect(sentTo(spy, 'aaxis_ontology_flow_debug_step')[0].breakpoints).toEqual({root: ['l1'], 20: ['a'], 30: ['c']});
+    });
+
     it('remembers what ran at home when a Continue pauses inside a subflow', async () => {
         window.localStorage.setItem(STORE, JSON.stringify({20: ['w']}));
         mockFetch({

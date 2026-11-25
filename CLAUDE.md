@@ -1142,7 +1142,23 @@ tab is pickable without reloading the page; the fresh catalog also feeds the nam
 redraw is scheduled), "Navigate to subflow", "Called by" and later panels. The pick is kept by
 KEY (a renamed subflow stays picked under its new name; a deleted one is cleared), a failed
 refresh keeps the options shown (catalog_load_error flash), and the button also retries a FIRST
-load that failed (the stored target is reselected). Config stores `{subflow: <flow id>}`;
+load that failed (the stored target is reselected). COMPUTED TARGET (2026-11-25): the field
+carries the DWL switch inside its left end (`createDwlInput`, the combo PREPENDED into it like
+the Entity Read/Write name pickers; both popups are `is-medium` for the room). Switch on = the
+dropdown and its refresh give way to a single-line expression yielding the subflow's NAME at run
+time: config `{subflow: <expression>, subflow_dwl: true}` (the flag stored only while on — picked
+targets keep their old shape; never an inner flow). Server: `FlowStepConfigRules::targetOk`
+(filled expression, no `inner`; `subflow_dwl` bool), DWL_FIELDS `[sub_flow|foreach, subflow,
+subflow_dwl]`, `FlowDebugExecutor::resolveSubflowTarget($stepName, $config, $context)` →
+`resolveDwlText` + `findOneBy(['name' => …])` ("no subflow is named …"), then the usual
+type/enabled/steps/circular guards. A FOREACH evaluates it ONCE, before the first element (the
+loop variables are not bound yet — the debug walker re-enters the SAME frame per iteration);
+per-element dispatch = a foreach over an inner flow holding a computed Call Subflow. Everything
+that reads `subflow` as an id skips a computed one (`computedSubflow()` in the editor: name
+glyph, Navigate to subflow, Called by, `subflowTargetOf`), the breakpoint map sends EVERY
+stored subflow's breakpoints when a reachable step is computed (any subflow may run), and
+`FlowPortability` neither rewrites it to `subflowRef` nor refuses it as a raw id on import.
+Config stores `{subflow: <flow id>}`;
 validator arm only checks the key is a non-empty scalar (existence/type/enabled are RUNTIME
 checks — the target can change after save). Executor: `callSubflow()` loads the target and FAILS
 the run when it is missing ("no longer exists"), not TYPE_SUBFLOW, DISABLED (the flow-level

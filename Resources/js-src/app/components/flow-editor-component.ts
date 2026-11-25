@@ -7,7 +7,7 @@ import pageStateChecker from 'oronavigation/js/app/services/page-state-checker';
 import BaseComponent from 'oroui/js/app/components/base/component';
 import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import createDwlField from '../widgets/dwl-field';
-import createDwlInput from '../widgets/dwl-input';
+import createDwlInput, {type DwlInput} from '../widgets/dwl-input';
 import {apiFetch, formatDateTime} from './component-support';
 import {highlightJson, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 import {buildClipboardDoc, ClipboardDoc, parseClipboardDoc, pastedName} from '../widgets/flow-clipboard';
@@ -285,9 +285,18 @@ type MenuAddItem = (label: string, icon: string, action: () => void, opts?: {dis
 /** Adds one hover submenu with its children (see showMenuAt). */
 type MenuAddSubmenu = (label: string, icon: string, children: MenuChild[]) => void;
 
+/**
+ * Whether a Call Subflow / Foreach Loop NAMES its subflow by a DWL expression (`subflow_dwl`):
+ * `subflow` then holds that expression, resolved at run time — never a flow id.
+ */
+function computedSubflow(config: Record<string, any> | null | undefined): boolean {
+    return config?.subflow_dwl === true;
+}
+
 /** Whether a stored step definition invokes the subflow with this id (Call Subflow / Foreach). */
 function invokesSubflow(st: any, subflowId: number): boolean {
-    return Boolean(st) && (st.type === 'sub_flow' || st.type === 'foreach') && Number(st.config?.subflow || 0) === subflowId;
+    return Boolean(st) && (st.type === 'sub_flow' || st.type === 'foreach') && !computedSubflow(st.config)
+        && Number(st.config?.subflow || 0) === subflowId;
 }
 
 /** One type-specific block of the step settings popup (error() = '' when complete). */
@@ -337,9 +346,9 @@ function segmentDistance(p: Point, a: Point, b: Point): number {
     return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }
 
-/** The SUBFLOW id a stored step invokes (Call Subflow / Foreach Loop), null otherwise. */
+/** The SUBFLOW id a stored step invokes (Call Subflow / Foreach Loop), null otherwise (a computed one too). */
 function subflowTargetOf(step: any): string | null {
-    const id = (step?.type === 'sub_flow' || step?.type === 'foreach') ? step.config?.subflow : null;
+    const id = (step?.type === 'sub_flow' || step?.type === 'foreach') && !computedSubflow(step.config) ? step.config?.subflow : null;
     return id !== null && id !== undefined && String(id) !== '' ? String(id) : null;
 }
 
@@ -549,7 +558,7 @@ function invokeKeyOf(config: Record<string, any> | null | undefined): string {
     if (inner !== null) {
         return `inner:${inner}`;
     }
-    return config?.subflow ? `flow:${String(config.subflow)}` : '';
+    return config?.subflow && !computedSubflow(config) ? `flow:${String(config.subflow)}` : '';
 }
 
 /** What a picked invoke key stores: `inner` (an inner flow's step id) or `subflow` (a flow id). */
@@ -1867,8 +1876,19 @@ class OntologyFlowEditorComponent extends BaseComponent {
             ? this.steps
             : ((home.design?.steps || home.flow?.design?.steps || []) as any[]);
         const records = new Map((this.catalogFlowRecords || []).map(f => [String(f.id), f]));
-        const queue = homeSteps.map(subflowTargetOf).filter((id): id is string => id !== null);
-        const seen = new Set<string>([String((home?.flow as any)?.id ?? '')]);
+        const queue: string[] = [];
+        // A subflow NAMED by an expression is known only at run time: it may be any of them.
+        let computed = false;
+        const follow = (steps: any[]): void => steps.forEach(st => {
+            computed ||= (st?.type === 'sub_flow' || st?.type === 'foreach') && computedSubflow(st.config);
+            const next = subflowTargetOf(st);
+            if (next !== null) {
+                queue.push(next);
+            }
+        });
+        follow(homeSteps);
+        const homeId = String((home?.flow as any)?.id ?? '');
+        const seen = new Set<string>([homeId]);
         while (queue.length) {
             const id = queue.shift() as string;
             if (seen.has(id)) {
@@ -1878,8 +1898,14 @@ class OntologyFlowEditorComponent extends BaseComponent {
             if (Array.isArray(stored[id]) && stored[id].length) {
                 map[id] = stored[id];
             }
-            ((records.get(id)?.design?.steps || records.get(id)?.steps || []) as any[])
-                .map(subflowTargetOf).filter((next): next is string => next !== null).forEach(next => queue.push(next));
+            follow((records.get(id)?.design?.steps || records.get(id)?.steps || []) as any[]);
+        }
+        if (computed) {
+            Object.entries(stored).forEach(([id, ids]) => {
+                if (id !== homeId && Array.isArray(ids) && ids.length) {
+                    map[id] = ids;
+                }
+            });
         }
         return map;
     }
@@ -2067,6 +2093,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
             return box && this.isInner(box)
                 ? {name: box.name, icon: this.stepMeta[INNER_FLOW]?.icon || 'fa-object-group', open: () => this.revealStep(box)}
                 : null;
+        }
+        if (computedSubflow(step.config)) {
+            return null; // known only at run time
         }
         const id = Number(step.config?.subflow || 0);
         const record = id > 0 ? this.catalogFlowRecords?.find(f => f.id === id) : undefined;
@@ -3452,9 +3481,12 @@ class OntologyFlowEditorComponent extends BaseComponent {
             case 'sql_query':
                 return [this.sqlQuerySection($top, $body, panel, initial, $input)];
             case 'sub_flow':
-                return [this.subFlowSection($top, initial, $input, step)];
             case 'foreach':
-                return [this.foreachSection($top, initial, $input, step)];
+                // Room for the Subflow field's DWL switch AND a readable expression beside it.
+                panel.classList.add('is-medium');
+                return [step.type === 'foreach'
+                    ? this.foreachSection($top, initial, $input, step)
+                    : this.subFlowSection($top, initial, $input, step)];
             case INNER_FLOW:
                 return [this.innerFlowSection($top, $input, step)];
             case 'dwl_transform':
@@ -3634,7 +3666,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             combo.setEnabled(true);
             combo.setValue(names.find(n => keyByName[n] === selectedKey) ?? '');
         });
-        const picker = this.invokeTargetPicker(combo.$combo, load);
+        const picker = this.invokeTargetPicker(combo.$combo, initial, load);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.1),
             this.settingsCol('subflow_label', picker.$el, 1.4)
@@ -3654,12 +3686,10 @@ class OntologyFlowEditorComponent extends BaseComponent {
         }));
 
         const RESERVED = new Set(['index', 'flowuuid', 'flow-uuid', 'choiceresults']);
-        const $target = combo.$combo.find('input');
+        const $target = picker.$fields;
         return {
             ...ruled([
-                ['subflow', () => (combo.value() === '' || keyByName[combo.value()] === undefined
-                    ? __('aaxis.ontology.flow_editor.subflow_required')
-                    : '')],
+                ['subflow', () => this.invokeTargetError(picker.expression, combo.value() !== '' && keyByName[combo.value()] !== undefined)],
                 ['array', () => (String($array.val() || '').trim() === '' ? __('aaxis.ontology.flow_editor.foreach_array_required') : '')],
                 ['item', () => {
                     const item = String($item.val() || '').trim();
@@ -3672,7 +3702,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             fields: {subflow: $target, inner: $target, array: $array, item: $item},
             merge: config => ({
                 ...config,
-                ...invokeConfig(keyByName[combo.value()] ?? ''),
+                ...this.invokeTargetConfig(picker.expression, keyByName[combo.value()] ?? ''),
                 array: String($array.val() || '').trim(),
                 item: String($item.val() || '').trim()
             }),
@@ -4998,7 +5028,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             $filter.val(current ? current.name : '');
             $filter.prop('disabled', false);
         });
-        const picker = this.invokeTargetPicker($combo, load);
+        const picker = this.invokeTargetPicker($combo, initial, load);
         $top.append($('<div/>', {'class': 'aaxis-flow-editor__settings-row'}).append(
             this.settingsCol('step_name_label', $nameInput, 1.1),
             this.settingsCol('subflow_label', picker.$el, 1.4)
@@ -5050,9 +5080,9 @@ class OntologyFlowEditorComponent extends BaseComponent {
         });
 
         return {
-            ...ruled([['subflow', () => (selectedKey === '' ? __('aaxis.ontology.flow_editor.subflow_required') : '')]]),
-            fields: {subflow: $filter, inner: $filter},
-            merge: config => ({...config, ...invokeConfig(selectedKey)}),
+            ...ruled([['subflow', () => this.invokeTargetError(picker.expression, selectedKey !== '')]]),
+            fields: {subflow: picker.$fields, inner: picker.$fields},
+            merge: config => ({...config, ...this.invokeTargetConfig(picker.expression, selectedKey)}),
             ready: picker.ready
         };
     }
@@ -5066,8 +5096,23 @@ class OntologyFlowEditorComponent extends BaseComponent {
      * pick while it still exists; inner flows are read from the canvas each time. A failed
      * refresh keeps the options already shown (and flashes the catalog error); the button also
      * retries a first load that failed. `ready` settles once the first fill is done, success or not.
+     * The field also carries the DWL switch (`expression`): with it on, the dropdown and its refresh
+     * button give way to an expression naming the subflow at run time (config `subflow_dwl`).
      */
-    private invokeTargetPicker($combo: any, load: () => Promise<void>): {$el: any; ready: Promise<void>} {
+    private invokeTargetPicker($combo: any, initial: Record<string, any>, load: () => Promise<void>): {$el: any; ready: Promise<void>; expression: DwlInput; $fields: any} {
+        // The DWL switch lives INSIDE the field's left end (the HTTP Request path's switch): off =
+        // the dropdown, on = a single-line expression yielding the subflow's NAME at run time.
+        const computed = computedSubflow(initial);
+        const expression = createDwlInput({
+            value: computed ? String(initial.subflow || '') : '',
+            dwl: computed,
+            label: __('aaxis.ontology.flow_editor.subflow_label'),
+            placeholder: __('aaxis.ontology.flow_editor.subflow_dwl_placeholder'),
+            maxlength: 1024
+        });
+        const $pick = $combo.find('input').first().addClass('aaxis-dwl-input__input');
+        $combo.addClass('aaxis-flow-editor__invoke-combo');
+        expression.$el.addClass('aaxis-flow-editor__invoke-target').prepend($combo);
         const label = __('aaxis.ontology.flow_editor.subflow_refresh');
         const $refresh = $('<button/>', {
             type: 'button',
@@ -5094,11 +5139,40 @@ class OntologyFlowEditorComponent extends BaseComponent {
                 .finally(settle);
         });
 
-        $combo.addClass('aaxis-flow-editor__invoke-combo');
-        return {
-            $el: $('<div/>', {'class': 'aaxis-flow-editor__invoke-picker'}).append($combo, $refresh),
-            ready: load().catch(() => undefined).finally(settle)
+        // The refresh button belongs to the dropdown: it goes with it.
+        const sync = (): void => {
+            const on = expression.isDwl();
+            expression.$input.toggle(on);
+            $combo.toggle(!on);
+            $refresh.toggle(!on);
         };
+        expression.$toggle.on('change', sync);
+        sync();
+
+        return {
+            $el: $('<div/>', {'class': 'aaxis-flow-editor__invoke-picker'}).append(expression.$el, $refresh),
+            ready: load().catch(() => undefined).finally(settle),
+            expression,
+            $fields: $pick.add(expression.$input)
+        };
+    }
+
+    /** The Subflow field's problem: an empty expression (DWL on) or nothing picked (off). */
+    private invokeTargetError(expression: DwlInput, picked: boolean): string {
+        if (expression.isDwl()) {
+            return expression.value().trim() === '' ? __('aaxis.ontology.flow_editor.subflow_dwl_required') : '';
+        }
+        return picked ? '' : __('aaxis.ontology.flow_editor.subflow_required');
+    }
+
+    /**
+     * What the Subflow field stores: the expression + `subflow_dwl: true` while its switch is on
+     * (stored only then, so picked targets keep their old shape), else the picked key's config.
+     */
+    private invokeTargetConfig(expression: DwlInput, key: string): Record<string, any> {
+        return expression.isDwl()
+            ? {subflow: expression.value().trim(), subflow_dwl: true}
+            : invokeConfig(key);
     }
 
     /**
@@ -6263,7 +6337,7 @@ class OntologyFlowEditorComponent extends BaseComponent {
             addItem(__('aaxis.ontology.flow_editor.menu_navigate_inner_flow'), 'fa-crosshairs', () => this.revealStep(box));
             return;
         }
-        const targetId = Number(step.config?.subflow || 0);
+        const targetId = computedSubflow(step.config) ? 0 : Number(step.config?.subflow || 0);
         const record = targetId > 0
             ? this.catalogFlowRecords?.find(f => f.id === targetId && f.type === 'subflow')
             : undefined;

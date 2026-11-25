@@ -109,11 +109,18 @@ final class FlowStepConfigRules
 
     /**
      * What a Call Subflow / Foreach Loop invokes: a subflow (`subflow`, a flow id) or an inner flow
-     * of the same canvas (`inner`, the container's step id) — exactly one of the two.
+     * of the same canvas (`inner`, the container's step id) — exactly one of the two. With
+     * `subflow_dwl` on, `subflow` is instead a DWL expression yielding a subflow NAME at run time
+     * (syntax-checked as DWL separately; an inner flow cannot be named that way).
      */
     private static function targetOk(array $config): bool
     {
-        return self::selected($config, 'subflow') !== self::selected($config, 'inner');
+        if (($config['subflow_dwl'] ?? false) === true) {
+            return self::filled($config, 'subflow') && !self::selected($config, 'inner');
+        }
+
+        return self::boolOk($config, 'subflow_dwl')
+            && self::selected($config, 'subflow') !== self::selected($config, 'inner');
     }
 
     /**

@@ -149,6 +149,14 @@ abstract class FlowDebugExecutorTestCase extends TestCase
             if ($class === OntologyEntity::class) {
                 return $this->entities[$criteria['system']->getName() . '/' . $criteria['name']] ?? null;
             }
+            if ($class === OntologyFlow::class) {
+                // Flow names are unique: a computed subflow target is looked up by name.
+                foreach ($this->flows as $flow) {
+                    if ($flow->getName() === $criteria['name']) {
+                        return $flow;
+                    }
+                }
+            }
 
             return null;
         });

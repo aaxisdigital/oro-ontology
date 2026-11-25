@@ -188,7 +188,12 @@ class FlowPortability
         // Each is reported once, in the order first met.
         $pending = ['connector' => 'raw_connector_id', 'subflow' => 'raw_subflow_id'];
         foreach ($this->allConfigs($steps, $design) as $config) {
-            foreach (array_intersect_key($pending, $config) as $rawKey => $message) {
+            $raw = array_intersect_key($pending, $config);
+            if (self::computedSubflow($config)) {
+                // A DWL expression NAMING the subflow, not an id: names travel as they are.
+                unset($raw['subflow']);
+            }
+            foreach ($raw as $rawKey => $message) {
                 $errors[] = $this->trans($message);
                 unset($pending[$rawKey]);
             }
@@ -307,7 +312,7 @@ class FlowPortability
                 ];
             }
         }
-        if (\array_key_exists('subflow', $config)) {
+        if (\array_key_exists('subflow', $config) && !self::computedSubflow($config)) {
             $target = $this->doctrine->getRepository(OntologyFlow::class)->find((int) $config['subflow']);
             // A wrong-type target is exactly as broken as a missing one: the run would fail.
             if ($target === null || $target->getType() !== OntologyFlow::TYPE_SUBFLOW) {
@@ -319,6 +324,17 @@ class FlowPortability
         }
 
         return $config;
+    }
+
+    /**
+     * Whether a Call Subflow / Foreach Loop names its subflow by a DWL expression (`subflow_dwl`):
+     * `subflow` then holds that expression — resolved by name at run time, never an id to rewrite.
+     *
+     * @param array<string, mixed> $config
+     */
+    private static function computedSubflow(array $config): bool
+    {
+        return ($config['subflow_dwl'] ?? false) === true;
     }
 
     /**

@@ -803,6 +803,75 @@ describe('OntologyFlowEditorComponent — subflow pickers', () => {
         expect($subflowRefresh().prop('disabled')).toBe(false);
     });
 
+    function $dwlSwitch(): any {
+        return $('.aaxis-flow-editor__invoke-target .aaxis-dwl-input__switch input');
+    }
+
+    function $expression(): any {
+        return $('.aaxis-flow-editor__invoke-target > input.aaxis-dwl-input__input');
+    }
+
+    function shown($el: any): boolean {
+        return $el.css('display') !== 'none';
+    }
+
+    it.each([
+        ['sub_flow', {}],
+        ['foreach', {array: 'rows', item: 'row'}]
+    ])('names the subflow with a DWL expression once the switch is on (%s)', async (type, extra) => {
+        mockFetch({aaxis_ontology_flow_list: {body: FLOWS}});
+        const editor = await open(st('s', type, 'call', 300, 0, {subflow: '20', ...extra}));
+        expect($dwlSwitch().prop('checked')).toBe(false);
+        expect(shown($expression())).toBe(false);
+        expect(shown($('.aaxis-flow-editor__invoke-combo'))).toBe(true);
+        expect($expression().attr('placeholder')).toBe(KEY('subflow_dwl_placeholder'));
+
+        $dwlSwitch().prop('checked', true).trigger('change');
+        expect(shown($expression())).toBe(true);
+        expect(shown($('.aaxis-flow-editor__invoke-combo'))).toBe(false);
+        expect(shown($('[data-role="subflow-refresh"]'))).toBe(false);
+        $expression().val("  'handle-' ++ dt ").trigger('input');
+        confirmSettings();
+
+        expect(configOf(editor, 'call')).toEqual({subflow: "'handle-' ++ dt", subflow_dwl: true, ...extra});
+        expect(tile('call').classList.contains('is-config-invalid')).toBe(false);
+        // Known only at run time: no glyph after the name.
+        expect(tile('call').querySelector('[data-role="step-link"]')).toBeNull();
+    });
+
+    it('reopens a computed subflow with its expression, and switching back offers the dropdown', async () => {
+        mockFetch({aaxis_ontology_flow_list: {body: FLOWS}});
+        const editor = await open(st('s', 'sub_flow', 'call', 300, 0, {subflow: 'target', subflow_dwl: true}));
+
+        expect($dwlSwitch().prop('checked')).toBe(true);
+        expect($expression().val()).toBe('target');
+        $dwlSwitch().prop('checked', false).trigger('change');
+        expect(shown($('[data-role="subflow-refresh"]'))).toBe(true);
+        expect($filter().val()).toBe('');
+        $filter().trigger('focus');
+        pick('alpha');
+        confirmSettings();
+
+        expect(configOf(editor, 'call')).toEqual({subflow: '22'});
+    });
+
+    it.each([
+        ['sub_flow', {}],
+        ['foreach', {array: 'rows', item: 'row'}]
+    ])('marks an empty expression red (%s)', async (type, extra) => {
+        mockFetch({aaxis_ontology_flow_list: {body: FLOWS}});
+        await open(st('s', type, 'call', 300, 0, {subflow: '20', ...extra}));
+
+        $dwlSwitch().prop('checked', true).trigger('change');
+        confirmSettings();
+
+        expect(tile('call').classList.contains('is-config-invalid')).toBe(true);
+        openSettings('call');
+        await flush();
+        expect($expression().hasClass('aaxis-flow-editor__field--invalid')).toBe(true);
+        expect($expression().attr('title')).toBe(KEY('subflow_dwl_required'));
+    });
+
     it('treats typing in the foreach picker as reopening the choice', async () => {
         mockFetch({aaxis_ontology_flow_list: {body: FLOWS}});
         const editor = await open(st('f', 'foreach', 'loop', 300, 0, {subflow: '20', array: 'a', item: 'i'}));

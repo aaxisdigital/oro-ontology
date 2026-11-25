@@ -60,6 +60,18 @@ class FlowDebugExecutorDebugWalkTest extends FlowDebugExecutorTestCase
         );
     }
 
+    public function testStepsIntoASubflowNamedByAnExpression(): void
+    {
+        $steps = self::mainSteps('sub_flow', ['subflow' => "'En' ++ 'rich'", 'subflow_dwl' => true]);
+        $blob = $this->tick(null, steps: $steps)['blob'];
+        $blob = $this->tick($blob, steps: $steps)['blob'];
+
+        $entered = $this->tick($blob, steps: $steps);
+
+        self::assertSame('entered', $entered['response']['transition']);
+        self::assertSame(['flowId' => 20, 'flowName' => 'Enrich', 'depth' => 1, 'canvasDepth' => 1, 'innerId' => null], $entered['response']['frame']);
+    }
+
     public function testStepsIntoASubflowFrameByFrame(): void
     {
         $this->em->expects(self::exactly(12))->method('flush'); // start + finish stamp on every call

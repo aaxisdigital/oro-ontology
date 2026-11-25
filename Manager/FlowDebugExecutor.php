@@ -799,7 +799,7 @@ class FlowDebugExecutor
         $config = \is_array($step['config']) ? $step['config'] : [];
 
         try {
-            [$frame, $subOrder] = $this->openSubflowFrame($blob['frames'], $step, $config);
+            [$frame, $subOrder] = $this->openSubflowFrame($blob['frames'], $step, $config, $blob['context']);
             if ($step['type'] === 'foreach') {
                 [$list, $itemVar] = $this->loopItems($step['name'], $config, $blob['context']);
                 if ($list === []) {
@@ -856,13 +856,14 @@ class FlowDebugExecutor
      * The frame a sub_flow/foreach step opens (its trigger already consumed) and the subflow's
      * order — refused when too deep, circular, or the subflow is unusable/unrunnable.
      *
-     * @param array<int, array<string, mixed>> $frames the open frames
+     * @param array<int, array<string, mixed>> $frames  the open frames
      * @param array<string, mixed>             $step
      * @param array<string, mixed>             $config
+     * @param array<string, mixed>             $context what a computed subflow name is evaluated against
      *
      * @return array{0: array<string, mixed>, 1: array<int, array<string, mixed>>}
      */
-    private function openSubflowFrame(array $frames, array $step, array $config): array
+    private function openSubflowFrame(array $frames, array $step, array $config, array $context = []): array
     {
         if (\count($frames) >= 10) {
             throw new FlowExecutionFailure(sprintf(self::TOO_DEEP, $step['name']));
@@ -870,7 +871,7 @@ class FlowDebugExecutor
         if (self::targetsInner($config)) {
             return $this->openInnerFrame($frames, $step, $config);
         }
-        [$id, $target, $subStepsRaw, $subLinksRaw] = $this->resolveSubflowTarget($step['name'], $config);
+        [$id, $target, $subStepsRaw, $subLinksRaw] = $this->resolveSubflowTarget($step['name'], $config, $context);
         foreach ($frames as $open) {
             if ((int) ($open['flowId'] ?? 0) === $id && $open['kind'] !== 'flow') {
                 throw new FlowExecutionFailure(sprintf(self::CIRCULAR, $step['name'], (string) $target->getName()));
@@ -1926,7 +1927,7 @@ class FlowDebugExecutor
         if (self::targetsInner($config)) {
             return $this->runInnerFlow($stepName, $config, $context, $executionUuid, $flow);
         }
-        [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config);
+        [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config, $context);
 
         // The nested run resets the executed-ids trail (its step ids belong to ANOTHER canvas) —
         // preserve the caller's so the editor keeps painting the right tiles.
@@ -1962,7 +1963,9 @@ class FlowDebugExecutor
         if (self::targetsInner($config)) {
             return $this->foreachInnerFlow($stepName, $config, $context, $executionUuid, $flow, $list, $itemVar);
         }
-        [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config);
+        // A computed subflow name is evaluated ONCE, before the first iteration (the loop
+        // variables are not bound yet): every element runs the same subflow.
+        [$id, $target, $subSteps, $subLinks] = $this->resolveSubflowTarget($stepName, $config, $context);
         $scope = self::loopScope($itemVar, $context);
 
         $outerTrail = $this->lastExecutedIds;
@@ -2236,17 +2239,30 @@ class FlowDebugExecutor
     /**
      * Loads + guards the subflow a sub_flow/foreach step points at: must exist, be of type
      * subflow, be ENABLED, carry design steps, not already run in this execution (circular) and
-     * not nest deeper than 10 levels.
+     * not nest deeper than 10 levels. The target is the picked flow id — or, with `subflow_dwl`
+     * on, the flow NAMED by what the expression yields against `$context` (names are unique).
      *
      * @param array<string, mixed> $config
+     * @param array<string, mixed> $context
      *
      * @return array{0: int, 1: OntologyFlow, 2: array<int, mixed>, 3: array<int, mixed>}
      */
-    private function resolveSubflowTarget(string $stepName, array $config): array
+    private function resolveSubflowTarget(string $stepName, array $config, array $context = []): array
     {
-        $id = (int) ($config['subflow'] ?? 0);
-        /** @var OntologyFlow|null $target */
-        $target = $id > 0 ? $this->doctrine->getRepository(OntologyFlow::class)->find($id) : null;
+        $repository = $this->doctrine->getRepository(OntologyFlow::class);
+        if (($config['subflow_dwl'] ?? false) === true) {
+            $name = $this->resolveDwlText($stepName, 'subflow', (string) ($config['subflow'] ?? ''), true, $context);
+            /** @var OntologyFlow|null $target */
+            $target = $repository->findOneBy(['name' => $name]);
+            if ($target === null) {
+                throw new FlowExecutionFailure(sprintf('Step "%s": no subflow is named "%s".', $stepName, $name));
+            }
+            $id = (int) $target->getId();
+        } else {
+            $id = (int) ($config['subflow'] ?? 0);
+            /** @var OntologyFlow|null $target */
+            $target = $id > 0 ? $repository->find($id) : null;
+        }
         if ($target === null) {
             throw new FlowExecutionFailure(sprintf('Step "%s": the configured subflow no longer exists.', $stepName));
         }

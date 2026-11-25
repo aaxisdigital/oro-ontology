@@ -501,7 +501,7 @@ aaxis:
             foreach_array_required: 'Please name the variable holding the array.'
             foreach_item_required: 'Please name the per-element variable.'
             foreach_item_reserved: 'The variable name "{{ name }}" is reserved.'
-            foreach_hint: 'Runs the subflow once per element of the array variable — each run sees the current element under the flow variable and its 0-based position under &quot;index&quot;; everything the subflow writes stays in the flow.'
+            foreach_hint: 'Runs the subflow once per element of the array variable — each run sees the current element under the flow variable and its 0-based position under &quot;index&quot;; everything the subflow writes stays in the flow. A subflow named by a DWL expression is resolved once, before the first element.'
             invoke_php_class_label: 'Class'
             invoke_php_method_label: 'Method'
             invoke_php_params_label: 'Parameters'
@@ -531,6 +531,8 @@ aaxis:
             subflow_label: 'Subflow'
             subflow_placeholder: 'Type to filter subflows…'
             subflow_required: 'Please choose the subflow to invoke.'
+            subflow_dwl_required: 'Please enter the expression that names the subflow.'
+            subflow_dwl_placeholder: "DWL yielding the subflow's name, e.g. 'handle-' ++ dt"
             subflow_none: 'No matching subflow.'
             subflow_refresh: 'Reload subflows'
             name_unset: 'unnamed — add a trigger'

@@ -201,6 +201,24 @@ class FlowPortabilityTest extends TestCase
         self::assertSame([], $document['entities']);
     }
 
+    public function testAComputedSubflowNameTravelsAsItIs(): void
+    {
+        $steps = [
+            ['type' => 'cron', 'name' => 'Dispatch', 'config' => ['enabled' => true, 'expression' => '* * * * *']],
+            ['type' => 'sub_flow', 'name' => 'Call', 'config' => ['subflow' => "'handle-' ++ dt", 'subflow_dwl' => true]],
+            ['type' => 'foreach', 'name' => 'Loop', 'config' => ['subflow' => 'op', 'subflow_dwl' => true, 'array' => 'rows', 'item' => 'row']],
+        ];
+        $flow = (new OntologyFlow())->setName('Dispatch')->setSteps($steps)->setDesign(['version' => 2, 'steps' => $steps, 'links' => []]);
+
+        $document = $this->portability->export($flow);
+        self::assertSame($steps, $document['flow']['steps']);
+
+        // Not a raw id: the import keeps it (an id would have been refused as raw_subflow_id).
+        $imported = $this->portability->import($document);
+        self::assertSame($steps[1], $imported->getSteps()[1]);
+        self::assertSame($steps[2], $imported->getSteps()[2]);
+    }
+
     public function testExportOfAnEmptyFlow(): void
     {
         $document = $this->portability->export((new OntologyFlow())->setName('Empty'));

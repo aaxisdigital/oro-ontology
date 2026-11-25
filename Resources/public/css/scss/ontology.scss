@@ -3225,6 +3225,7 @@
 
         // Entity Read: room for its Load row's four selects (measured: 600px is the narrowest
         // width where "By attribute", a long attribute name, "DESC" and "No limit" all show).
+        // Call Subflow / Foreach Loop too: their Subflow field holds a DWL switch + expression.
         &.is-medium {
             width: 600px;
         }
@@ -3496,7 +3497,9 @@
         min-width: 0;
     }
 
-    &__invoke-combo {
+    // The Subflow field: the dropdown (or, DWL switch on, the expression) with the switch inside
+    // its left end — it takes the row; the refresh button keeps its 34px.
+    &__invoke-target {
         flex: 1 1 auto;
         min-width: 0;
     }

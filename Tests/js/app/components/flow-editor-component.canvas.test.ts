@@ -552,16 +552,21 @@ describe('OntologyFlowEditorComponent — context menus', () => {
         const caller = {...flowRecord(30, 'Caller', [st('c', 'cron', 'go', 0, 0, {enabled: true})]),
             steps: [{type: 'sub_flow', name: 'call', x: 0, y: 0, config: {subflow: 20}}]};
         const looper = {...flowRecord(31, 'A looper', []), steps: [null, {type: 'foreach', name: 'loop', config: {subflow: '20'}}]};
-        mockFetch({aaxis_ontology_flow_list: {body: {records: [child, caller, looper]}}});
+        const dynamic = {...flowRecord(32, 'Dynamic', []), steps: [{type: 'sub_flow', name: 'dyn', config: {subflow: '20', subflow_dwl: true}}]};
+        mockFetch({aaxis_ontology_flow_list: {body: {records: [child, caller, looper, dynamic]}}});
         createEditor({flow: flowRecord(10, 'Main', [
             st('t', 'cron', 'go', 0, 0, {enabled: true}),
             st('s', 'sub_flow', 'call', 200, 0, {subflow: 20}),
             st('x', 'sub_flow', 'broken', 400, 0, {subflow: 404}),
-            st('y', 'foreach', 'unset', 600, 0)
+            st('y', 'foreach', 'unset', 600, 0),
+            // An expression that happens to read like an id is still an expression.
+            st('z', 'sub_flow', 'computed', 800, 0, {subflow: '20', subflow_dwl: true})
         ])});
         await flush();
 
         contextMenu(tile('broken'));
+        expect(menuLabels()).not.toContain(MENU('menu_navigate_subflow'));
+        contextMenu(tile('computed'));
         expect(menuLabels()).not.toContain(MENU('menu_navigate_subflow'));
         contextMenu(tile('unset'));
         expect(menuLabels()).not.toContain(MENU('menu_navigate_subflow'));

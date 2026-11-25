@@ -242,6 +242,13 @@ class FlowStepValidatorTest extends TestCase
             'foreach reserved item' => ['foreach', ['subflow' => '4', 'array' => 'rows', 'item' => 'flowUuid'], false],
             'foreach without array' => ['foreach', ['subflow' => '4', 'item' => 'row'], false],
             'foreach without subflow' => ['foreach', ['array' => 'rows', 'item' => 'row'], false],
+            // A subflow NAMED by a DWL expression (`subflow_dwl`): the expression is the target.
+            'call computed subflow' => ['sub_flow', ['subflow' => "'handle-' ++ dt", 'subflow_dwl' => true], true],
+            'foreach computed subflow' => ['foreach', ['subflow' => 'op', 'subflow_dwl' => true, 'array' => 'rows', 'item' => 'row'], true],
+            'call computed subflow empty' => ['sub_flow', ['subflow' => ' ', 'subflow_dwl' => true], false],
+            'call computed subflow and inner' => ['sub_flow', ['subflow' => 'op', 'subflow_dwl' => true, 'inner' => 'sabc123'], false],
+            'call subflow switch not bool' => ['sub_flow', ['subflow' => 4, 'subflow_dwl' => 'no'], false],
+            'call picked subflow switch off' => ['sub_flow', ['subflow' => 4, 'subflow_dwl' => false], true],
             // Entity Read / Write: names picked or computed (`<key>_dwl`, booleans only).
             'entity read computed names' => ['entity_read', ['destination' => 'x', 'system' => 'payload.s', 'system_dwl' => true, 'entity' => 'e', 'entity_dwl' => false], true],
             'entity write computed entity' => ['entity_write', ['destination' => 'x', 'system' => 's', 'entity' => 'payload.e', 'entity_dwl' => true, 'content' => 'payload'], true],
@@ -322,6 +329,8 @@ class FlowStepValidatorTest extends TestCase
             'sql text' => ['sql_query', ['destination' => 'q', 'connector' => 1, 'sql' => $broken, 'sql_dwl' => true], false],
             'sql binding' => ['sql_query', ['destination' => 'q', 'connector' => 1, 'sql' => 's', 'binding' => $broken, 'binding_dwl' => true], false],
             'sql as text' => ['sql_query', ['destination' => 'q', 'connector' => 1, 'sql' => $broken, 'binding' => $broken], true],
+            'computed subflow' => ['sub_flow', ['subflow' => $broken, 'subflow_dwl' => true], false],
+            'computed foreach subflow' => ['foreach', ['subflow' => $broken, 'subflow_dwl' => true, 'array' => 'rows', 'item' => 'row'], false],
         ];
     }
 }

@@ -1285,6 +1285,79 @@ class FlowDebugExecutorTest extends FlowDebugExecutorTestCase
         ];
     }
 
+    public function testACallSubflowCanNameItsTargetWithAnExpression(): void
+    {
+        $this->subflow(20, 'handle-delivery', [
+            ['id' => 'st', 'type' => 'subflow', 'name' => 'Entry'],
+            ['id' => 'sd', 'type' => 'dwl_transform', 'name' => 'Mark', 'config' => ['code' => '"delivery handled"', 'destination' => 'result']],
+        ], [self::link('st', 'sd')]);
+        $this->subflow(21, 'handle-billing', [['id' => 'st', 'type' => 'subflow', 'name' => 'Entry']]);
+
+        $context = $this->executor->execute(
+            [self::step('t', 'cron'), self::step('call', 'sub_flow', ['subflow' => "'handle-' ++ dt", 'subflow_dwl' => true], 'Call')],
+            [self::link('t', 'call')],
+            [],
+            null,
+            null,
+            ['flowUuid' => 'u', 'dt' => 'delivery']
+        );
+
+        self::assertSame('delivery handled', $context['result']);
+        self::assertSame([['flowId' => 20, 'flowName' => 'handle-delivery', 'executedIds' => ['st', 'sd']]], $this->executor->subflowTrails());
+    }
+
+    public function testAForeachNamesItsSubflowOnceBeforeTheFirstElement(): void
+    {
+        $this->subflow(21, 'sum', [
+            ['id' => 'st', 'type' => 'subflow', 'name' => 'Entry'],
+            ['id' => 'acc', 'type' => 'dwl_transform', 'name' => 'Acc', 'config' => ['code' => 'total + item', 'destination' => 'total']],
+        ], [self::link('st', 'acc')]);
+
+        // The loop variable is NOT bound when the name is computed: `item` would be undefined.
+        $context = $this->executor->execute(
+            [self::step('t', 'cron'), self::step('loop', 'foreach', ['subflow' => 'op', 'subflow_dwl' => true, 'array' => 'items', 'item' => 'item'])],
+            [self::link('t', 'loop')],
+            [],
+            null,
+            null,
+            ['flowUuid' => 'u', 'op' => 'sum', 'total' => 0, 'items' => [2, 3]]
+        );
+
+        self::assertSame(5, $context['total']);
+        self::assertArrayNotHasKey('item', $context);
+    }
+
+    /**
+     * @dataProvider brokenComputedSubflowCalls
+     */
+    public function testComputedSubflowFailures(array $config, string $message): void
+    {
+        $this->savedFlow(30, 'Regular', OntologyFlow::TYPE_FLOW);
+        $this->subflow(31, 'Disabled', [['id' => 'x', 'type' => 'subflow']])->setEnabled(false);
+        $this->expectException(FlowStepFailure::class);
+        $this->expectExceptionMessage($message);
+
+        $this->executor->execute(
+            [self::step('t', 'cron'), self::step('s', 'sub_flow', $config + ['subflow_dwl' => true], 'Call')],
+            [self::link('t', 's')],
+            [],
+            null,
+            null,
+            ['flowUuid' => 'u', 'none' => null]
+        );
+    }
+
+    public static function brokenComputedSubflowCalls(): array
+    {
+        return [
+            'unknown name' => [['subflow' => "'ghost'"], 'Step "Call": no subflow is named "ghost".'],
+            'not text' => [['subflow' => 'none'], 'Step "Call": the subflow expression must produce a non-empty text, got null.'],
+            'regular flow' => [['subflow' => "'Regular'"], 'Step "Call": "Regular" is not a subflow (its trigger makes it a regular flow).'],
+            'disabled' => [['subflow' => "'Disabled'"], 'Step "Call": the subflow "Disabled" is disabled.'],
+            'script error' => [['subflow' => 'nope'], "Step \"Call\": Undefined variable: 'nope'"],
+        ];
+    }
+
     public function testACircularSubflowCallIsRefused(): void
     {
         $this->subflow(40, 'Loop', [
