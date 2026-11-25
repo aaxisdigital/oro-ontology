@@ -28,8 +28,10 @@ export class FakeGrid {
     }
 
     /** The action definition with the given key. */
+    /** An action by key — inside a GridAction.menu too. */
     action(key: string): any {
-        return this.options.actions.find((a: any) => a.key === key);
+        const find = (list: any[]): any => list.reduce((found: any, a: any) => found ?? (a.key === key ? a : (a.menu ? find(a.menu) : undefined)), undefined);
+        return find(this.options.actions);
     }
 }
 

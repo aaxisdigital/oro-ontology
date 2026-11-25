@@ -87,20 +87,22 @@ class OntologyEntityComponent extends BaseComponent {
         this.systemFilterApplied = false;
         this.systemCreateUrl = options.systemCreateUrl || null;
 
-        // The DWL playground is read-only (it evaluates, never writes), so viewing the page is
-        // enough — and it leads the action list, before the edit/delete icons.
+        // At most THREE icons per row: view data records (the Events page's "View flow" glyph — it
+        // leads somewhere else too), edit, and a ⋮ menu (oro-common's GridAction.menu) with the rest.
         const actions: GridAction[] = [
-            {key: 'dwl', label: __('aaxis.ontology.dwl.action'), badge: 'dwl'},
-            {key: 'data', label: __('aaxis.ontology.entity_manager.view_data'), icon: 'fa-table'}
+            {key: 'data', label: __('aaxis.ontology.entity_manager.view_data'), icon: 'fa-external-link'}
         ];
         if (options.canUpdate) {
             actions.push({key: 'edit', label: __('aaxis.common.grid.edit'), icon: 'fa-pencil'});
         }
+        // The DWL playground is read-only (it evaluates, never writes), so viewing the page is
+        // enough for it.
+        const more: GridAction[] = [{key: 'dwl', label: __('aaxis.ontology.dwl.action'), badge: 'dwl'}];
         if (options.canDelete) {
-            // Erasing records keeps the entity — sits between edit and delete. Disabled when there is
-            // nothing stored to erase: no records, or an OroCommerce (internal-system) entity, whose
-            // data is its own table (its record count is that table's size).
-            actions.push(
+            // Clean-up erases records and keeps the entity. Disabled when there is nothing stored to
+            // erase: no records, or an OroCommerce (internal-system) entity, whose data is its own
+            // table (its record count is that table's size).
+            more.push(
                 {
                     key: 'purge', label: __('aaxis.ontology.entity_manager.purge_title'), icon: 'fa-eraser',
                     variant: 'danger',
@@ -110,6 +112,7 @@ class OntologyEntityComponent extends BaseComponent {
                 {key: 'delete', label: __('aaxis.common.grid.delete'), icon: 'fa-trash-o', variant: 'danger'}
             );
         }
+        actions.push({key: 'more', label: __('aaxis.ontology.entity_manager.more_actions'), menu: more});
 
         this.grid = new DataGrid({
             columns: [

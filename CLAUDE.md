@@ -336,7 +336,12 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
   because TypeScript generates their URLs — page routes normally don't need it, which is exactly how
   this was missed the first time (runtime `The route "…" does not exist.`, nothing caught at build).
   Re-run `fos:js-routing:dump` after adding one.
-- **Entities → Data View**: the Entities grid's `data` action (fa-table, right after the `dwl` badge)
+- **Entities grid actions** (2026-11-25): AT MOST THREE icons per row — `data` (View data records,
+  `fa-external-link` like the Events page's "View flow"), `edit` (canUpdate) and `more`, a ⋮
+  dropdown (oro-common's `GridAction.menu`) holding `dwl` (badge), `purge` (labelled
+  **Clean-up**, eraser, disabled with nothing stored) and `delete` (both canDelete). `onAction`
+  receives the CHILD keys exactly as before. Test helper `FakeGrid.action(key)` searches menus.
+- **Entities → Data View**: the Entities grid's `data` action (fa-external-link, the first icon)
   navigates to `aaxis_ontology_data_view?entity=<name>`, and the page turns that into the grid's
   `entity` column filter via the widget's `setFilter()`. It passes the entity **`name`**, not
   `displayName` or the id, because that is exactly what the Data View's `entity` column holds
@@ -373,7 +378,8 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
   follows what is on screen. The OLDEST version shows its complete payload in BOTH modes with no
   change markers (everything is "new" in v1 — highlighting the whole document would be noise); a
   no-change version shows a muted note instead of an empty pane.
-- **Erase** (Entities grid, eraser between edit and delete; 2026-11-18 — it used to erase
+- **Erase / "Clean-up"** (Entities grid ⋮ menu since 2026-11-25 — labelled Clean-up, dialog
+  "Clean-up records"; the destructive button still says "Erase N records"; 2026-11-18 — it used to erase
   everything after a plain confirm) opens `widgets/erase-records.ts` (`EraseRecordsDialog`): ALL
   records, or those whose attribute matches ONE comparison. The attribute select lists the unique
   attribute first, then the configured attributes. The comparisons are = ≠ < ≤ > ≥, contains /
@@ -506,8 +512,8 @@ There is NO format selector: the script's own `output` header decides it (server
 A DataWeave scratchpad over one entity's stored records, modelled on the official DataWeave
 playground. Pieces:
 
-- **Action**: the Entities grid's first action, rendered as a text pill via the widget's new
-  `GridAction.badge` (see `../CommonBundle/CLAUDE.md`) and placed **before** edit/delete. It needs no
+- **Action**: the first entry of the Entities grid's ⋮ menu, rendered as a text pill via the
+  widget's `GridAction.badge` (see `../CommonBundle/CLAUDE.md`). It needs no
   extra ACL — the playground only evaluates, never writes, so entity VIEW (which the page already
   requires) is enough.
 - **UI**: `Resources/js-src/app/widgets/dwl-playground.ts` — a plain class (NOT a page component, so

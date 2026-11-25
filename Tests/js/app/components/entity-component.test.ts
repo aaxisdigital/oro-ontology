@@ -120,18 +120,22 @@ describe('OntologyEntityComponent', () => {
         });
 
         it.each([
-            [{canUpdate: true, canDelete: true}, ['dwl', 'data', 'edit', 'purge', 'delete']],
-            [{canUpdate: true, canDelete: false}, ['dwl', 'data', 'edit']],
-            [{canUpdate: false, canDelete: true}, ['dwl', 'data', 'purge', 'delete']],
-            [{canUpdate: false, canDelete: false}, ['dwl', 'data']]
-        ])('offers only the permitted actions for %j', (perms, expected) => {
+            [{canUpdate: true, canDelete: true}, ['data', 'edit', 'more'], ['dwl', 'purge', 'delete']],
+            [{canUpdate: true, canDelete: false}, ['data', 'edit', 'more'], ['dwl']],
+            [{canUpdate: false, canDelete: true}, ['data', 'more'], ['dwl', 'purge', 'delete']],
+            [{canUpdate: false, canDelete: false}, ['data', 'more'], ['dwl']]
+        ])('offers at most three icons, the rest in the menu, for %j', (perms, icons, menu) => {
             const {grid} = mount(perms);
 
-            expect(grid.options.actions.map((a: any) => a.key)).toEqual(expected);
+            expect(grid.options.actions.map((a: any) => a.key)).toEqual(icons);
+            expect(grid.action('more').menu.map((a: any) => a.key)).toEqual(menu);
+            expect(grid.action('more').label).toBe('aaxis.ontology.entity_manager.more_actions');
         });
 
-        it('shows DWL as a badge and disables Purge when there is nothing to erase', () => {
+        it('shows View data with the "leads elsewhere" glyph, DWL as a badge, and disables Clean-up when there is nothing to erase', () => {
             const {grid} = mount();
+
+            expect(grid.action('data').icon).toBe('fa-external-link');
 
             expect(grid.action('dwl').badge).toBe('dwl');
             expect(grid.action('purge').variant).toBe('danger');
