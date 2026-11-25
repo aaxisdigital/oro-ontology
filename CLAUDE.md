@@ -1972,7 +1972,13 @@ that answers "is this connector file-based".
   folders, so a bucket path counts as a folder when EMPTY or ending in `/`, and as an object key
   otherwise — a bucket "folder" read is a prefix listing (delimiter `/`, `CommonPrefixes` reported
   as `type: folder`). Consequence: a listed folder's `path` KEEPS its trailing slash so it can be
-  fed straight back into the next step; file_system/sftp tolerate the slash.
+  fed straight back into the next step; file_system/sftp tolerate the slash. A slash-less key
+  that is NO object (404 NoSuchKey — not a missing bucket) is then probed as `<key>/`: keys under
+  it (or just its zero-byte folder marker) make it that folder, listed like the slash form
+  (2026-11-25 — List Folder on `'message-forward-prod/' ++ dt` answered "Object … does not
+  exist" while local/sftp listed the directory). Nothing under it, or a failed probe, keeps the
+  "Object … does not exist" isError. Asymmetry left on purpose: WITH the slash, a prefix holding
+  nothing lists `[]` (object storage cannot tell an empty folder from a missing one).
 - **File content is NOT JSON-decoded** (again unlike the rest_api reader): a file's type is not
   knowable from the transport, so the raw string is handed over and a DWL step parses it with
   `read(content, "application/json" | "application/csv" | "application/xml")` — **or the author

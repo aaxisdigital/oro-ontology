@@ -234,23 +234,76 @@ class FileConnectorTransferBucketTest extends TestCase
     /**
      * @dataProvider notFoundProvider
      */
-    public function testAMissingObjectAndAMissingBucketAreToldApart(string $body, string $message): void
+    public function testAMissingObjectAndAMissingBucketAreToldApart(string $body, string $message, int $requests): void
     {
         $this->respond(404, $body);
+        // A missing object is first probed as a folder: nothing under "reports/x.csv/".
+        $this->respond(200, '<ListBucketResult ' . self::NS . '/>');
 
         self::assertFailure($this->transfer->read($this->connector(), 'reports/x.csv'), $message);
+        self::assertCount($requests, $this->requests);
     }
 
     /**
-     * @return array<string, array{string, string}>
+     * @return array<string, array{string, string, int}>
      */
     public static function notFoundProvider(): array
     {
         return [
-            'no such key' => ['<Error><Code>NoSuchKey</Code></Error>', 'Object "reports/x.csv" does not exist in bucket "data".'],
-            'no body' => ['', 'Object "reports/x.csv" does not exist in bucket "data".'],
-            'aws bucket' => ['<Error><Code>NoSuchBucket</Code></Error>', 'Bucket "data" does not exist on this endpoint.'],
-            'oci bucket' => ['<Error><Code>BucketNotFound</Code></Error>', 'Bucket "data" does not exist on this endpoint.'],
+            'no such key' => ['<Error><Code>NoSuchKey</Code></Error>', 'Object "reports/x.csv" does not exist in bucket "data".', 2],
+            'no body' => ['', 'Object "reports/x.csv" does not exist in bucket "data".', 2],
+            'aws bucket' => ['<Error><Code>NoSuchBucket</Code></Error>', 'Bucket "data" does not exist on this endpoint.', 1],
+            'oci bucket' => ['<Error><Code>BucketNotFound</Code></Error>', 'Bucket "data" does not exist on this endpoint.', 1],
+        ];
+    }
+
+    public function testAKeyWithKeysUnderItListsAsAFolderWithoutTheTrailingSlash(): void
+    {
+        $this->respond(404, '<Error><Code>NoSuchKey</Code></Error>');
+        $this->respond(200, '<?xml version="1.0"?><ListBucketResult ' . self::NS . '>'
+            . '<CommonPrefixes><Prefix>in/delivery/old/</Prefix></CommonPrefixes>'
+            . '<Contents><Key>in/delivery/</Key><Size>0</Size></Contents>'
+            . '<Contents><Key>in/delivery/a.json</Key><Size>7</Size></Contents>'
+            . '</ListBucketResult>');
+
+        $items = $this->transfer->read($this->connector(), 'in/delivery');
+
+        self::assertSame(['a.json', 'old'], array_column($items, 'name'));
+        self::assertSame(['in/delivery/a.json', 'in/delivery/old/'], array_column($items, 'path'));
+        self::assertSame(['file', 'folder'], array_column($items, 'type'));
+        self::assertSame('GET', $this->requests[0]['method']);
+        self::assertStringEndsWith('/data/in/delivery', $this->requests[0]['url']);
+        self::assertStringEndsWith('&prefix=in%2Fdelivery%2F', $this->requests[1]['url']);
+    }
+
+    public function testAFolderHoldingOnlyItsMarkerListsEmpty(): void
+    {
+        $this->respond(404);
+        $this->respond(200, '<ListBucketResult ' . self::NS . '><Contents><Key>in/empty/</Key><Size>0</Size></Contents></ListBucketResult>');
+
+        self::assertSame([], $this->transfer->read($this->connector(), 'in/empty'));
+    }
+
+    /**
+     * @dataProvider failedProbeProvider
+     */
+    public function testAFailedFolderProbeLeavesTheMissingObjectAnswer(MockResponse|\Throwable $probe): void
+    {
+        $this->respond(404);
+        $this->responses[] = $probe;
+
+        self::assertFailure($this->transfer->read($this->connector(), 'in/x'), 'Object "in/x" does not exist in bucket "data".');
+    }
+
+    /**
+     * @return array<string, array{MockResponse|\Throwable}>
+     */
+    public static function failedProbeProvider(): array
+    {
+        return [
+            'refused' => [new MockResponse('<Error><Code>AccessDenied</Code></Error>', ['http_code' => 403])],
+            'unreadable' => [new MockResponse('not xml', ['http_code' => 200])],
+            'transport' => [new \RuntimeException('Could not resolve host')],
         ];
     }
 

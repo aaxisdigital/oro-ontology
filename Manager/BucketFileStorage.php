@@ -11,7 +11,9 @@ use Symfony\Contracts\HttpClient\HttpClientInterface;
 /**
  * The bucket storage (S3-compatible object storage, path-style addressing, SigV4-signed requests).
  * Object storage has no folders: a path is a folder when it is EMPTY or ends with `/` (a prefix
- * listing with delimiter `/`), an object key otherwise.
+ * listing with delimiter `/`), an object key otherwise — and a key that is NO object but has keys
+ * under `<key>/` reads as that folder too, the way a directory does on the other storages (List
+ * Folder on `in/2026` must not need the trailing slash).
  */
 class BucketFileStorage extends FileStorage
 {
@@ -30,7 +32,7 @@ class BucketFileStorage extends FileStorage
 
         // No folders in object storage: an empty path or a trailing slash means "list this prefix".
         if ($path === '' || str_ends_with($path, '/')) {
-            return $this->listBucket($endpoint, $path);
+            return $this->listingItems($this->bucketListing($endpoint, $path), $path);
         }
 
         [$status, $body] = $this->bucketRequest($endpoint, 'GET', $path, [], null);
@@ -39,10 +41,12 @@ class BucketFileStorage extends FileStorage
             // apart, and blaming the object for a wrong bucket name sends the reader hunting in the
             // wrong place. (OCI says BucketNotFound, AWS NoSuchBucket.)
             $code = (string) ($this->parseXml($body)?->Code ?? '');
+            if (stripos($code, 'bucket') !== false) {
+                throw new ConnectorTransferFailure(sprintf('Bucket "%s" does not exist on this endpoint.', $endpoint['bucket']));
+            }
 
-            throw new ConnectorTransferFailure(stripos($code, 'bucket') !== false
-                ? sprintf('Bucket "%s" does not exist on this endpoint.', $endpoint['bucket'])
-                : sprintf('Object "%s" does not exist in bucket "%s".', $path, $endpoint['bucket']));
+            return $this->folderListing($endpoint, $path)
+                ?? throw new ConnectorTransferFailure(sprintf('Object "%s" does not exist in bucket "%s".', $path, $endpoint['bucket']));
         }
         if ($status >= 400) {
             throw new ConnectorTransferFailure($this->bucketHttpMessage($status, $path, $body));
@@ -131,11 +135,35 @@ class BucketFileStorage extends FileStorage
     }
 
     /**
+     * The listing of `<path>/` when `path` is no object but a "folder" — keys exist under it (a
+     * zero-byte `<path>/` folder marker counts: that is how consoles create empty folders). Null
+     * when nothing is there, and when the probe itself fails: it only decides between "folder"
+     * and "missing object", so a refused or unreadable probe leaves the missing-object answer.
+     *
      * @param array{scheme: string, host: string, bucket: string, region: string, accessKey: string, secretKey: string} $endpoint
      *
-     * @return list<array<string, mixed>>
+     * @return list<array<string, mixed>>|null
      */
-    private function listBucket(array $endpoint, string $prefix): array
+    private function folderListing(array $endpoint, string $path): ?array
+    {
+        $prefix = $path . '/';
+        try {
+            $root = $this->bucketListing($endpoint, $prefix);
+        } catch (ConnectorTransferFailure) {
+            return null;
+        }
+
+        return \count($root->CommonPrefixes) > 0 || \count($root->Contents) > 0
+            ? $this->listingItems($root, $prefix)
+            : null;
+    }
+
+    /**
+     * One page (≤ 1000 keys) of the prefix listing with delimiter `/`: the folder's own level only.
+     *
+     * @param array{scheme: string, host: string, bucket: string, region: string, accessKey: string, secretKey: string} $endpoint
+     */
+    private function bucketListing(array $endpoint, string $prefix): \SimpleXMLElement
     {
         $query = ['list-type' => '2', 'delimiter' => '/', 'max-keys' => '1000'];
         if ($prefix !== '') {
@@ -146,11 +174,15 @@ class BucketFileStorage extends FileStorage
             throw new ConnectorTransferFailure($this->bucketHttpMessage($status, $prefix, $body));
         }
 
-        $root = $this->parseXml($body);
-        if ($root === null) {
-            throw new ConnectorTransferFailure(sprintf('Bucket "%s" returned an unreadable listing.', $endpoint['bucket']));
-        }
+        return $this->parseXml($body)
+            ?? throw new ConnectorTransferFailure(sprintf('Bucket "%s" returned an unreadable listing.', $endpoint['bucket']));
+    }
 
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function listingItems(\SimpleXMLElement $root, string $prefix): array
+    {
         $items = [];
         foreach ($root->CommonPrefixes as $common) {
             $name = $this->keyLeaf((string) $common->Prefix, $prefix);
