@@ -20,6 +20,7 @@ describe('OntologyDataViewComponent — version viewer', () => {
 
     beforeEach(async () => {
         resetFakes();
+        window.localStorage.clear();
         component = mountDataView().component;
         await flush();
         $content = $('<div/>').appendTo(document.body);
@@ -37,7 +38,8 @@ describe('OntologyDataViewComponent — version viewer', () => {
     const $error = () => $content.find('.aaxis-json-version__error');
     const $search = () => $content.find('.aaxis-json-search__input');
     const $count = () => $content.find('.aaxis-json-search__count');
-    const $diff = () => $content.find('.aaxis-json-mode__check');
+    const $diff = () => $content.find('[data-role="diff-only"]');
+    const $wrap = () => $content.find('[data-role="wrap-lines"]');
     const label = (v: any, current = false) =>
         ['v' + v.version, v.updatedAt ? new Date(v.updatedAt).toLocaleString() : '', v.uuid]
             .filter(part => part !== '').join(' — ')
@@ -387,6 +389,82 @@ describe('OntologyDataViewComponent — version viewer', () => {
 
             expect($pre().find('mark')).toHaveLength(2);
             expect($pre().text()).toContain('banana');
+        });
+    });
+
+    describe('wrap lines', () => {
+        it('sits after Copy, unwrapped by default, and wraps the JSON while on', () => {
+            render([V3, V2, V1]);
+
+            const footer = $content.find('.aaxis-json-footer--tools').children().get();
+            expect(footer.map((el: HTMLElement) => el.className)).toEqual([
+                'aaxis-json-search', 'btn btn-sm aaxis-json-copy', 'aaxis-json-mode aaxis-json-wrap'
+            ]);
+            expect($content.find('.aaxis-json-wrap').attr('title')).toBe('aaxis.ontology.data_view.wrap_lines_hint');
+            expect($content.find('.aaxis-json-wrap .aaxis-json-mode__label').text()).toBe('aaxis.ontology.data_view.wrap_lines');
+            expect($wrap().prop('checked')).toBe(false);
+            expect($pre().hasClass('is-wrapped')).toBe(false);
+
+            $wrap().prop('checked', true).trigger('change');
+            expect($pre().hasClass('is-wrapped')).toBe(true);
+            type('1');
+            expect($pre().hasClass('is-wrapped')).toBe(true);
+
+            $wrap().prop('checked', false).trigger('change');
+            expect($pre().hasClass('is-wrapped')).toBe(false);
+        });
+
+        it('is remembered for the next dialog', () => {
+            render([V3, V2]);
+            $wrap().prop('checked', true).trigger('change');
+            expect(window.localStorage.getItem('aaxis.ontology.dataView.wrapLines')).toBe('1');
+
+            const $other = $('<div/>').appendTo(document.body);
+            component.renderVersions($other, [V3, V2]);
+            expect($other.find('[data-role="wrap-lines"]').prop('checked')).toBe(true);
+            expect($other.find('.aaxis-json-view').hasClass('is-wrapped')).toBe(true);
+
+            $wrap().prop('checked', false).trigger('change');
+            expect(window.localStorage.getItem('aaxis.ontology.dataView.wrapLines')).toBe('0');
+        });
+
+        it('falls back to unwrapped when the storage refuses, and still toggles', () => {
+            vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+                throw new Error('denied');
+            });
+            vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+                throw new Error('denied');
+            });
+            render([V3]);
+            expect($wrap().prop('checked')).toBe(false);
+
+            $wrap().prop('checked', true).trigger('change');
+            expect($pre().hasClass('is-wrapped')).toBe(true);
+            vi.restoreAllMocks();
+        });
+
+        it('keeps the current search match in view after the lines move', () => {
+            const scrollIntoView = vi.fn();
+            (Element.prototype as any).scrollIntoView = scrollIntoView;
+            render([V3, V2, V1]);
+            $search().val('a').trigger('input');
+            $search().trigger($.Event('keydown', {key: 'Enter'}));
+            const count = $count().text();
+            scrollIntoView.mockClear();
+
+            $wrap().prop('checked', true).trigger('change');
+
+            expect(scrollIntoView).toHaveBeenCalledTimes(1);
+            expect($count().text()).toBe(count);
+        });
+
+        it('leaves a search with no matches alone', () => {
+            render([V3]);
+            $search().val('zzz').trigger('input');
+
+            $wrap().prop('checked', true).trigger('change');
+
+            expect($count().text()).toBe('0 / 0');
         });
     });
 

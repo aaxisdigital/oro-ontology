@@ -155,6 +155,8 @@ aaxis:
             version_not_found: 'No matching version'
             diff_only: 'Diff only'
             diff_only_hint: 'Show only what changed from the previous version, instead of the full payload'
+            wrap_lines: 'Wrap lines'
+            wrap_lines_hint: 'Break long lines to fit the width, instead of scrolling sideways'
             diff_no_changes: 'Nothing changed in this version.'
             payload_preview: 'Preview payload'
             payload_title: 'Payload'

@@ -10,6 +10,29 @@ import Dialog from 'aaxiscommon/js/app/widgets/dialog';
 import {apiFetch, bindGridToolbar, formatDateTime, setRefreshBusy, takeQueryParam} from './component-support';
 import {escapeHtml, highlightJson, isPlainObject, pruneToDiff, renderVersionDiffHtml} from '../widgets/json-diff';
 
+/**
+ * The versions dialog's "Wrap lines" choice — a viewing preference shared by every record and
+ * remembered across visits (never part of any data). Storage refused (private mode, quota) just
+ * falls back to the default: no wrapping.
+ */
+const WRAP_LINES_KEY = 'aaxis.ontology.dataView.wrapLines';
+
+function wrapLinesPreferred(): boolean {
+    try {
+        return window.localStorage.getItem(WRAP_LINES_KEY) === '1';
+    } catch {
+        return false;
+    }
+}
+
+function rememberWrapLines(on: boolean): void {
+    try {
+        window.localStorage.setItem(WRAP_LINES_KEY, on ? '1' : '0');
+    } catch {
+        // Storage refused: the choice lasts for this dialog only.
+    }
+}
+
 interface OntologyDataViewOptions {
     _sourceElement: any;
     canCreate?: boolean;
@@ -257,7 +280,7 @@ class OntologyDataViewComponent extends BaseComponent {
             'aria-label': __('aaxis.ontology.data_view.search_next')
         }).append($('<span/>', {'class': 'fa fa-chevron-down', 'aria-hidden': 'true'}));
         // Full view ⇄ diff only. Sits before the search box, since it decides WHAT is searchable.
-        const $diffToggle = $('<input/>', {type: 'checkbox', 'class': 'aaxis-json-mode__check'});
+        const $diffToggle = $('<input/>', {type: 'checkbox', 'class': 'aaxis-json-mode__check', 'data-role': 'diff-only'});
         const $mode = $('<label/>', {
             'class': 'aaxis-json-mode', title: __('aaxis.ontology.data_view.diff_only_hint')
         }).append(
@@ -276,10 +299,23 @@ class OntologyDataViewComponent extends BaseComponent {
             $('<span/>', {'class': 'fa fa-clipboard', 'aria-hidden': 'true'}),
             $('<span/>', {text: ' ' + __('aaxis.ontology.data_view.copy')})
         );
-        // Search and Copy share the bottom row: both act on the JSON above them, so they belong
-        // together under it rather than split across the top and bottom of the dialog.
+        // Wrap lines: a long value breaks onto the next lines instead of needing the horizontal
+        // scrollbar (same switch look as Diff only).
+        const $wrapToggle = $('<input/>', {type: 'checkbox', 'class': 'aaxis-json-mode__check', 'data-role': 'wrap-lines'})
+            .prop('checked', wrapLinesPreferred());
+        const $wrap = $('<label/>', {
+            'class': 'aaxis-json-mode aaxis-json-wrap', title: __('aaxis.ontology.data_view.wrap_lines_hint')
+        }).append(
+            $wrapToggle,
+            $('<span/>', {'class': 'aaxis-json-mode__track', 'aria-hidden': 'true'})
+                .append($('<span/>', {'class': 'aaxis-json-mode__thumb'})),
+            $('<span/>', {'class': 'aaxis-json-mode__label', text: __('aaxis.ontology.data_view.wrap_lines')})
+        );
+        $pre.toggleClass('is-wrapped', $wrapToggle.is(':checked'));
+        // Search, Copy and Wrap lines share the bottom row: they act on the JSON above them, so
+        // they belong together under it rather than split across the top and bottom of the dialog.
         const $footer = $('<div/>', {'class': 'aaxis-json-footer aaxis-json-footer--tools'})
-            .append($searchGroup, $copy);
+            .append($searchGroup, $copy, $wrap);
 
         // A single-version record has nothing to navigate between — no slider at all.
         $content.append($selectField);
@@ -445,6 +481,15 @@ class OntologyDataViewComponent extends BaseComponent {
         $prev.on('click', () => setCurrent(current_match - 1));
         $next.on('click', () => setCurrent(current_match + 1));
         $copy.on('click', () => this.copyToClipboard(plainText));
+        $wrapToggle.on('change', () => {
+            const on = $wrapToggle.is(':checked');
+            $pre.toggleClass('is-wrapped', on);
+            rememberWrapLines(on);
+            // The lines moved: bring the current search match back into view.
+            if ($pre.find('.aaxis-json-mark').length) {
+                setCurrent(current_match);
+            }
+        });
 
         select(0);
     }

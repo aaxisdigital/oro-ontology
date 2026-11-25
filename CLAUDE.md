@@ -354,7 +354,12 @@ page is the exception — it uses a normal Oro datagrid + server-side CRUD.
   since the count is per record). Box and slider are two views of one `selectedIndex` — everything
   goes through `select()`, so they can't drift.
   Search + prev/next live in the **bottom row next to Copy** (`.aaxis-json-footer--tools`), since
-  both act on the JSON above them, preceded by a **Full view ⇄ Diff only** switch.
+  both act on the JSON above them, preceded by a **Full view ⇄ Diff only** switch
+  (`data-role="diff-only"`) and followed by a **Wrap lines** switch (`data-role="wrap-lines"`,
+  2026-11-25): the pane gets `is-wrapped` (`white-space: pre-wrap` + `overflow-wrap: anywhere`,
+  so an unbroken uuid/base64 breaks too) instead of the horizontal scrollbar. A VIEWING
+  preference remembered in localStorage (`aaxis.ontology.dataView.wrapLines`, '1'/'0'; refused
+  storage = off), default OFF; toggling re-scrolls the current search match into view.
 - **Diff only** reuses the normal diff renderer on a PRUNED pair of snapshots (`pruneToDiff()`)
   rather than filtering the rendered lines — a changed object/array is wrapped in ONE highlight span
   covering many lines, so line filtering would emit unbalanced HTML. Objects prune key by key and

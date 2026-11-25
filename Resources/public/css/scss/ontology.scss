@@ -553,7 +553,8 @@
         min-width: 0;
     }
 
-    .aaxis-json-copy {
+    .aaxis-json-copy,
+    .aaxis-json-wrap {
         flex: 0 0 auto;
     }
 }
@@ -581,6 +582,13 @@
     overflow: auto;
     max-height: 60vh;
     color: #2b3a4a;
+
+    // "Wrap lines" (versions dialog): long lines continue below, indentation kept; a long
+    // unbroken token (a uuid, base64…) breaks too, so nothing needs the horizontal scrollbar.
+    &.is-wrapped {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
 }
 
 // Collapsible JSON tree (the flow debug result): carries .aaxis-json-view for the frame and the
